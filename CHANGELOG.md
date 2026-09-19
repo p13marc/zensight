@@ -477,6 +477,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Cardinality caps locked out the innocent** (#1145). At `max_series` both
+  exporters refused **all** new series, with no per-producer quota and no
+  attribution beyond one `warn!` naming nobody. A producer leaking a
+  per-request label reached the cap on its own, and from that moment a host
+  joining the fleet exported **nothing at all** until the staleness sweep
+  happened to free a slot.
+
+  A producer may now hold `max - max / n` series, where `n` is how many
+  producers currently hold any — so one share is always out of a single
+  producer's reach. It is **derived, not configured**: a fixed share would
+  silently halve a deployment that runs one sensor, and a knob whose right
+  value depends on who happens to be on the bus is a knob nobody can set. One
+  producer alone keeps the whole cap; with two, each may hold half; with
+  three, two thirds. It is deliberately not strict fairness — a producer may
+  use what others are not using, up to that reserve, because refusing a busy
+  producer while most of the budget sits idle is another way of throwing
+  telemetry away.
+
+  Refusals are counted **per producer** and the Prometheus exporter publishes
+  them as `<prefix>_exporter_series_refused_total{producer=…}`, absent
+  entirely when nothing has been refused. "Who is filling the budget" is a
+  query now rather than a guess from an unlabelled log line.
+
+- **correlator: the evidence store had no cap at all** (#1145). It was the one
+  per-key store in the crate without one, beside `MAX_IPS`, `MAX_RELATIONS`
+  and `MAX_FIRING` — each of which says why it has one. netring publishes one
+  `evidence/device/<mac>` per observed L2 asset, so a flat segment is
+  thousands of claims, every one re-merged on each debounce with the `mac_ip`
+  rule quadratic inside a MAC bucket. Bounded at `MAX_EVIDENCE` (50 000), and
+  past it the claim with the oldest `last_updated` is evicted — the one the
+  TTL sweep would have taken next anyway. Without the cap the test holds
+  50 101 claims.
 - **exporter-otel: three things keyed by origin that never shrank** (#1146).
 
   **The alert-span tracker ratcheted.** A `Resolved` was the only thing that

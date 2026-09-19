@@ -91,6 +91,9 @@ pub struct StoredMetric {
     /// The resolved unit, appended to `# HELP` when it did not become a name
     /// suffix.
     pub unit: Option<String>,
+    /// Which producer published it — the quota dimension (#1145), and the
+    /// label on the refusal counter.
+    pub producer: &'static str,
     /// When this metric was last updated.
     pub last_updated: Instant,
     /// Original timestamp from the telemetry point.
@@ -139,6 +142,7 @@ impl StoredMetric {
             text_label,
             help: identity.description.clone(),
             unit: identity.unit.clone(),
+            producer: point.protocol.as_str(),
             last_updated: Instant::now(),
             timestamp_ms: point.timestamp,
         })
@@ -289,6 +293,9 @@ pub struct CollectorStats {
     pub points_not_exportable: u64,
     /// Points rejected because max_series was reached.
     pub points_dropped_max_series: u64,
+    /// New series refused, by producer (#1145) — the attribution the single
+    /// `warn!` never carried.
+    pub series_refused_by_producer: HashMap<String, u64>,
     /// Number of stale metrics removed.
     pub stale_metrics_removed: u64,
     /// Number of render errors (write failures during exposition).
@@ -456,16 +463,55 @@ impl MetricCollector {
         // Update or insert the metric
         let mut metrics = self.metrics.write();
 
-        // Check if we're at max capacity and this is a new series
-        if !metrics.contains_key(&key) && metrics.len() >= self.aggregation_config.max_series {
-            drop(metrics);
-            let mut stats = self.stats.write();
-            stats.points_dropped_max_series += 1;
-            warn!(
-                max_series = self.aggregation_config.max_series,
-                "Max series limit reached, dropping new metric"
-            );
-            return;
+        // A NEW series has to fit twice: under the global cap, and under this
+        // producer's own share of it (#1145).
+        //
+        // The global cap alone does not bound WHO fills it. One producer
+        // leaking a per-request label reached `max_series` by itself, and from
+        // that moment every new series was refused — so a host joining the
+        // fleet afterwards exported nothing at all until the staleness sweep
+        // happened to free a slot, and the only trace was one `warn!` naming
+        // no producer.
+        if !metrics.contains_key(&key) {
+            let producer = point.protocol.as_str();
+            let mut held = 0usize;
+            let mut producers: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            for m in metrics.values() {
+                producers.insert(m.producer);
+                if m.producer == producer {
+                    held += 1;
+                }
+            }
+            producers.insert(producer);
+            let quota = self.producer_quota(producers.len());
+            let over_global = metrics.len() >= self.aggregation_config.max_series;
+            let over_quota = held >= quota;
+            if over_global || over_quota {
+                drop(metrics);
+                let mut stats = self.stats.write();
+                stats.points_dropped_max_series += 1;
+                // ATTRIBUTION (#1145). One counter per producer, exported as
+                // `<prefix>_exporter_series_refused_total{producer=…}`, so
+                // "who is filling the budget" is a query rather than a guess
+                // from one unlabelled log line.
+                *stats
+                    .series_refused_by_producer
+                    .entry(producer.to_string())
+                    .or_insert(0) += 1;
+                warn!(
+                    producer,
+                    held,
+                    quota,
+                    max_series = self.aggregation_config.max_series,
+                    reason = if over_quota {
+                        "producer quota"
+                    } else {
+                        "global cap"
+                    },
+                    "Refusing a new series"
+                );
+                return;
+            }
         }
 
         metrics.insert(key, stored);
@@ -473,6 +519,36 @@ impl MetricCollector {
 
         let mut stats = self.stats.write();
         stats.points_accepted += 1;
+    }
+
+    /// The most series one producer may hold, given who else is here (#1145).
+    ///
+    /// `max_series - max_series / n`, where `n` is the number of producers
+    /// currently holding series. One share is kept out of any single
+    /// producer's reach, so a producer leaking a per-request label cannot take
+    /// the whole budget and lock out everyone else.
+    ///
+    /// **A single producer keeps the whole cap**, which is why this is derived
+    /// rather than configured: a fixed share would silently halve a deployment
+    /// that runs one sensor, and a knob whose right value depends on how many
+    /// producers happen to be on the bus is a knob nobody can set.
+    ///
+    /// | producers | quota | reserved for the rest |
+    /// |---|---|---|
+    /// | 1 | all of it | — |
+    /// | 2 | a half | a half |
+    /// | 3 | two thirds | a third |
+    ///
+    /// It is not strict fairness: a producer may use what others are not
+    /// using, up to that reserve. Strict fairness would refuse a busy producer
+    /// while most of the budget sat idle, which is a different way of throwing
+    /// telemetry away.
+    fn producer_quota(&self, producers_present: usize) -> usize {
+        let max = self.aggregation_config.max_series;
+        if producers_present <= 1 {
+            return max;
+        }
+        (max - max / producers_present).max(1)
     }
 
     /// Remove stale metrics.
@@ -693,6 +769,37 @@ impl MetricCollector {
             self.prometheus_config.prefix,
             stats.points_filtered
         );
+
+        // WHO filled the budget (#1145). Absent entirely when nothing has been
+        // refused, so a healthy exporter's `/metrics` does not carry a family
+        // of zeroes — and a non-empty one is the query an operator runs
+        // instead of grepping for a `warn!` that named no producer.
+        if !stats.series_refused_by_producer.is_empty() {
+            write_or_count!(
+                output,
+                "# HELP {}_exporter_series_refused_total New series refused by the cardinality budget, by producer.",
+                self.prometheus_config.prefix
+            );
+            write_or_count!(
+                output,
+                "# TYPE {}_exporter_series_refused_total counter",
+                self.prometheus_config.prefix
+            );
+            let mut by_producer: Vec<(&String, &u64)> =
+                stats.series_refused_by_producer.iter().collect();
+            // Sorted: the group's order must not depend on hash iteration
+            // (#1144, one family over).
+            by_producer.sort_by(|a, b| a.0.cmp(b.0));
+            for (producer, refused) in by_producer {
+                write_or_count!(
+                    output,
+                    "{}_exporter_series_refused_total{{producer=\"{}\"}} {}",
+                    self.prometheus_config.prefix,
+                    escape_label_value(producer),
+                    refused
+                );
+            }
+        }
 
         // Record render errors in stats
         if render_errors > 0 {
@@ -1307,6 +1414,118 @@ mod tests {
 
         assert_eq!(collector.series_count(), 2);
         assert_eq!(collector.stats().points_dropped_max_series, 3);
+    }
+
+    /// **#1145, the acceptance.** One chatty producer cannot fill the whole
+    /// budget and lock out everyone else.
+    ///
+    /// At `max_series` ALL new series were refused, with no per-producer
+    /// quota and no attribution beyond a single `warn!` naming nobody. A
+    /// producer leaking a per-request label reached the cap on its own, and
+    /// from that moment a host joining the fleet exported **nothing at all**
+    /// until the staleness sweep happened to free a slot.
+    #[test]
+    fn a_leaking_producer_cannot_lock_out_the_others() {
+        let collector = MetricCollector::new(
+            PrometheusConfig::default(),
+            AggregationConfig {
+                max_series: 10,
+                ..Default::default()
+            },
+            FilterConfig::default(),
+        );
+
+        // One innocent series, so there are two producers present and the
+        // quota is half the budget.
+        // snmp/modbus/gnmi/netflow are the producers with a rest-var
+        // catch-all, so any metric name resolves — which is what this test
+        // needs, since it is about counting and not about naming.
+        let p = make_point("sw1", Protocol::Snmp, "load", TelemetryValue::Gauge(1.0));
+        collector.record(&key_for(&p), &p);
+        assert_eq!(collector.series_count(), 1, "the innocent series landed");
+
+        // The leaker: a fresh label value every time, which is how this
+        // happens in the field.
+        for i in 0..50 {
+            let p = make_point(
+                &format!("req{i}"),
+                Protocol::Netflow,
+                "flows",
+                TelemetryValue::Gauge(i as f64),
+            );
+            collector.record(&key_for(&p), &p);
+        }
+
+        let held_by_leaker = collector
+            .metrics
+            .read()
+            .values()
+            .filter(|m| m.producer == "netflow")
+            .count();
+        assert!(
+            held_by_leaker <= 5,
+            "the leaker took {held_by_leaker} of a 10-series budget; half is \
+             reserved for everyone else"
+        );
+        assert!(
+            collector.series_count() < 10,
+            "and the budget is not full, so a newcomer has room"
+        );
+
+        // THE POINT: a host that joins afterwards still exports.
+        let late = make_point(
+            "plc1",
+            Protocol::Modbus,
+            "holding/1",
+            TelemetryValue::Gauge(0.0),
+        );
+        collector.record(&key_for(&late), &late);
+        assert!(
+            collector
+                .metrics
+                .read()
+                .values()
+                .any(|m| m.producer == "modbus"),
+            "a producer arriving after the leak must still be exported"
+        );
+
+        // And the refusals name who caused them.
+        let refused = collector.stats().series_refused_by_producer;
+        assert_eq!(
+            refused.keys().collect::<Vec<_>>(),
+            vec!["netflow"],
+            "the attribution must name the leaker and nobody else: {refused:?}"
+        );
+        let out = collector.render();
+        assert!(
+            out.contains("_exporter_series_refused_total{producer=\"netflow\"}"),
+            "and it must be queryable, not only a log line"
+        );
+    }
+
+    /// A single producer keeps the whole cap — the quota is about sharing,
+    /// not about halving a deployment that runs one sensor (#1145).
+    #[test]
+    fn one_producer_alone_may_use_the_whole_budget() {
+        let collector = MetricCollector::new(
+            PrometheusConfig::default(),
+            AggregationConfig {
+                max_series: 5,
+                ..Default::default()
+            },
+            FilterConfig::default(),
+        );
+        for i in 0..5 {
+            let p = make_point(
+                &format!("dev{i}"),
+                Protocol::Snmp,
+                "metric",
+                TelemetryValue::Gauge(i as f64),
+            );
+            collector.record(&key_for(&p), &p);
+        }
+        assert_eq!(collector.series_count(), 5, "no capacity lost");
+        assert!(collector.stats().series_refused_by_producer.is_empty());
     }
 
     #[test]
