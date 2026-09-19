@@ -233,6 +233,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   move the old note predicted, and the 45 line has no patched release for either
   advisory.
 
+- **rustls `0.23.44` → `0.23.45`** (RUSTSEC-2026-0285). TLS 1.3 handshake
+  messages accepted across encryption-level boundaries. A lockfile bump only —
+  no manifest requirement moves, and rustls reaches this tree through zenoh's
+  TLS/QUIC links, `reqwest`, and every sensor that speaks TLS. The advisory was
+  published after this branch was cut, so the same `deny` job that had been
+  green on it went red without a line of the tree changing; it rides here
+  because it blocks every open branch.
+
 
 ### Fixed
 
