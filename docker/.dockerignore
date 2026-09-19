@@ -1,3 +1,15 @@
+# NOT THE ONE IN EFFECT (#1158).
+#
+# Every image is built with the repository root as its context (`context: .`
+# in release.yml), so Docker reads `/.dockerignore` and never this file. The
+# two disagree: this one excludes `configs/`, `docs/`, `*.md` and
+# `**/tests/`, and the Dockerfiles `COPY` `configs/` — so if this file ever
+# did apply, the build would fail on a missing path rather than quietly
+# shipping a smaller image.
+#
+# Kept, with this note, for anyone who builds with `docker/` as the context by
+# hand. Change `/.dockerignore` for anything that must affect CI.
+
 # Build artifacts
 target/
 **/*.rs.bk

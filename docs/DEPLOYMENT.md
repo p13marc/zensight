@@ -216,15 +216,18 @@ WantedBy=multi-user.target
 
 ## 4. What's inside the image
 
-- The 5 sensor binaries + the committed example configs
+- The 6 sensor binaries — `sysinfo`, `logs`, `netlink`, `netring`, `systemd`,
+  `hostspec` — plus the committed example configs
   (`/usr/share/zensight/configs/`).
 - `gen-configs.sh` — the same demo-max profile `just configure` uses
   (single-sourced in `scripts/gen-configs.sh`): opt-in collectors, anomaly
   detectors, and on-demand artifacts ON; feature-gated detectors and
   privileged systemd unit control OFF. Configs are generated at **container
   start**, so the netring capture interface is detected in the host netns.
-- `run-sensors.sh` — the shared spawner (`scripts/run-sensors.sh`) in
-  fail-fast mode.
+- `run-sensors.sh` — the shared spawner (`scripts/run-sensors.sh`). It does
+  **not** fail fast: `FAIL_FAST` was removed in #813, because one sensor
+  OOM-killed took the whole image down with it, and the survivors were the
+  ones still reporting.
 
 Per-sensor images (`git.marcpardo.eu/marcpardo/zensight-sensor-<name>`) still exist for
 single-sensor deployments — see `docker/docker-compose.yml`. This bundle is

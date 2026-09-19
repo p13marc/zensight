@@ -309,13 +309,19 @@ sensor; control traffic must arrive, so it is reliable and blocks.
 | `Command` | Reliable | Block | InteractiveHigh |
 | `Evidence` | Reliable | Block | Data |
 | `Entity` | Reliable | Block | Data |
+| `Event` | Reliable | Block | Data |
 | `Query` | Reliable | Block | DataLow |
 | `LiveVideo` | BestEffort | Drop | InteractiveHigh |
 
-`express` is **off for every class**: it disables batching to shave latency at a
-bandwidth cost — the wrong trade on a constrained link, where priority already
-orders control ahead of telemetry. Apply a class with the getters on a Zenoh
-publisher/put/declare builder (`.congestion_control(q.congestion_control())`,
+`express` is **on for `Alert` and off for everything else** (`qos.rs`,
+`express()` is `matches!(self, QosClass::Alert)`, pinned by
+`express_is_the_alert_class_alone`). It disables batching to shave latency at a
+bandwidth cost, which is the wrong trade for bulk telemetry on a constrained
+link — but an alert is the one class where the latency is the point, and the
+ratified alert profile says so. This page claimed "off for every class" through
+0.13, which was the blanket `false` the code had already moved away from.
+
+Apply a class with the getters on a Zenoh publisher/put/declare builder (`.congestion_control(q.congestion_control())`,
 `.priority(q.priority())`, `.express(q.express())`, `.reliability(q.reliability())`).
 
 ## See also

@@ -769,6 +769,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Seven documentation claims a reader would act on and be wrong** (#1158).
+  The 2026-09-06 review left a checklist of about thirty; most were fixed by
+  the PRs that owned the code, and re-verifying each against the tree was the
+  point of this pass. Seven were still true:
+
+  `zensight-common/docs/data-model.md` said `express` is **off for every
+  class**; it is **on for `Alert`** (`qos.rs`, pinned by
+  `express_is_the_alert_class_alone`) — the doc was still describing the
+  blanket `false` the code had moved away from. Its QoS table also omitted
+  `QosClass::Event` entirely.
+
+  `zensight-desired/docs/policy.md` said a deletion waits `grace × refresh` —
+  "ten minutes on the shipped defaults". Grace counts **passes**, and the
+  daemon recompiles on an entity-document event and on an adoption wake as
+  well as on the 300 s tick, so two passes can fall seconds apart. Ten minutes
+  is the bound when nothing else wakes the loop, not the guarantee.
+
+  `docs/DEPLOYMENT.md` said the image holds "the 5 sensor binaries" (six) and
+  that the spawner runs "in fail-fast mode" — `FAIL_FAST` was removed in #813,
+  and `docker/entrypoint-sensors.sh`'s own header still said it too.
+
+  `docker/Dockerfile.runtime` pointed at `docs/SENSORS.md`, which has never
+  existed; the ports are in `docs/DEPLOYMENT.md`.
+
+  `docker/.dockerignore` excludes `configs/`, `docs/` and `**/tests/` while
+  the root one keeps them — and every image is built with the repository root
+  as its context, so the root file is the only one Docker reads. The Dockerfiles
+  `COPY configs/`, so if this one ever did apply the build would fail outright.
+  It now says so at the top.
+
+  The flatpak metainfo's `<releases>` ended with a `0.1.0` "Initial release"
+  dated 2024-12-28. There is no such tag — the earliest in the repository is
+  0.2.0 — and AppStream renders that list as the version history.
+
+  **Two rows were themselves wrong**, and are recorded rather than "fixed":
+  data-model's `Firing → Firing` refresh transition *does* happen
+  (`a_content_change_republishes_once_the_refresh_window_has_passed` pins it),
+  and the historian's range cursor is the last returned `uid` — a value, not
+  the positional cursor RFC 05 §3.2 names as the defect.
+
 - **gui: three time zones in one window, and a tree re-flattened for nobody**
   (#1123, #1124).
 
