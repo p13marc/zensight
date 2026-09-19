@@ -230,7 +230,14 @@ fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> Teleme
 /// Build telemetry points for one interface. Metric paths are
 /// `iface/<name>/<stat>`.
 pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<TelemetryPoint> {
-    let pfx = format!("iface/{}", s.name);
+    // Slugged (#1153). The name comes from the kernel, and this used to
+    // interpolate it raw: an ordinary Linux name (`eth0`, `enp3s0`,
+    // `eth0.100`, `br-lan`) is already a legal chunk and is unchanged, but
+    // nothing here guaranteed that — an alias carrying `:` or an uppercase
+    // byte would have built a key that is not a legal chunk at all, and the
+    // only check in this file is a `debug_assert!` on registry membership,
+    // which is compiled out in release and does not look at the chunk anyway.
+    let pfx = format!("iface/{}", zensight_sensor_core::key::device_chunk(&s.name));
     let ifindex = s.ifindex.to_string();
     let counter = |metric: String, v: u64| {
         point(host, metric, TelemetryValue::Counter(v)).with_label("ifindex", ifindex.clone())

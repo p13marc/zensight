@@ -46,6 +46,7 @@ pub mod governor;
 mod health;
 pub mod hostfacts;
 mod identity;
+pub mod key;
 mod liveliness;
 pub mod procutil;
 mod publisher;

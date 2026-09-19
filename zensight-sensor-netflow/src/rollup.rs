@@ -81,10 +81,27 @@ pub struct Rollups {
 }
 
 /// One key chunk from an exporter name (names may be raw IPs when the
-/// `exporter_names` map has no entry) — same `.`/`:` → `-` mapping as the
-/// netring name-observation keys.
+/// `exporter_names` map has no entry).
+///
+/// #1153: this used to be `name.replace(['.', ':'], "-")`, and the test beside
+/// it was called `exporter_slug_is_one_chunk` — which was not true. A chunk
+/// must begin and end alphanumeric (RFC 03 §1.5), and every address written
+/// with a leading `::` breaks that: `::1` became `--1`, and
+/// `::ffff:192.0.2.1` became `--ffff-192-0-2-1`. Both are illegal chunks, from
+/// an ordinary loopback and an ordinary v4-mapped address.
+///
+/// It was also not injective — `a.b`, `a:b` and a device literally named
+/// `a-b` all produced `a-b` — so three exporters could have shared one set of
+/// counters.
+///
+/// `device_chunk` is `zenkey::Chunk::slug`: legal by construction and
+/// injective by its left inverse. An ordinary IPv4 address is already a legal
+/// chunk, so `192.168.1.1` passes through **unchanged** and only the
+/// colon-bearing forms move.
 pub fn exporter_slug(name: &str) -> String {
-    name.replace(['.', ':'], "-")
+    zensight_sensor_core::key::device_chunk(name)
+        .as_str()
+        .to_string()
 }
 
 impl Rollups {
@@ -397,11 +414,43 @@ mod tests {
         );
     }
 
+    /// #1153: legal by construction, and the common case is untouched.
     #[test]
     fn exporter_slug_is_one_chunk() {
-        assert_eq!(exporter_slug("192.168.1.1"), "192-168-1-1");
-        assert_eq!(exporter_slug("fe80::1"), "fe80--1");
+        // IPv4 and an ordinary name are already legal chunks — unchanged.
+        assert_eq!(exporter_slug("192.168.1.1"), "192.168.1.1");
         assert_eq!(exporter_slug("core-router"), "core-router");
+
+        // Every one of these is a legal chunk, which is the claim this test's
+        // name has always made and the old mapping did not keep.
+        for name in [
+            "192.168.1.1",
+            "core-router",
+            "fe80::1",
+            "::1",
+            "::ffff:192.0.2.1",
+            "2001:db8::1",
+        ] {
+            let c = exporter_slug(name);
+            // `unslug_for_display` returns `Some` only for a chunk that both
+            // PARSES as a chunk and is in the slug's image — so a round-trip
+            // to the original name proves legality and injectivity at once.
+            assert_eq!(
+                zensight_common::slug::unslug_for_display(&c).as_deref(),
+                Some(name),
+                "{name:?} -> {c:?} is not a legal chunk that decodes back"
+            );
+        }
+    }
+
+    /// The old mapping merged three distinct exporters onto one set of
+    /// counters, because `.`, `:` and `-` all became `-`.
+    #[test]
+    fn three_exporters_that_used_to_share_counters_no_longer_do() {
+        let slugs = ["a.b", "a:b", "a-b"].map(exporter_slug);
+        assert_ne!(slugs[0], slugs[1]);
+        assert_ne!(slugs[1], slugs[2]);
+        assert_ne!(slugs[0], slugs[2]);
     }
 
     #[test]

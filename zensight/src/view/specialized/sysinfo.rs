@@ -433,7 +433,13 @@ fn render_disk_section(state: &DeviceDetailState) -> Element<'_, Message> {
             let used_gb = used / 1_073_741_824.0;
             let total_gb = total / 1_073_741_824.0;
 
-            let label = if mount.is_empty() { "/" } else { &mount };
+            // #1153: the chunk is an identifier, not a name. `/var/lib/docker`
+            // is on the wire as `x-_x2fvar_x2flib_x2fdocker`; decoding it here
+            // shows the operator the REAL path, where the old lossy slug
+            // showed `var_lib_docker` — readable, and possibly a different
+            // mount entirely.
+            let shown = zensight_common::slug::display_chunk(&mount);
+            let label = if shown.is_empty() { "/" } else { &shown };
             let progress = ProgressBar::new(used_gb, total_gb, label, "GB");
             disk_content = disk_content.push(progress.view());
             disk_count += 1;
@@ -733,8 +739,16 @@ fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message
                 let temp = get_metric_value(state, key);
                 let warning = get_metric_value(state, &format!("sensors/{chip}/{label}/max"));
                 let critical = get_metric_value(state, &format!("sensors/{chip}/{label}/critical"));
+                // #1153: `Package id 0` is on the wire as
+                // `x-_x50ackage_x20id_x200`. The row shows the chip's own
+                // label, decoded.
+                let shown = format!(
+                    "{}/{}",
+                    zensight_common::slug::display_chunk(&chip),
+                    zensight_common::slug::display_chunk(&label)
+                );
                 Some(
-                    LimitRow::new(format!("{chip}/{label}"), temp, "°C")
+                    LimitRow::new(shown, temp, "°C")
                         .with_limits(warning, critical)
                         .with_precision(1),
                 )
@@ -790,7 +804,12 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
         if let Some(Subject::SensorsRpm { chip, label }) = Subject::parse_metric(key)
             && let Some(rpm) = get_metric_value(state, key)
         {
-            fans.push((chip.to_string(), label.to_string(), rpm));
+            // Decoded for display (#1153) — the chunk is the identifier.
+            fans.push((
+                zensight_common::slug::display_chunk(&chip),
+                zensight_common::slug::display_chunk(&label),
+                rpm,
+            ));
         }
     }
     fans.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -872,7 +891,11 @@ fn render_fans_power_section(state: &DeviceDetailState) -> Element<'_, Message> 
             // the raw zone ("intel-rapl:0" — `sanitize_key` leaves colons
             // alone). Prefer the name, fall back to the zone, so the row is
             // meaningful even on the degraded path where labels are missing.
-            let display = get_metric_label(state, key, "name").unwrap_or_else(|| zone.to_string());
+            // The friendly name rides as a label; falling back to the chunk
+            // means decoding it (#1153), since `intel-rapl:0` is on the wire
+            // as `x-intel-rapl_x3a0`.
+            let display = get_metric_label(state, key, "name")
+                .unwrap_or_else(|| zensight_common::slug::display_chunk(&zone));
             zones.push((zone.to_string(), display, watts));
         }
     }

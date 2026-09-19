@@ -63,6 +63,7 @@ pub mod served;
 pub mod service_guard;
 pub mod session;
 pub mod silence;
+pub mod slug;
 pub mod state;
 pub mod stream;
 pub mod subscribe;
