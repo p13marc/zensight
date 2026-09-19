@@ -36,6 +36,29 @@ fn every_registered_family_has_an_emitter() {
         "guest/140/provisioned_bytes",
         "guest/140/uptime_secs",
         "guest/140/running",
+        // The counters the `/cluster/resources` row already carried and this
+        // sensor parsed away for two releases (#1141).
+        "guest/140/net_in_bytes",
+        "guest/140/net_out_bytes",
+        "guest/140/disk_read_bytes",
+        "guest/140/disk_write_bytes",
+        // The hypervisor itself (#1141) — what this sensor did not look at
+        // while it reported every guest running on it.
+        "node/pve/cpu_ratio",
+        "node/pve/mem_bytes",
+        "node/pve/mem_total_bytes",
+        "node/pve/swap_bytes",
+        "node/pve/rootfs_bytes",
+        "node/pve/rootfs_used_ratio",
+        "node/pve/load1",
+        "node/pve/load_per_cpu",
+        "node/pve/uptime_secs",
+        // Ceph, where the cluster runs it (#1141).
+        "ceph/healthy",
+        "ceph/osds_up",
+        "ceph/osds_total",
+        "ceph/pgs_degraded",
+        "ceph/used_ratio",
         // `{node}-{pool}` for a non-shared pool, the bare name for a shared
         // one (#1132). `{storage}` is a wildcard chunk, so the registry does
         // not care which — but this list is meant to read as what a real

@@ -1,4 +1,4 @@
-# pve — the ten assertions
+# pve — the sixteen assertions
 
 Every rule reconciles on **every sweep**: a condition that clears resolves, and
 one whose input disappeared (a guest that was deleted) resolves too. Nothing
@@ -228,6 +228,77 @@ The HA resources in the cluster document are the rows
 **status feed**, not a resource list: its other rows are `quorum`, `lrm` and
 `master`, and taking them wholesale (#1132) put three or four phantom services
 per node in the document, none of which `ha-manager` would ever name.
+
+## Nodes (#1141)
+
+| Rule | Fires when | Severity | Labels |
+|---|---|---|---|
+| `node-rootfs-full` | the node's `/` is at or past `node_rootfs_ratio` (default 0.9) | critical | `node` |
+| `node-load-high` | `load1 / cpus` is at or past `node_load_per_cpu` (default 4.0) | warning | `node` |
+| `node-swapping` | swap in use is at or past `node_swap_ratio` (default 0.5) | warning | `node` |
+
+The sensor reported every guest and every pool while **the hypervisor those
+guests run on was invisible** — which is the first thing anyone looks at when a
+guest is slow. `/nodes/{node}/status` is what it never read.
+
+Three details that decide whether these are useful or noise:
+
+- **`node-rootfs-full` is `/`, not a storage pool.** No pool's numbers contain
+  it, so `pool-usage` could never have said this — and a full root filesystem
+  stops PVE writing its own state, which is a more total failure than a full
+  pool.
+- **Load is graded per CPU.** A raw load average means different things on a
+  4-core and a 64-core node, and a single fleet-wide threshold has to mean one
+  thing. The default is deliberately high: a hypervisor is *supposed* to be
+  busy.
+- **A node with no swap never fires `node-swapping`.** `swap_ratio()` is `None`
+  when the total is absent or zero, and a no-swap host is a deliberate
+  configuration rather than 0 % used.
+
+`loadavg` arrives from PVE as an array of **strings**. `as_f64` reads those as
+`None`, so the client parses the string — not belt and braces, the only thing
+that works, and a client that did not would publish no load at all while
+looking like it had.
+
+## Backup schedules (#1141)
+
+| Rule | Fires when | Severity | Labels |
+|---|---|---|---|
+| `backup-job-overdue` | an **enabled** job's `next-run` is past by more than `backup_overdue_grace_secs` (default 3600) and nothing has run since | critical | `job` |
+
+This is the assertion `backup-stale` cannot make. Staleness is measured against
+a fixed age, so a job that was **switched off**, or whose schedule was edited
+away, looks exactly like one that is merely young. A schedule says when it was
+*due*.
+
+- **A disabled job is never overdue.** It is switched off, which is a different
+  thing to tell an operator, and firing on it would make every deliberately
+  paused job a standing alert nobody can clear.
+- **The calendar spec is not parsed here.** `next-run` is systemd's own
+  evaluation of it, handed over by PVE. A spec this build evaluated differently
+  would be a confident wrong answer about when a backup was due, so a release
+  that does not report `next-run` is **not graded** — the schedule is still
+  published, as a fact.
+- **Something that ran after the due time clears it**, whatever the clock says.
+
+## Ceph (#1141)
+
+| Rule | Fires when | Severity |
+|---|---|---|
+| `ceph-health` | Ceph's own `health.status` is `HEALTH_WARN` or `HEALTH_ERR` | warning / critical, as Ceph rates it |
+
+**Ceph's own enum, never our reading of the counters beside it** — the same
+rule the BMC sensor follows about somebody else's hardware, and for the same
+reason: Ceph knows what its numbers mean and we do not. The OSD, monitor and PG
+counters ride in the document as context for the verdict, not as inputs to it.
+
+Absent entirely on a cluster that does not run Ceph: the endpoint answers 501
+or 404, which is a fact about the cluster rather than a failed poll, and
+nothing at all is published — no zeroes, no `healthy: 0`. A cluster with no
+Ceph is not a cluster with unhealthy Ceph.
+
+`pgs_degraded` is summed over every state that is **not** `active+clean`, which
+is the only reading that survives Ceph adding a state name.
 
 ## What is deliberately not asserted
 

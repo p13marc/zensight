@@ -25,9 +25,9 @@ use serde_json::Value;
 use tokio::sync::Semaphore;
 
 use zensight_common::pve::{
-    AllocationSource, GuestDisk, GuestKind, GuestNic, PveBackupTask, PveBackupVolume, PveGuest,
-    PveHaResource, PveNodeStatus, PveReplicationJob, PveStoragePool, parse_flag, parse_kv_list,
-    parse_size,
+    AllocationSource, GuestDisk, GuestKind, GuestNic, PveBackupSchedule, PveBackupTask,
+    PveBackupVolume, PveCephStatus, PveGuest, PveHaResource, PveNode, PveNodeStatus,
+    PveReplicationJob, PveStoragePool, parse_flag, parse_kv_list, parse_size,
 };
 
 /// What the API could not answer, separated from what it answered with
@@ -69,6 +69,19 @@ pub struct GuestRuntime {
     pub maxmem: Option<u64>,
     pub disk: Option<u64>,
     pub maxdisk: Option<u64>,
+    /// Cumulative bytes in/out and read/written, straight off the
+    /// `/cluster/resources` row (#1141). They were parsed away for two
+    /// releases — the rows carry them and this sensor dropped them on the
+    /// floor, so "which guest is saturating the uplink" was a question the
+    /// hypervisor could answer and ZenSight could not.
+    ///
+    /// **Counters, not gauges**: monotonic since the guest booted, reset to
+    /// zero by a stop/start. `CounterTracker` (#1152) is what derives a rate
+    /// from them without turning that reset into a spike.
+    pub netin: Option<u64>,
+    pub netout: Option<u64>,
+    pub diskread: Option<u64>,
+    pub diskwrite: Option<u64>,
 }
 
 /// One node's vzdump tasks, separated by scope.
@@ -222,6 +235,10 @@ impl PveClient {
                         maxmem: num(&r, "maxmem").map(|v| v as u64),
                         disk: num(&r, "disk").map(|v| v as u64),
                         maxdisk: num(&r, "maxdisk").map(|v| v as u64),
+                        netin: num(&r, "netin").map(|v| v as u64),
+                        netout: num(&r, "netout").map(|v| v as u64),
+                        diskread: num(&r, "diskread").map(|v| v as u64),
+                        diskwrite: num(&r, "diskwrite").map(|v| v as u64),
                     });
                 }
                 Some("storage") => {
@@ -264,6 +281,171 @@ impl PveClient {
             .iter()
             .filter_map(|n| text(n, "node"))
             .collect())
+    }
+
+    /// One node's own resource picture, from `/nodes/{node}/status` (#1141).
+    ///
+    /// The sensor saw guests and pools and **not the hypervisor**. A node
+    /// swapping, or with a full rootfs, or with a load average four times its
+    /// core count, was invisible while every guest on it merely looked
+    /// unhappy.
+    ///
+    /// `Ok(None)` when the node does not answer — which on a cluster with a
+    /// member down is the normal case, and is a missing reading rather than a
+    /// failed poll.
+    pub async fn node_status(&self, node: &str) -> Result<Option<PveNode>> {
+        let Some(v) = self.get(&format!("/nodes/{node}/status")).await? else {
+            return Ok(None);
+        };
+        let at = |path: &[&str]| -> Option<&Value> {
+            let mut cur = &v;
+            for seg in path {
+                cur = cur.get(*seg)?;
+            }
+            Some(cur)
+        };
+        let sub = |path: &[&str], key: &str| -> Option<u64> {
+            at(path).and_then(|o| num(o, key)).map(|n| n as u64)
+        };
+        let loadavg = v.get("loadavg").and_then(Value::as_array);
+        // PVE serves `loadavg` as an array of **strings**, which `as_f64`
+        // reads as `None`. Parsing the string is not belt and braces here: it
+        // is the only thing that works.
+        let load = |i: usize| -> Option<f64> {
+            loadavg?.get(i).and_then(|x| {
+                x.as_f64()
+                    .or_else(|| x.as_str().and_then(|s| s.trim().parse().ok()))
+            })
+        };
+        Ok(Some(PveNode {
+            name: node.to_string(),
+            uptime_secs: num(&v, "uptime").map(|n| n as u64),
+            cpu_ratio: num(&v, "cpu"),
+            cpus: at(&["cpuinfo"])
+                .and_then(|c| num(c, "cpus"))
+                .map(|n| n as u32),
+            mem_bytes: sub(&["memory"], "used"),
+            mem_total_bytes: sub(&["memory"], "total"),
+            swap_bytes: sub(&["swap"], "used"),
+            swap_total_bytes: sub(&["swap"], "total"),
+            rootfs_bytes: sub(&["rootfs"], "used"),
+            rootfs_total_bytes: sub(&["rootfs"], "total"),
+            load1: load(0),
+            load5: load(1),
+            load15: load(2),
+            pve_version: text(&v, "pveversion"),
+            kernel: at(&["current-kernel"])
+                .and_then(|k| text(k, "release"))
+                .or_else(|| text(&v, "kversion")),
+            observed_at_ms: zensight_common::current_timestamp_millis(),
+        }))
+    }
+
+    /// The scheduled vzdump jobs, from `/cluster/backup` (#1141).
+    ///
+    /// The sensor could say "the last backup ran N seconds ago" and **not** "a
+    /// backup that should have run at 03:00 did not run at all". A job that was
+    /// disabled, or whose schedule was edited away, looked identical to one
+    /// that is merely young.
+    ///
+    /// `next-run` is carried verbatim and the calendar spec is **not parsed**:
+    /// `next-run` is systemd's own evaluation of that spec, handed to us, and a
+    /// spec this build evaluated differently would be a confident wrong answer
+    /// about when a backup was due.
+    pub async fn backup_jobs(&self) -> Result<Vec<PveBackupSchedule>> {
+        let rows = self.get_array("/cluster/backup").await?.unwrap_or_default();
+        let now = zensight_common::current_timestamp_millis();
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let id = text(r, "id")?;
+                Some(PveBackupSchedule {
+                    id,
+                    // PVE spells the off switch `enabled: 0`; older releases
+                    // spell it `disabled: 1`. A job with neither is on, which
+                    // is what the panel shows.
+                    enabled: match r.get("enabled") {
+                        Some(v) => flag_value(v),
+                        None => !r.get("disabled").is_some_and(flag_value),
+                    },
+                    schedule: text(r, "schedule").or_else(|| text(r, "starttime")),
+                    next_run_ms: num(r, "next-run").map(|n| (n as i64) * 1000),
+                    node: text(r, "node"),
+                    storage: text(r, "storage"),
+                    comment: text(r, "comment"),
+                    // `vmid` is a comma-separated list on a job that names
+                    // guests. `None` when the field is absent, which is "we
+                    // could not tell" and never "none".
+                    guests: text(r, "vmid")
+                        .map(|v| v.split(',').filter(|s| !s.trim().is_empty()).count() as u32),
+                    all_guests: flag(r, "all"),
+                    observed_at_ms: now,
+                })
+            })
+            .collect())
+    }
+
+    /// Ceph's own health verdict, where the cluster runs Ceph (#1141).
+    ///
+    /// `Ok(None)` on every cluster that does not — the endpoint answers 501 or
+    /// 404, and that is a fact about the cluster rather than a failed poll.
+    pub async fn ceph_status(&self) -> Result<Option<PveCephStatus>> {
+        let Some(v) = self.get("/cluster/ceph/status").await? else {
+            return Ok(None);
+        };
+        // `health.status` is Ceph's own enum and the only verdict published.
+        // The counters below are context for it, never an input to it.
+        let health = v
+            .get("health")
+            .and_then(|h| text(h, "status"))
+            .unwrap_or_else(|| "unknown".to_string());
+        let checks = v
+            .get("health")
+            .and_then(|h| h.get("checks"))
+            .and_then(Value::as_object)
+            .map(|m| m.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let osdmap = v
+            .get("osdmap")
+            .and_then(|o| o.get("osdmap"))
+            .or_else(|| v.get("osdmap"));
+        let u32_at = |o: Option<&Value>, k: &str| -> Option<u32> {
+            o.and_then(|o| num(o, k)).map(|n| n as u32)
+        };
+        let pgmap = v.get("pgmap");
+        // `pgs_by_state` names each state and its count; anything that is not
+        // `active+clean` is degraded. Summing the not-clean states is the only
+        // reading that survives Ceph adding a state name.
+        let pgs_degraded = pgmap
+            .and_then(|p| p.get("pgs_by_state"))
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter(|e| text(e, "state_name").as_deref() != Some("active+clean"))
+                    .filter_map(|e| num(e, "count"))
+                    .sum::<f64>() as u32
+            });
+        Ok(Some(PveCephStatus {
+            health,
+            checks,
+            osds_total: u32_at(osdmap, "num_osds"),
+            osds_up: u32_at(osdmap, "num_up_osds"),
+            osds_in: u32_at(osdmap, "num_in_osds"),
+            monitors_total: v
+                .get("monmap")
+                .and_then(|m| m.get("mons"))
+                .and_then(Value::as_array)
+                .map(|a| a.len() as u32),
+            monitors_quorum: v
+                .get("quorum")
+                .and_then(Value::as_array)
+                .map(|a| a.len() as u32),
+            pgs_total: u32_at(pgmap, "num_pgs"),
+            pgs_degraded,
+            bytes_used: pgmap.and_then(|p| num(p, "bytes_used")).map(|n| n as u64),
+            bytes_total: pgmap.and_then(|p| num(p, "bytes_total")).map(|n| n as u64),
+            observed_at_ms: zensight_common::current_timestamp_millis(),
+        }))
     }
 
     /// One guest's configuration — the half that decides the next reboot.

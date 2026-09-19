@@ -296,6 +296,177 @@ pub struct PveBackupSummary {
     pub observed_at_ms: i64,
 }
 
+/// One node's own resource picture, from `/nodes/{node}/status` (#1141).
+///
+/// The sensor saw guests and pools and **not the hypervisor** — which is the
+/// first thing anyone looks at when a guest is slow. A node swapping, or with
+/// a full rootfs, or with a load average four times its core count, was
+/// invisible while every guest on it looked merely unhappy.
+///
+/// Every field is optional because PVE's node status shape has moved across
+/// releases and a field this build does not find is a **missing** reading, not
+/// a zero.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PveNode {
+    /// The node name, and the chunk in the key.
+    pub name: String,
+    /// Seconds since boot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uptime_secs: Option<u64>,
+    /// CPU utilisation, 0..1 as PVE reports it — **not per-core**, the same
+    /// convention `guest/{vmid}/cpu_ratio` already uses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_ratio: Option<f64>,
+    /// How many CPUs the node has, so a load average can be read against it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mem_total_bytes: Option<u64>,
+    /// Swap **in use**. A hypervisor that has started swapping is the reading
+    /// a guest's own numbers cannot show.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub swap_total_bytes: Option<u64>,
+    /// The node's **root filesystem**, not a storage pool. A full `/` stops
+    /// PVE writing its own state and is not visible in any pool's numbers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rootfs_total_bytes: Option<u64>,
+    /// 1-, 5- and 15-minute load averages, as the node reports them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load1: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load5: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load15: Option<f64>,
+    /// PVE version string, for the fleet-wide "what is out of date" question.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pve_version: Option<String>,
+    /// Kernel release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel: Option<String>,
+    pub observed_at_ms: i64,
+}
+
+impl PveNode {
+    /// Root filesystem used fraction, 0..1. `None` when either half is
+    /// missing — a ratio against a total we do not have is not a ratio.
+    pub fn rootfs_ratio(&self) -> Option<f64> {
+        let total = self.rootfs_total_bytes?;
+        let used = self.rootfs_bytes?;
+        (total > 0).then(|| used as f64 / total as f64)
+    }
+
+    /// Swap used fraction, 0..1. `None` on a node with no swap configured,
+    /// which is a normal and deliberate configuration rather than 0 % used.
+    pub fn swap_ratio(&self) -> Option<f64> {
+        let total = self.swap_total_bytes?;
+        let used = self.swap_bytes?;
+        (total > 0).then(|| used as f64 / total as f64)
+    }
+
+    /// Load average per CPU, which is the number that means something across
+    /// nodes of different sizes.
+    pub fn load_per_cpu(&self) -> Option<f64> {
+        let cpus = self.cpus?;
+        let load = self.load1?;
+        (cpus > 0).then(|| load / f64::from(cpus))
+    }
+}
+
+/// One scheduled vzdump job, from `/cluster/backup` (#1141).
+///
+/// The sensor could say "the last backup ran N seconds ago" and **not** "a
+/// backup that should have run at 03:00 did not run at all" — the two are
+/// different questions, and a job that was disabled, or whose schedule was
+/// edited away, looks identical to one that is merely young.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PveBackupSchedule {
+    /// The job id PVE assigns, and the chunk in the key.
+    pub id: String,
+    /// Whether the job is enabled. A **disabled** job whose last run is old is
+    /// not overdue; it is switched off, which is a different thing to tell an
+    /// operator.
+    pub enabled: bool,
+    /// The systemd calendar spec, verbatim (`"mon..fri 03:00"`). Recorded as
+    /// the string PVE holds rather than parsed: a calendar spec this build
+    /// evaluated differently from systemd would be a confident wrong answer
+    /// about when a backup was due.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<String>,
+    /// When PVE itself says the job next runs, epoch millis. This is the
+    /// authority on the schedule — it is systemd's own evaluation, handed to
+    /// us — and `None` on a release that does not report it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_ms: Option<i64>,
+    /// Which node the job is pinned to, when it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// The storage the job writes to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+    /// The job's comment, which is what an operator named it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// How many guests the job selects, where the API says. `None` is "we
+    /// could not tell", never "none" — a job that backs up nothing is a real
+    /// and serious state, and must not be confused with an unread field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guests: Option<u32>,
+    /// `all: 1` — the job takes every guest rather than a list.
+    #[serde(default)]
+    pub all_guests: bool,
+    pub observed_at_ms: i64,
+}
+
+/// Ceph's own health verdict, from `/cluster/ceph/status` (#1141).
+///
+/// Absent on every cluster that does not run Ceph, which is most of them —
+/// the endpoint answers 501 or 404 and that is a fact about the cluster, not a
+/// failed poll.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct PveCephStatus {
+    /// `HEALTH_OK` / `HEALTH_WARN` / `HEALTH_ERR`, **Ceph's own enum**, never
+    /// a verdict this sensor derived from the counters below.
+    pub health: String,
+    /// The health check names Ceph is currently raising
+    /// (`OSD_DOWN`, `PG_DEGRADED`, …). What an operator acts on.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osds_total: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osds_up: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub osds_in: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitors_total: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub monitors_quorum: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgs_total: Option<u32>,
+    /// Placement groups **not** in `active+clean`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pgs_degraded: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    pub observed_at_ms: i64,
+}
+
+impl PveCephStatus {
+    /// Whether Ceph itself says something is wrong. Never our own reading of
+    /// the counters — the same rule the BMC sensor follows.
+    pub fn is_faulted(&self) -> bool {
+        self.health == "HEALTH_WARN" || self.health == "HEALTH_ERR"
+    }
+}
+
 /// One cluster member.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PveNodeStatus {

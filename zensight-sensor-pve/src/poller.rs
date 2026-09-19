@@ -14,8 +14,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::pve::{
-    AllocationSource, PveBackupJob, PveBackupSummary, PveBackupVolume, PveClusterHealth, PveGuest,
-    PveStoragePool,
+    AllocationSource, PveBackupJob, PveBackupSchedule, PveBackupSummary, PveBackupVolume,
+    PveCephStatus, PveClusterHealth, PveGuest, PveNode, PveStoragePool,
 };
 use zensight_common::{HostEvidence, QosClass, TelemetryValue};
 use zensight_sensor_core::{AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth};
@@ -41,6 +41,14 @@ pub struct Sweep {
     /// Whole-job vzdump runs, one per node that has any (#880).
     pub backup_jobs: Vec<PveBackupJob>,
     pub cluster: Option<PveClusterHealth>,
+    /// The hypervisors themselves (#1141) — what this sensor did not look at
+    /// while it reported every guest running on them.
+    pub nodes: Vec<PveNode>,
+    /// The scheduled vzdump jobs (#1141), so "a backup that should have run at
+    /// 03:00 did not run at all" is expressible.
+    pub schedules: Vec<PveBackupSchedule>,
+    /// Ceph's own verdict, on a cluster that runs Ceph (#1141).
+    pub ceph: Option<PveCephStatus>,
 }
 
 /// One guest's measurements this cycle.
@@ -52,6 +60,12 @@ pub struct GuestMetrics {
     pub maxmem: Option<u64>,
     pub disk: Option<u64>,
     pub maxdisk: Option<u64>,
+    /// The four counters the `/cluster/resources` row already carried and this
+    /// sensor parsed away (#1141). Cumulative since the guest booted.
+    pub netin: Option<u64>,
+    pub netout: Option<u64>,
+    pub diskread: Option<u64>,
+    pub diskwrite: Option<u64>,
 }
 
 pub struct Poller {
@@ -251,6 +265,29 @@ impl Poller {
         // ── Cluster ─────────────────────────────────────────────────────────
         let cluster = self.collect_cluster(&guests, &runtimes).await;
 
+        // ── The hypervisors, the job schedules and Ceph (#1141) ─────────────
+        //
+        // Every one best-effort and independently: a node that does not
+        // answer, a release with no `/cluster/backup`, a cluster with no Ceph
+        // — each yields nothing, and nothing is a missing reading rather than
+        // a failed sweep. Grading the whole cycle on any of them would make a
+        // non-Ceph cluster look broken.
+        let mut nodes = Vec::new();
+        for node in self.client.nodes().await.unwrap_or_default() {
+            if !wanted(&node) {
+                continue;
+            }
+            match self.client.node_status(&node).await {
+                Ok(Some(n)) => nodes.push(n),
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::debug!(node = %node, error = %e, "pve: node status read failed")
+                }
+            }
+        }
+        let schedules = self.client.backup_jobs().await.unwrap_or_default();
+        let ceph = self.client.ceph_status().await.unwrap_or_default();
+
         let metrics = runtimes
             .iter()
             .map(|rt| GuestMetrics {
@@ -260,6 +297,10 @@ impl Poller {
                 maxmem: rt.maxmem,
                 disk: rt.disk,
                 maxdisk: rt.maxdisk,
+                netin: rt.netin,
+                netout: rt.netout,
+                diskread: rt.diskread,
+                diskwrite: rt.diskwrite,
             })
             .collect();
 
@@ -280,6 +321,9 @@ impl Poller {
             backups: self.backups.clone(),
             backup_jobs: self.backup_jobs.clone(),
             cluster,
+            nodes,
+            schedules,
+            ceph,
         })
     }
 
@@ -495,6 +539,30 @@ impl Poller {
             if let Some(p) = g.provisioned_bytes {
                 points.push((format!("guest/{}/provisioned_bytes", g.vmid), p as f64));
             }
+            // The four counters the row already carried (#1141). Published as
+            // COUNTERS, not gauges: they are monotonic since the guest booted
+            // and a stop/start resets them to zero, which `CounterTracker`
+            // (#1152) decodes as a reset rather than as a cliff. A gauge would
+            // put the raw total on a dashboard, where it means nothing.
+            if let Some(m) = sweep.metrics.iter().find(|m| m.vmid == g.vmid) {
+                for (suffix, value) in [
+                    ("net_in_bytes", m.netin),
+                    ("net_out_bytes", m.netout),
+                    ("disk_read_bytes", m.diskread),
+                    ("disk_write_bytes", m.diskwrite),
+                ] {
+                    let Some(v) = value else { continue };
+                    let metric = format!("guest/{}/{suffix}", g.vmid);
+                    let point = checked_point(&self.source, &metric, TelemetryValue::Counter(v))
+                        .with_labels(labels.clone());
+                    if let Err(e) = self.publisher.publish(&metric, &point).await {
+                        tracing::debug!(error = %e, "pve: counter publish failed");
+                    } else {
+                        published += 1;
+                    }
+                }
+            }
+
             for (metric, value) in points {
                 // `source` is the host doing the reporting, never the guest
                 // being reported on (#883). The vmid is in the key and in the
@@ -543,6 +611,96 @@ impl Poller {
                     failed = out.failed,
                     "pve: relation evidence sync"
                 );
+            }
+        }
+
+        // ── The hypervisors themselves (#1141) ──────────────────────────────
+        for n in &sweep.nodes {
+            // Operator-chosen, so it is slugged before it reaches a key — the
+            // same foreign-value boundary #843 established for units.
+            let chunk = zenkey::Chunk::slug(&n.name).as_str().to_string();
+            let labels = [("node".to_string(), n.name.clone())]
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            for (suffix, value) in [
+                ("cpu_ratio", n.cpu_ratio),
+                ("mem_bytes", n.mem_bytes.map(|v| v as f64)),
+                ("mem_total_bytes", n.mem_total_bytes.map(|v| v as f64)),
+                // Absent on a node with no swap configured, which is a
+                // deliberate configuration rather than 0 % used.
+                ("swap_bytes", n.swap_bytes.map(|v| v as f64)),
+                ("rootfs_bytes", n.rootfs_bytes.map(|v| v as f64)),
+                ("rootfs_used_ratio", n.rootfs_ratio()),
+                ("load1", n.load1),
+                ("load_per_cpu", n.load_per_cpu()),
+                ("uptime_secs", n.uptime_secs.map(|v| v as f64)),
+            ] {
+                // Absent stays absent: a field PVE did not report is a
+                // MISSING reading, not a zero, and its shape has moved across
+                // releases.
+                let Some(v) = value else { continue };
+                let metric = format!("node/{chunk}/{suffix}");
+                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(v))
+                    .with_labels(labels.clone());
+                if let Err(e) = self.publisher.publish(&metric, &point).await {
+                    tracing::debug!(error = %e, "pve: node telemetry publish failed");
+                } else {
+                    published += 1;
+                }
+            }
+            if let Some(key) = state_key(&["node", &chunk])
+                && let Err(e) = self.states.publish_serializable(&key, n).await
+            {
+                tracing::warn!(node = %n.name, error = %e, "pve: node doc publish failed");
+            }
+        }
+
+        // ── Scheduled backup jobs (#1141) ───────────────────────────────────
+        for j in &sweep.schedules {
+            let chunk = zenkey::Chunk::slug(&j.id).as_str().to_string();
+            if let Some(key) = state_key(&["backup", "job", &chunk, "schedule"])
+                && let Err(e) = self.states.publish_serializable(&key, j).await
+            {
+                tracing::warn!(job = %j.id, error = %e, "pve: backup schedule publish failed");
+            }
+        }
+
+        // ── Ceph (#1141) ────────────────────────────────────────────────────
+        //
+        // Nothing at all on a cluster that does not run it — no zeroes, no
+        // `healthy: 0`. A cluster with no Ceph is not a cluster with unhealthy
+        // Ceph.
+        if let Some(c) = &sweep.ceph {
+            for (suffix, value) in [
+                // Ceph's OWN enum, never our reading of the counters below it.
+                (
+                    "healthy",
+                    Some(if c.health == "HEALTH_OK" { 1.0 } else { 0.0 }),
+                ),
+                ("osds_up", c.osds_up.map(f64::from)),
+                ("osds_total", c.osds_total.map(f64::from)),
+                ("pgs_degraded", c.pgs_degraded.map(f64::from)),
+                (
+                    "used_ratio",
+                    match (c.bytes_used, c.bytes_total) {
+                        (Some(u), Some(t)) if t > 0 => Some(u as f64 / t as f64),
+                        _ => None,
+                    },
+                ),
+            ] {
+                let Some(v) = value else { continue };
+                let metric = format!("ceph/{suffix}");
+                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(v));
+                if let Err(e) = self.publisher.publish(&metric, &point).await {
+                    tracing::debug!(error = %e, "pve: ceph telemetry publish failed");
+                } else {
+                    published += 1;
+                }
+            }
+            if let Some(key) = state_key(&["ceph"])
+                && let Err(e) = self.states.publish_serializable(&key, c).await
+            {
+                tracing::warn!(error = %e, "pve: ceph doc publish failed");
             }
         }
 
@@ -732,6 +890,13 @@ impl Poller {
                 pools: &sweep.pools,
                 backups: &sweep.backups,
                 cluster: sweep.cluster.as_ref(),
+                nodes: &sweep.nodes,
+                schedules: &sweep.schedules,
+                ceph: sweep.ceph.as_ref(),
+                // Passed in rather than read inside the rules, so `grade`
+                // stays pure and a test can place "now" where it needs it —
+                // the discipline `age_secs` already follows.
+                now_ms: zensight_common::current_timestamp_millis(),
             };
             let firing = alerts::grade(&self.cfg.alerts, &obs);
             let mut by_rule: HashMap<&str, Vec<String>> = HashMap::new();

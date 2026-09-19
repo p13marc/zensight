@@ -207,6 +207,52 @@ pub struct PveAlertsConfig {
     /// Fire when a replication job's last run failed.
     #[serde(default = "default_true")]
     pub replication: bool,
+    /// Node root-filesystem used fraction that fires (#1141). A full `/` stops
+    /// PVE writing its own state and is invisible in every storage pool's
+    /// numbers — `pool_used_pct` never sees it. 0 disables.
+    #[serde(default = "default_node_rootfs_ratio")]
+    pub node_rootfs_ratio: f64,
+    /// Node 1-minute load average **per CPU** that fires (#1141). Per CPU
+    /// because a raw load average means different things on a 4-core and a
+    /// 64-core node, and a single fleet-wide number has to mean one thing.
+    /// 0 disables; the default is deliberately high, because a hypervisor is
+    /// *supposed* to be busy.
+    #[serde(default = "default_node_load_per_cpu")]
+    pub node_load_per_cpu: f64,
+    /// Fire when a node has started swapping past this fraction of its swap
+    /// (#1141). A hypervisor swapping is the reading a guest's own numbers
+    /// cannot show. 0 disables; absent on a node with no swap configured,
+    /// which is a deliberate configuration rather than 0 % used.
+    #[serde(default = "default_node_swap_ratio")]
+    pub node_swap_ratio: f64,
+    /// Fire when an **enabled** backup job's `next-run` is in the past by more
+    /// than this many seconds and nothing has run since (#1141).
+    ///
+    /// This is the assertion `backup_stale_secs` cannot make: staleness is
+    /// measured against a fixed age, so a job that was switched off, or whose
+    /// schedule was edited away, looks exactly like one that is merely young.
+    /// A *schedule* says when it was due. 0 disables. The grace exists because
+    /// a job due at 03:00 that starts at 03:02 is not overdue.
+    #[serde(default = "default_backup_overdue_grace")]
+    pub backup_overdue_grace_secs: u64,
+    /// Fire when Ceph's **own** health enum is not `HEALTH_OK` (#1141). Never
+    /// a verdict derived from the OSD or PG counters beside it — the same rule
+    /// the BMC sensor follows about somebody else's hardware.
+    #[serde(default = "default_true")]
+    pub ceph_health: bool,
+}
+
+fn default_node_rootfs_ratio() -> f64 {
+    0.9
+}
+fn default_node_load_per_cpu() -> f64 {
+    4.0
+}
+fn default_node_swap_ratio() -> f64 {
+    0.5
+}
+fn default_backup_overdue_grace() -> u64 {
+    3600
 }
 
 impl Default for PveAlertsConfig {
@@ -227,6 +273,11 @@ impl Default for PveAlertsConfig {
             backup_shrink_pct: default_backup_shrink_pct(),
             quorum: true,
             replication: true,
+            node_rootfs_ratio: default_node_rootfs_ratio(),
+            node_load_per_cpu: default_node_load_per_cpu(),
+            node_swap_ratio: default_node_swap_ratio(),
+            backup_overdue_grace_secs: default_backup_overdue_grace(),
+            ceph_health: true,
         }
     }
 }
