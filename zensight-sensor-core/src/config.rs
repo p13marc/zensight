@@ -89,6 +89,51 @@ const NO_RESOURCES: &ResourcesConfig = &ResourcesConfig {
 ///     }
 /// }
 /// ```
+/// The `source` a producer publishes under: the operator's, else this host's
+/// name (#1156).
+///
+/// # Sixteen copies, disagreeing five ways
+///
+/// Every sensor had its own. They were not the same function:
+///
+/// | | copies |
+/// |---|---|
+/// | rejects a **configured** empty string | 2 of 16 (systemd, hostspec) |
+/// | rejects an empty **hostname** | 2 of 16 (bmc, pve) |
+/// | non-UTF-8 hostname → `"unknown"` | 10 |
+/// | non-UTF-8 hostname → lossy string | 5 |
+/// | reads `source == "auto"` as unset | 4 (the rest use `Option`) |
+///
+/// Two of those are correctness, not taste:
+///
+/// - **A configured `source: ""` was honoured** by fourteen of them. An empty
+///   source is not a name — it reaches the device identity, the evidence
+///   documents and every alert label, and an empty chunk is not even a legal
+///   key chunk (RFC 03 §1.5).
+/// - **`into_string().ok()` maps every non-UTF-8 hostname to `"unknown"`**, so
+///   two hosts whose names are not valid UTF-8 land on *the same identity* and
+///   merge into one device. That is the same failure #1153 fixed for mount
+///   points, one layer up. `to_string_lossy` keeps them distinct, which is why
+///   it is the behaviour kept here: a mangled name that is still this host's
+///   is strictly better than a tidy name shared with a stranger.
+///
+/// `"unknown"` remains only for the case where there is genuinely nothing to
+/// say — no configured source and no readable hostname at all.
+#[must_use]
+pub fn resolved_source(configured: Option<&str>) -> String {
+    if let Some(s) = configured
+        && !s.is_empty()
+        && s != "auto"
+    {
+        return s.to_string();
+    }
+    hostname::get()
+        .ok()
+        .map(|h| h.to_string_lossy().into_owned())
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
 pub trait SensorConfig: Sized + DeserializeOwned {
     /// Get the Zenoh configuration.
     fn zenoh(&self) -> &ZenohConfig;
@@ -299,5 +344,40 @@ mod tests {
     fn test_config_not_found() {
         let result = TestConfig::load("/nonexistent/path.json5");
         assert!(matches!(result, Err(SensorError::ConfigNotFound { .. })));
+    }
+}
+
+#[cfg(test)]
+mod resolved_source_tests {
+    use super::resolved_source;
+
+    /// The operator's choice wins, verbatim.
+    #[test]
+    fn a_configured_source_is_used_as_written() {
+        assert_eq!(resolved_source(Some("edge-01")), "edge-01");
+    }
+
+    /// #1156: `source: ""` was honoured by fourteen of the sixteen copies.
+    /// An empty source reaches the device identity, the evidence documents and
+    /// every alert label — and is not a legal key chunk (RFC 03 §1.5).
+    #[test]
+    fn a_configured_empty_source_falls_back_to_the_hostname() {
+        let empty = resolved_source(Some(""));
+        assert!(!empty.is_empty(), "an empty source is never published");
+        assert_eq!(empty, resolved_source(None), "it falls back like `None`");
+    }
+
+    /// Four crates spelled "unset" as the literal `"auto"` and the rest as
+    /// `None`; both reach the same place now.
+    #[test]
+    fn the_auto_sentinel_means_unset() {
+        assert_eq!(resolved_source(Some("auto")), resolved_source(None));
+    }
+
+    /// Whatever the host is called, the answer is a usable name.
+    #[test]
+    fn the_fallback_is_never_empty() {
+        let s = resolved_source(None);
+        assert!(!s.is_empty());
     }
 }

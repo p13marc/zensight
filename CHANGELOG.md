@@ -769,6 +769,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`source: ""` in a config was published as an empty identity, and two hosts
+  with non-UTF-8 hostnames merged into one device** (#1156). `resolved_source`
+  was copy-pasted **sixteen times**, and the copies were not the same
+  function — they disagreed five ways:
+
+  | | copies |
+  |---|---|
+  | rejects a **configured** empty string | 2 of 16 (systemd, hostspec) |
+  | rejects an empty **hostname** | 2 of 16 (bmc, pve) |
+  | non-UTF-8 hostname → `"unknown"` | 10 |
+  | non-UTF-8 hostname → lossy string | 5 |
+  | reads `source == "auto"` as unset | 4 (the rest use `Option`) |
+
+  Two of those are correctness. A configured `source: ""` was **honoured** by
+  fourteen of them, and an empty source reaches the device identity, the
+  evidence documents and every alert label — an empty chunk is not even legal
+  (RFC 03 §1.5). And `into_string().ok()` maps *every* non-UTF-8 hostname to
+  `"unknown"`, so two such hosts land on the same identity and merge into one
+  device — the same failure #1153 fixed for mount points, one layer up.
+
+  One `zensight_sensor_core::resolved_source(Option<&str>)` now answers for all
+  sixteen. It keeps `to_string_lossy`, because a mangled name that is still
+  *this* host's is strictly better than a tidy name shared with a stranger;
+  `"unknown"` survives only for the case where there is genuinely nothing to
+  say. **For an ordinary host with a UTF-8 hostname the answer is unchanged** —
+  the two spellings agree everywhere except the edges this fixes.
+
 - **A dropped write call left no audit record and no reply** (#1156).
   `served::WriteQuery` exposes no `reply` and no `reply_err`: the only ways to
   answer are `executed` / `executed_but` and `refused`, each writing its record

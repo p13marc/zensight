@@ -87,11 +87,8 @@ fn default_true() -> bool {
 impl NetFlowConfig {
     /// The agent host's unified source id: the `source` override, else the hostname.
     pub fn resolved_source(&self) -> String {
-        self.source.clone().unwrap_or_else(|| {
-            hostname::get()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| "unknown".to_string())
-        })
+        // One spelling for the whole tree (#1156).
+        zensight_sensor_core::resolved_source(self.source.as_deref())
     }
 }
 

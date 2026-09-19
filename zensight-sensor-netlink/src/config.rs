@@ -338,14 +338,8 @@ fn is_virtual(name: &str) -> bool {
 impl NetlinkConfig {
     /// Resolve the configured source id, detecting the hostname when set to "auto".
     pub fn resolved_source(&self) -> String {
-        if self.source == "auto" {
-            hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .unwrap_or_else(|| "unknown".to_string())
-        } else {
-            self.source.clone()
-        }
+        // One spelling for the whole tree (#1156).
+        zensight_sensor_core::resolved_source(Some(self.source.as_str()))
     }
 }
 

@@ -150,13 +150,8 @@ impl BmcConfig {
     /// units both recommend `127.0.0.1` for a locally-managed BMC, which is
     /// the one address guaranteed to be ambiguous across machines (#885).
     pub fn resolved_source(&self) -> String {
-        self.source.clone().unwrap_or_else(|| {
-            hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .filter(|h| !h.is_empty())
-                .unwrap_or_else(|| "unknown".to_string())
-        })
+        // One spelling for the whole tree (#1156).
+        zensight_sensor_core::resolved_source(self.source.as_deref())
     }
 }
 
