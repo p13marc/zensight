@@ -351,6 +351,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **netflow: the rollup map was unbounded** (#1139). NetFlow is UDP with no
+  handshake and the exporter name defaults to the datagram's source address,
+  so `Rollups::per_exporter` grew by one **permanent** aggregate per address
+  ever seen — a /16 sweep was 65 000 entries, a spoofing sender was unbounded
+  — and every one was re-published at three or more keys, every rollup period,
+  forever.
+
+  The parser map next door had been capped with an LRU and a comment
+  explaining exactly this since it was written. Evicting a parser did not
+  evict its aggregate, and the rollup is the more expensive of the two: a
+  parser comes back on the next template refresh, an aggregate nothing evicts
+  never leaves.
+
+  All three per-exporter maps now share **one** `MAX_EXPORTERS` and evict
+  least-recently-seen. The cap had been written down twice, as 256 and 512,
+  with the sampling registry's own comment claiming it matched "the parser
+  map's own cap". An evicted exporter's counters restart from zero if it comes
+  back, which a TSDB reads as a counter reset — recoverable, and a smaller lie
+  than an aggregate for an address that sent one spoofed datagram in March.
+
+  Without the eviction the acceptance test holds **769** exporters against a
+  cap of 256.
+
 - **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
   (#1094). Three ways the one job that guards an opt-in feature was weaker than
   the tree around it.
