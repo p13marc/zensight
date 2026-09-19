@@ -37,6 +37,17 @@ use zensight::view::settings::{SettingsState, settings_view};
 use zensight::view::specialized::{SyslogFilterState, specialized_view};
 use zensight::view::topology::{TopologyState, topology_view};
 
+/// A `DeviceId` for an SNMP device polled by one origin (#1118). The fleet
+/// interface map is keyed on the triple now, because two pollers polling one
+/// `switch01` are two devices.
+fn snmp_id(source: &str) -> DeviceId {
+    DeviceId {
+        protocol: zensight_common::Protocol::Snmp,
+        origin: "h-aabbccddeeff".into(),
+        source: source.into(),
+    }
+}
+
 /// Render the topology view with empty panel context (#393).
 fn topo_view(state: &TopologyState, theme: AppTheme) -> iced::Element<'_, Message> {
     thread_local! {
@@ -7126,6 +7137,93 @@ fn fleet_view_renders_not_asked_distinguishably_from_a_host_that_answered_nothin
     assert!(ui.find("not asked").is_err());
 }
 
+/// **Two pollers polling one `switch01` render as two devices** (#1118).
+///
+/// `decode_sample` computed the origin for every class and dropped it on the
+/// floor for this one, so the fleet-wide map was keyed on the bare device
+/// name. Two SNMP pollers in two racks both polling a `switch01` published two
+/// documents about two different switches, and they collided LWW: their
+/// interfaces mixed in the top-talkers and oper-down hotlists, and the map
+/// flapped between them every poll.
+///
+/// That is the class #474 fixed for `DeviceId` — the origin says who is
+/// talking, the source says who they are talking about, and neither alone
+/// names a device.
+#[test]
+fn test_snmp_overview_two_pollers_one_device_name() {
+    use std::collections::HashMap;
+    use zensight::view::overview::snmp::snmp_overview;
+
+    let poller = |origin: &str| DeviceId {
+        protocol: zensight_common::Protocol::Snmp,
+        origin: origin.into(),
+        source: "switch01".into(),
+    };
+
+    let mut docs = HashMap::new();
+    docs.insert(
+        poller("h-aaaaaaaaaaaa"),
+        mock::snmp::interface_table("switch01", 3),
+    );
+    docs.insert(
+        poller("h-bbbbbbbbbbbb"),
+        mock::snmp::interface_table("switch01", 3),
+    );
+    assert_eq!(
+        docs.len(),
+        2,
+        "the map holds both — on a name key the second overwrote the first"
+    );
+
+    let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
+    let events = std::collections::VecDeque::new();
+    let discovery = HashMap::new();
+    let evt_filter = EventFilterState::default();
+    let mut ui = simulator(snmp_overview(
+        &devices,
+        SnmpOverviewData {
+            interfaces: &docs,
+            events: &events,
+            event_filter: &evt_filter,
+            discovery: &discovery,
+            discovery_open: false,
+            desired_alive: None,
+            applied_targets: no_applied_targets(),
+        },
+    ));
+    // Six interfaces rather than three — the overview counts what is on the
+    // fleet, not what one name happened to win.
+    assert!(
+        ui.find("6").is_ok(),
+        "both switches' interfaces are counted"
+    );
+
+    // The map holding two entries is only half the claim, and the easy half:
+    // it follows from the key type. The half that was actually broken is that
+    // `decode_sample` **computed the origin and then dropped it**, so no
+    // caller could build the key at all. A source assertion is what pins that.
+    let src = include_str!("../src/subscription.rs");
+    let tail = src
+        .split("ZensightState::SnmpInterfaces { device }")
+        .nth(1)
+        .expect("the interface-table decode arm");
+    let arm = &tail[..tail.len().min(400)];
+    assert!(
+        arm.contains("origin"),
+        "the interface-table decode must carry the publishing origin — \
+         without it two pollers polling one `switch01` are one device: {arm}"
+    );
+    let events = include_str!("../src/subscription.rs")
+        .split("Message::SnmpEventReceived")
+        .nth(1)
+        .expect("the trap decode");
+    assert!(
+        events[..events.len().min(200)].contains("origin"),
+        "and so must the trap decode — `record.source` alone routes one \
+         poller's trap to another poller's open view"
+    );
+}
+
 /// SNMP fleet overview (#533): rate-based top talkers, down hotlist, error
 /// hotspots — all from the typed docs.
 #[test]
@@ -7136,13 +7234,13 @@ fn test_snmp_overview_rate_based() {
     let mut docs = HashMap::new();
     // router01: iface 1 busy at 12.5 MB/s in, iface 2 has errors, iface 3 down.
     docs.insert(
-        "router01".to_string(),
+        snmp_id("router01"),
         mock::snmp::interface_table("router01", 3),
     );
     // A freshly-rebooted device with huge *lifetime* counters but no current
     // rate must NOT outrank the busy one (the raw-counter bug this fixes).
     docs.insert(
-        "idle01".to_string(),
+        snmp_id("idle01"),
         mock::snmp::interface_table_no_hc("idle01"),
     );
 
@@ -7232,7 +7330,7 @@ fn test_snmp_overview_trap_feed() {
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
     let mut docs = HashMap::new();
     docs.insert(
-        "router01".to_string(),
+        snmp_id("router01"),
         mock::snmp::interface_table("router01", 1),
     );
     let mut events = std::collections::VecDeque::new();
@@ -7302,7 +7400,7 @@ fn test_snmp_overview_discovery_card() {
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
     let mut docs = HashMap::new();
     docs.insert(
-        "router01".to_string(),
+        snmp_id("router01"),
         mock::snmp::interface_table("router01", 1),
     );
     let events = std::collections::VecDeque::new();
@@ -7373,7 +7471,7 @@ fn test_snmp_event_feed_filters_and_links() {
 
     let mut docs = HashMap::new();
     docs.insert(
-        "router01".to_string(),
+        snmp_id("router01"),
         mock::snmp::interface_table("router01", 1),
     );
     let mut events = std::collections::VecDeque::new();

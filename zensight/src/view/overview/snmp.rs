@@ -111,10 +111,31 @@ impl EventFilterState {
 /// One interface, flattened across the fleet.
 struct FleetIface<'a> {
     device: &'a str,
+    /// The v1 origin of the poller that published this row (#1118). Two
+    /// pollers polling one device name are two devices; without this a
+    /// hotlist row could not say which.
+    origin: &'a str,
     entry: &'a InterfaceEntry,
 }
 
 impl FleetIface<'_> {
+    /// `device/ifName`, and the **publishing origin too when two pollers share
+    /// a device name** (#1118).
+    ///
+    /// Only when it is needed: a fleet where every device name is unique reads
+    /// the same as it always did, and one where two pollers both call a switch
+    /// `switch01` says which is which instead of showing two identical rows.
+    fn label(&self, ambiguous: &std::collections::HashSet<&str>) -> String {
+        if ambiguous.contains(self.device) {
+            // The origin is `h-<12hex>`; the first six are enough to tell two
+            // apart on a row, and the full one is on the device's own card.
+            let short: String = self.origin.chars().take(8).collect();
+            format!("{}@{}/{}", self.device, short, self.name())
+        } else {
+            format!("{}/{}", self.device, self.name())
+        }
+    }
+
     fn name(&self) -> String {
         self.entry
             .name
@@ -172,7 +193,9 @@ impl FleetIface<'_> {
 #[derive(Debug, Clone, Copy)]
 pub struct SnmpOverviewData<'a> {
     /// Joined interface docs keyed by device (#529).
-    pub interfaces: &'a HashMap<String, InterfaceTable>,
+    /// Keyed by [`DeviceId`] since #1118: two pollers polling one `switch01`
+    /// are two devices, and a name key made them collide LWW.
+    pub interfaces: &'a HashMap<crate::message::DeviceId, InterfaceTable>,
     /// Fleet trap/event ring, newest first (#536).
     pub events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
     /// Filter/search state for that feed (#578).
@@ -211,14 +234,36 @@ pub fn snmp_overview<'a>(
     }
 
     let fleet: Vec<FleetIface<'a>> = interfaces
-        .values()
-        .flat_map(|doc| {
-            doc.interfaces.iter().map(|entry| FleetIface {
+        .iter()
+        .flat_map(|(id, doc)| {
+            doc.interfaces.iter().map(move |entry| FleetIface {
                 device: &doc.device,
+                // The publishing poller, so two `switch01`s are told apart in
+                // the row as well as in the map (#1118).
+                origin: id.origin.as_str(),
                 entry,
             })
         })
         .collect();
+
+    // Device names claimed by more than one poller (#1118). Computed once,
+    // because a row cannot tell on its own whether it needs to say which host
+    // it came from.
+    let ambiguous: std::collections::HashSet<&str> = {
+        let mut by_name: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
+            std::collections::HashMap::new();
+        for (id, doc) in interfaces {
+            by_name
+                .entry(doc.device.as_str())
+                .or_default()
+                .insert(id.origin.as_str());
+        }
+        by_name
+            .into_iter()
+            .filter(|(_, origins)| origins.len() > 1)
+            .map(|(name, _)| name)
+            .collect()
+    };
 
     let total_interfaces = fleet.len();
     let up_count = fleet.iter().filter(|i| i.is_up()).count();
@@ -237,9 +282,9 @@ pub fn snmp_overview<'a>(
     .spacing(space::LG)
     .align_y(Alignment::Center);
 
-    let top_talkers = render_top_talkers(&fleet);
-    let down_hotlist = render_down_hotlist(&fleet);
-    let error_hotspots = render_error_hotspots(&fleet);
+    let top_talkers = render_top_talkers(&fleet, &ambiguous);
+    let down_hotlist = render_down_hotlist(&fleet, &ambiguous);
+    let error_hotspots = render_error_hotspots(&fleet, &ambiguous);
     let trap_feed = render_trap_feed(events, event_filter, devices);
 
     let mut content = column![summary_row].spacing(space::MD).width(Length::Fill);
@@ -740,7 +785,10 @@ fn render_status_stat<'a>(
 }
 
 /// Top talkers by current in+out rate, with utilization.
-fn render_top_talkers<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
+fn render_top_talkers<'a>(
+    fleet: &[FleetIface<'a>],
+    ambiguous: &std::collections::HashSet<&str>,
+) -> Element<'a, Message> {
     let title = text("Top Talkers (current rate)")
         .size(font::CAPTION)
         .style(|t: &Theme| text::Style {
@@ -787,7 +835,7 @@ fn render_top_talkers<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
                 })
                 .with_size(8.0)
                 .view(),
-                text(format!("{}/{}", iface.device, iface.name()))
+                text(iface.label(ambiguous))
                     .size(font::CAPTION)
                     .width(Length::Fixed(180.0)),
                 text(format!(
@@ -814,7 +862,10 @@ fn render_top_talkers<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
 }
 
 /// Admin-up interfaces that are oper-down, fleet-wide.
-fn render_down_hotlist<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
+fn render_down_hotlist<'a>(
+    fleet: &[FleetIface<'a>],
+    ambiguous: &std::collections::HashSet<&str>,
+) -> Element<'a, Message> {
     let mut down: Vec<&FleetIface<'a>> =
         fleet.iter().filter(|i| i.is_unexpectedly_down()).collect();
 
@@ -826,7 +877,9 @@ fn render_down_hotlist<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
             })
             .into();
     }
-    down.sort_by_key(|i| (i.device.to_string(), i.entry.index));
+    // Origin in the sort key too, so two same-named devices' rows do not
+    // interleave (#1118).
+    down.sort_by_key(|i| (i.device.to_string(), i.origin.to_string(), i.entry.index));
 
     let title = text(format!("Down Interfaces ({})", down.len()))
         .size(font::CAPTION)
@@ -842,7 +895,7 @@ fn render_down_hotlist<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
                 StatusLed::new(StatusLedState::Inactive)
                     .with_size(8.0)
                     .view(),
-                text(format!("{}/{}", iface.device, iface.name())).size(font::CAPTION),
+                text(iface.label(ambiguous)).size(font::CAPTION),
             ]
             .spacing(space::SM)
             .align_y(Alignment::Center)
@@ -856,7 +909,10 @@ fn render_down_hotlist<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
 }
 
 /// Error hotspots by current error/discard rate.
-fn render_error_hotspots<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
+fn render_error_hotspots<'a>(
+    fleet: &[FleetIface<'a>],
+    ambiguous: &std::collections::HashSet<&str>,
+) -> Element<'a, Message> {
     let mut erroring: Vec<&FleetIface<'a>> =
         fleet.iter().filter(|i| i.error_rate() > 0.0).collect();
 
@@ -881,7 +937,7 @@ fn render_error_hotspots<'a>(fleet: &[FleetIface<'a>]) -> Element<'a, Message> {
         .take(5)
         .map(|iface| {
             row![
-                text(format!("{}/{}", iface.device, iface.name())).size(font::CAPTION),
+                text(iface.label(ambiguous)).size(font::CAPTION),
                 text(format!("{:.1} errs/s", iface.error_rate()))
                     .size(font::CAPTION)
                     .style(|t: &Theme| text::Style {
