@@ -99,6 +99,12 @@
     // Cap on distinct per-host resources. Each owns its own signal providers,
     // so this bounds memory and pipelines; past it, further hosts share the
     // flat resource and are counted rather than growing without limit.
+    //
+    // The pool also SHRINKS (#1146): a host with no series left keeps no
+    // resource, no provider, no gRPC channel and no export timer. It never
+    // did, so on a fleet that reinstalls hosts the cap filled with dead ones
+    // and live hosts past it fell back to the flat resource — losing
+    // host.name, silently and permanently.
     // max_resources: 512,
 
     // Service name for OTEL resource. Under per-origin the producer is

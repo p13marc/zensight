@@ -308,9 +308,21 @@ pub struct OtelExporter {
     config: OtelConfig,
     /// Origins refused because `max_resources` was reached.
     dropped_resources: RwLock<u64>,
-    /// Instrument handles, kept alive for the lifetime of the exporter.
-    _counters: RwLock<Vec<opentelemetry::metrics::ObservableCounter<u64>>>,
-    _gauges: RwLock<Vec<opentelemetry::metrics::ObservableGauge<f64>>>,
+    /// Instrument handles, **keyed like everything else by `(scope, metric)`**
+    /// so they can be dropped with the series they observe (#1146).
+    ///
+    /// They were two `Vec`s, pushed to and never read — "kept alive for the
+    /// lifetime of the exporter". Since each host has its own meter (#755)
+    /// there is one instrument per `(host, metric)`, so on a fleet of fifty
+    /// hosts reporting two hundred metrics that is ten thousand live
+    /// callbacks, and a host that went away five releases ago still had every
+    /// one of its own — each holding an `Arc` into the observation store and
+    /// being invoked on every collection to observe nothing.
+    ///
+    /// Dropping the handle is what unregisters the callback, so this map IS
+    /// the lifetime.
+    counters: RwLock<HashMap<(String, String), opentelemetry::metrics::ObservableCounter<u64>>>,
+    gauges: RwLock<HashMap<(String, String), opentelemetry::metrics::ObservableGauge<f64>>>,
     /// Maximum number of series to store, across all metric names.
     max_gauge_series: usize,
 }
@@ -376,8 +388,8 @@ impl OtelExporter {
                 ..Default::default()
             },
             dropped_resources: RwLock::new(0),
-            _counters: RwLock::new(Vec::new()),
-            _gauges: RwLock::new(Vec::new()),
+            counters: RwLock::new(HashMap::new()),
+            gauges: RwLock::new(HashMap::new()),
             max_gauge_series: 100_000,
         }
     }
@@ -495,8 +507,8 @@ impl OtelExporter {
             per_origin: RwLock::new(HashMap::new()),
             config: otel_config.clone(),
             dropped_resources: RwLock::new(0),
-            _counters: RwLock::new(Vec::new()),
-            _gauges: RwLock::new(Vec::new()),
+            counters: RwLock::new(HashMap::new()),
+            gauges: RwLock::new(HashMap::new()),
             max_gauge_series: 100_000,
         })
     }
@@ -1014,7 +1026,9 @@ impl OtelExporter {
                         }
                     })
                     .build();
-                self._counters.write().push(inst);
+                self.counters
+                    .write()
+                    .insert((scope.to_string(), metric_name.to_string()), inst);
             }
             ObsKind::Gauge => {
                 let mut b = meter.f64_observable_gauge(metric_name.to_string());
@@ -1030,7 +1044,9 @@ impl OtelExporter {
                         }
                     })
                     .build();
-                self._gauges.write().push(inst);
+                self.gauges
+                    .write()
+                    .insert((scope.to_string(), metric_name.to_string()), inst);
             }
         }
     }
@@ -1214,6 +1230,28 @@ impl OtelExporter {
         }
     }
 
+    /// Forget alert lifecycles nothing has refreshed for `ttl` (#1146).
+    ///
+    /// Called from the same sweep that ages out stale series, because it is
+    /// the same fact: a producer that has stopped reporting will not send the
+    /// `Resolved` these are waiting for either.
+    pub fn expire_alert_spans(&self, ttl: Duration) -> usize {
+        self.alert_spans
+            .as_ref()
+            .map(|t| t.lock().expire(ttl))
+            .unwrap_or(0)
+    }
+
+    /// Forget every alert lifecycle of one origin — its sensor's liveliness
+    /// token went away (#1146). The Prometheus exporter's
+    /// `drop_origin_alerts`, one signal over.
+    pub fn drop_origin_alert_spans(&self, origin: &str) -> usize {
+        self.alert_spans
+            .as_ref()
+            .map(|t| t.lock().drop_origin(origin))
+            .unwrap_or(0)
+    }
+
     pub fn record_alert(&self, key: &str, alert: &Alert) {
         // Traces signal: fold the lifecycle into a span (independent of logs).
         if let Some(tracker) = &self.alert_spans {
@@ -1385,16 +1423,88 @@ impl OtelExporter {
             series.retain(|_, obs| obs.last_updated.elapsed() < max_age);
         }
         // Drop metric names with no series left, so the map does not grow
-        // without bound on a fleet with churn. The instrument stays registered
-        // (its callback just observes nothing), which is correct: the metric
-        // still exists, nothing is currently reporting it.
+        // without bound on a fleet with churn.
+        let gone: Vec<(String, String)> = store
+            .iter()
+            .filter(|(_, series)| series.is_empty())
+            .map(|(k, _)| k.clone())
+            .collect();
         store.retain(|_, series| !series.is_empty());
         let after: usize = store.values().map(HashMap::len).sum();
+        drop(store);
+
+        // AND DROP WHAT OBSERVED THEM (#1146).
+        //
+        // This used to say the instrument "stays registered (its callback just
+        // observes nothing), which is correct: the metric still exists,
+        // nothing is currently reporting it". That reasoning holds for a
+        // fleet-wide metric name and not for this one: each host has its own
+        // meter (#755), so the key carries the host, and "nothing is currently
+        // reporting it" means *that host is gone*. Its instruments were kept
+        // for the process's lifetime, each holding an `Arc` into the
+        // observation store and being invoked on every collection to observe
+        // nothing at all.
+        //
+        // `registered` was never pruned either, so a host that came back got
+        // its old entry and the kind check against it — which is the one thing
+        // that map is for.
+        if !gone.is_empty() {
+            let mut registered = self.registered.write();
+            let mut counters = self.counters.write();
+            let mut gauges = self.gauges.write();
+            for key in &gone {
+                registered.remove(key);
+                counters.remove(key);
+                gauges.remove(key);
+            }
+        }
+
+        // A host with nothing left to report needs no resource, no provider,
+        // no gRPC channel and no export timer (#1146). The pool was bounded by
+        // `max_resources` and never shrank, so on a fleet that reinstalls
+        // hosts it filled with dead ones — and LIVE hosts past the cap then
+        // fell back to the flat resource and lost `host.name`, silently and
+        // permanently.
+        let dropped_stacks = self.prune_unused_stacks();
+
         let removed = before - after;
-        if removed > 0 {
-            info!(removed, remaining = after, "Cleaned up stale series");
+        if removed > 0 || !gone.is_empty() || dropped_stacks > 0 {
+            info!(
+                removed,
+                remaining = after,
+                instruments_dropped = gone.len(),
+                resources_dropped = dropped_stacks,
+                "Cleaned up stale series"
+            );
         }
         removed
+    }
+
+    /// Drop the per-host provider stack of every host with no observations
+    /// left (#1146). Returns how many went.
+    fn prune_unused_stacks(&self) -> usize {
+        if self.config.resource_mode == ResourceMode::Flat {
+            return 0;
+        }
+        // A scope is a host's key into the observation store, so a host is
+        // still live exactly when some `(scope, _)` entry names it.
+        let live: std::collections::HashSet<String> = self
+            .observations
+            .read()
+            .keys()
+            .map(|(scope, _)| scope.clone())
+            .collect();
+        let mut pool = self.per_origin.write();
+        let before = pool.len();
+        pool.retain(|origin, _| live.contains(origin));
+        let dropped = before - pool.len();
+        if dropped > 0 {
+            // The refusal counter is about *now*, not about the process's
+            // history: leaving it high after room was made would keep saying
+            // hosts are being refused when they are not.
+            *self.dropped_resources.write() = 0;
+        }
+        dropped
     }
 
     /// Get the number of stored gauge series.
@@ -1616,6 +1726,15 @@ mod tests {
         (OtelExporter::with_meter_provider(mp), sink)
     }
 
+    /// The same harness in `PerOrigin` mode, so the per-host provider pool is
+    /// actually populated (#1146). The OTLP channel underneath is built lazily
+    /// by `opentelemetry-otlp`, so this needs no collector listening.
+    fn per_origin_harness() -> (OtelExporter, InMemoryMetricExporter) {
+        let (mut exporter, sink) = harness();
+        exporter.config.resource_mode = ResourceMode::PerOrigin;
+        (exporter, sink)
+    }
+
     /// A cumulative counter must report the reading, not accumulate readings.
     ///
     /// Feeding 100, 150, 150 must export **150** — the device's current total.
@@ -1711,8 +1830,75 @@ mod tests {
             }
         }
         assert_eq!(exporter.registered.read().len(), 1);
-        assert_eq!(exporter._counters.read().len(), 1);
+        assert_eq!(exporter.counters.read().len(), 1);
         assert_eq!(exporter.series_count(), 1, "one series, ten updates");
+    }
+
+    /// **#1146.** An instrument is dropped with the series it observes.
+    ///
+    /// The handles lived in two `Vec`s, "kept alive for the lifetime of the
+    /// exporter". Each host has its own meter (#755), so the key carries the
+    /// host — and a host that went away kept every one of its instruments,
+    /// each holding an `Arc` into the observation store and being invoked on
+    /// every collection to observe nothing at all. `registered` was never
+    /// pruned either, which is the map whose whole job is the kind check.
+    #[test]
+    fn an_instrument_is_dropped_with_the_series_it_observes() {
+        let (exporter, _sink) = harness();
+        for host in ["sw1", "sw2"] {
+            let p = point(host, "if/1/in_octets", TelemetryValue::Counter(1));
+            exporter.record_metric(&key_of(&p), &p);
+        }
+        assert_eq!(exporter.series_count(), 2);
+        let before = exporter.counters.read().len();
+        assert!(before >= 1, "something was registered");
+
+        // Everything ages out.
+        exporter.cleanup_stale_observations(Duration::from_secs(0));
+
+        assert_eq!(exporter.series_count(), 0);
+        assert_eq!(
+            exporter.counters.read().len(),
+            0,
+            "the instruments must go with their series"
+        );
+        assert_eq!(
+            exporter.registered.read().len(),
+            0,
+            "and so must the kind registry, or a returning host meets its own \
+             stale entry"
+        );
+    }
+
+    /// **#1146.** A host with nothing left to report needs no resource, no
+    /// provider, no gRPC channel and no export timer.
+    ///
+    /// The pool was bounded by `max_resources` and never shrank, so on a
+    /// fleet that reinstalls hosts it filled with dead ones — and live hosts
+    /// past the cap then fell back to the flat resource and lost `host.name`,
+    /// silently and permanently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_departed_host_does_not_keep_its_provider_stack() {
+        let (exporter, _sink) = per_origin_harness();
+        // Three ORIGINS — the pool is keyed by the origin chunk of the key,
+        // not by the point's `source`, because that is what a resource is.
+        for origin in ["h-00000000000a", "h-00000000000b", "h-00000000000c"] {
+            let p = point("sw1", "if/1/in_octets", TelemetryValue::Counter(1));
+            let key = format!("v1/{origin}/telemetry/snmp/sw1/if/1/in_octets");
+            exporter.record_metric(&key, &p);
+        }
+        assert_eq!(
+            exporter.per_origin.read().len(),
+            3,
+            "one resource per host in PerOrigin mode"
+        );
+
+        exporter.cleanup_stale_observations(Duration::from_secs(0));
+        assert_eq!(
+            exporter.per_origin.read().len(),
+            0,
+            "a host with no series left keeps no provider"
+        );
     }
 
     /// A log record must carry the SENSOR's event time, not the time we saw it.
