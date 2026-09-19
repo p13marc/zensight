@@ -49,6 +49,20 @@ pub struct SnmpPoller {
     /// the previous cycle's is used: a link whose speed changed between two
     /// polls has bigger problems than one interval's ceiling.
     speeds: std::sync::Mutex<std::collections::HashMap<String, u64>>,
+    /// ifIndex → interface name, from the last completed cycle's table
+    /// (#1142).
+    ///
+    /// Alert labels carried `if_name` and telemetry labels carried only
+    /// `index`, so after a renumbering `if.in_octets{index="3"}` silently
+    /// continued describing a different physical port. This is the join.
+    ///
+    /// Rebuilt wholesale each cycle beside [`Self::speeds`] and for the same
+    /// reason: the table is only complete at the end of a cycle, so **this
+    /// cycle's points carry last cycle's names**. On the one cycle in which a
+    /// renumbering happens that label is stale, and that is exactly the cycle
+    /// `interface_index_changed` fires for — the alert is the load-bearing
+    /// half, the label is the convenience.
+    if_names: std::sync::Mutex<std::collections::HashMap<String, String>>,
     /// Threshold alerting (#528), when enabled for this device.
     alerts: Option<tokio::sync::Mutex<crate::alerts::AlertEvaluator>>,
     /// Interface state-doc publishing (#529): the shared advanced-publisher
@@ -139,6 +153,7 @@ impl SnmpPoller {
             client: tokio::sync::RwLock::new(None),
             rate: std::sync::Mutex::new(RateTracker::new()),
             speeds: std::sync::Mutex::new(std::collections::HashMap::new()),
+            if_names: std::sync::Mutex::new(std::collections::HashMap::new()),
             alerts: None,
             interfaces_doc: None,
             profiles: None,
@@ -446,6 +461,34 @@ impl SnmpPoller {
                         speeds.insert(e.index.to_string(), bits);
                     }
                 }
+            }
+            // ifIndex → name, and the churn between the two (#1142).
+            //
+            // Only a *changed* name is churn. An index that appeared, or one
+            // that went away, is an interface added or removed — a different
+            // and much less confusing event, and reporting it here would fire
+            // on every line card ever inserted.
+            {
+                let mut names = self.if_names.lock().unwrap();
+                let previous = std::mem::take(&mut *names);
+                for e in &doc.interfaces {
+                    if let Some(n) = e.name.as_ref().filter(|n| !n.trim().is_empty()) {
+                        names.insert(e.index.to_string(), n.clone());
+                    }
+                }
+                for (index, now_name) in names.iter() {
+                    let Some(was) = previous.get(index) else {
+                        continue;
+                    };
+                    if was != now_name
+                        && let Ok(i) = index.parse::<u32>()
+                    {
+                        observation
+                            .index_churn
+                            .push((i, was.clone(), now_name.clone()));
+                    }
+                }
+                observation.index_churn.sort_unstable();
             }
             if let Some((registry, key)) = &self.interfaces_doc
                 && let Err(e) = registry.publish_serializable(key, &doc).await
@@ -1027,6 +1070,20 @@ impl SnmpPoller {
         // — if the device even has one — is still in the name.
         if let Some(index) = table_index {
             point = point.with_label("index", index);
+            // The interface's NAME beside its index (#1142). An ifIndex is not
+            // stable — a reboot, a line-card insertion or a firmware upgrade
+            // renumbers the table on most switches — so a series keyed by the
+            // index alone silently starts describing a different physical port
+            // after a renumbering. Alert labels already carried `if_name`;
+            // telemetry labels carried only `index`, and the two could not be
+            // joined.
+            //
+            // From the last completed cycle's table, because the table is only
+            // complete at the end of a cycle. `interface_index_changed` is
+            // what makes the one stale cycle visible.
+            if let Some(name) = self.if_names.lock().unwrap().get(index) {
+                point = point.with_label("if_name", name.clone());
+            }
         }
         if let Some(unit) = unit {
             point = point.with_unit(unit);

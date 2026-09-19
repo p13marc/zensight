@@ -40,6 +40,10 @@ const PDU_OVERLOAD_RULE: &str = "pdu_overload";
 const NAS_ARRAY_DEGRADED_RULE: &str = "nas_array_degraded";
 const NAS_DISK_FAILED_RULE: &str = "nas_disk_failed";
 const NAS_VOLUME_FULL_RULE: &str = "nas_volume_full";
+// ifIndex churn (#1142). LibreNMS reports this explicitly; without it a
+// renumbering is silent and `if.in_octets{index="3"}` simply starts
+// describing a different physical port.
+const IF_INDEX_CHURN_RULE: &str = "interface_index_changed";
 
 // ===========================================================================
 // Configuration
@@ -66,6 +70,11 @@ pub struct SnmpAlertsConfig {
     pub unreachable: UnreachableRule,
     #[serde(default)]
     pub interface_down: SimpleRule,
+    /// Report an ifIndex whose interface NAME changed since the last cycle
+    /// (#1142) — a renumbering, which every series keyed by the index rides
+    /// through silently.
+    #[serde(default)]
+    pub interface_index_changed: SimpleRule,
     #[serde(default)]
     pub interface_errors: ErrorRateRule,
     #[serde(default)]
@@ -115,6 +124,7 @@ impl Default for SnmpAlertsConfig {
             for_secs: 0,
             unreachable: UnreachableRule::default(),
             interface_down: SimpleRule::default(),
+            interface_index_changed: SimpleRule::default(),
             interface_errors: ErrorRateRule::default(),
             utilization: PercentRule::default(),
             reboot: RebootRule::default(),
@@ -339,6 +349,15 @@ pub struct CycleObservation {
     pub arrays: BTreeMap<String, ArrayObservation>,
     /// NAS physical disks, keyed by table index.
     pub disks: BTreeMap<String, DiskObservation>,
+    /// ifIndexes whose interface NAME changed since the last cycle (#1142):
+    /// `(index, previous name, current name)`.
+    ///
+    /// An ifIndex is not stable across a reboot, a line-card insertion or a
+    /// firmware upgrade on most switches. When it moves, every series keyed by
+    /// it silently starts describing a different physical port — the
+    /// `if.in_octets{index="3"}` that was uplink is now a desk port, with no
+    /// discontinuity anywhere to notice. This is that discontinuity.
+    pub index_churn: Vec<(u32, String, String)>,
 }
 
 #[derive(Debug, Default)]
@@ -937,6 +956,43 @@ fn evaluate(
             }
             out.push(RuleAlerts {
                 rule: IF_DOWN_RULE,
+                alerts,
+            });
+        }
+
+        // --- interface_index_changed (#1142) --------------------------------
+        //
+        // An ifIndex is not stable. A reboot, a line-card insertion or a
+        // firmware upgrade renumbers the table on most switches, and every
+        // series keyed by the index silently starts describing a different
+        // physical port — `if.in_octets{index="3"}` was the uplink and is now
+        // a desk port, with no discontinuity anywhere to notice.
+        //
+        // LibreNMS reports this explicitly. It fires for one cycle and then
+        // reconciles away, which is the right shape: the renumbering is an
+        // event, not a condition — what an operator needs is to have been
+        // told, once, that a dashboard's history now spans two ports.
+        if cfg.interface_index_changed.enabled {
+            let alerts: Vec<Alert> = obs
+                .index_churn
+                .iter()
+                .map(|(index, was, now_name)| {
+                    base(
+                        IF_INDEX_CHURN_RULE,
+                        AlertSeverity::Warning,
+                        format!(
+                            "{device}: ifIndex {index} now names {now_name}, previously \
+                             {was} — every series keyed by this index describes a different \
+                             port from here on"
+                        ),
+                    )
+                    .with_label("if_index", index.to_string())
+                    .with_label("if_name", now_name.clone())
+                    .with_label("previous_if_name", was.clone())
+                })
+                .collect();
+            out.push(RuleAlerts {
+                rule: IF_INDEX_CHURN_RULE,
                 alerts,
             });
         }

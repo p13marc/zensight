@@ -61,7 +61,7 @@ pub fn oid(s: &str) -> Oid {
     Oid::parse(s).expect("valid OID literal")
 }
 
-fn text(s: &str) -> Value {
+pub fn text(s: &str) -> Value {
     Value::OctetString(Bytes::from(s.to_string()))
 }
 
