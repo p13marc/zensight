@@ -70,6 +70,9 @@ const RESERVED: &[&str] = &[
     "rule",
     "severity",
     "kind",
+    // Still reserved though the exporter no longer sets it (#1144): a
+    // sensor's own structured label called `summary` would otherwise
+    // reintroduce exactly the unbounded free text this stopped emitting.
     "summary",
 ];
 
@@ -337,7 +340,19 @@ impl AlertStore {
                 ("rule".into(), a.rule.clone()),
                 ("severity".into(), a.severity.as_str().to_string()),
                 ("kind".into(), a.kind.as_str().to_string()),
-                ("summary".into(), a.summary.clone()),
+                // NO `summary` (#1144). It is free text that typically embeds
+                // the measured value — "disk /var 91 % full", "load 14.2 >
+                // 8.0" — so every distinct wording minted a new TSDB series
+                // and the TSDB kept each one for the retention period, with a
+                // churning `acked` label multiplying them. The canonical
+                // Prometheus cardinality anti-pattern, on the family that
+                // exists to be scraped by Alertmanager.
+                //
+                // This exporter's own store shows one alert at a time, which
+                // is why it looked harmless here and was not. Alertmanager
+                // wants a summary as an ANNOTATION, and gets it from the
+                // alert document itself; `alert_key` is what identifies the
+                // series.
             ];
             // Merge the alert's structured labels (sanitized), skipping reserved
             // names and any that collapse to a duplicate.
@@ -515,7 +530,7 @@ mod tests {
     #[test]
     fn label_values_are_escaped() {
         let store = AlertStore::new();
-        let a = Alert::new(
+        let mut a = Alert::new(
             "host01",
             Protocol::Netring,
             AlertKind::Anomaly,
@@ -523,9 +538,138 @@ mod tests {
             AlertSeverity::Warning,
             "saw \"quotes\" and \\slash",
         );
+        // A STRUCTURED label, not the summary: the summary is no longer a
+        // label at all (#1144). Escaping still has to hold for the labels a
+        // sensor does set, which are equally free-form.
+        a.labels
+            .insert("peer".into(), "saw \"quotes\" and \\slash".into());
         store.apply(a);
         let out = render(&store);
-        assert!(out.contains(r#"summary=\"quotes\""#) || out.contains("\\\""));
+        assert!(out.contains("\\\"") && out.contains("peer="), "{out}");
+    }
+
+    /// **#1144, the acceptance.** The summary is free text that typically
+    /// embeds the measured value, so every distinct wording minted a TSDB
+    /// series that lived for the retention period — multiplied by a churning
+    /// `acked`. The canonical Prometheus cardinality anti-pattern, on the
+    /// family that exists to be scraped by Alertmanager.
+    ///
+    /// A single scrape cannot show the accumulation, which is exactly why
+    /// this looked harmless: the exporter's own store holds one alert at a
+    /// time and the TSDB is what remembers. So the claim is asserted at the
+    /// level it is actually made — **the series a given alert renders must
+    /// not vary with its summary** — which is what makes re-wording one
+    /// alert free rather than a new series.
+    #[test]
+    fn re_wording_an_alert_does_not_mint_a_new_series() {
+        let render_with = |summary: &str| {
+            let store = AlertStore::new();
+            let mut a = Alert::new(
+                "host01",
+                Protocol::Sysinfo,
+                AlertKind::Expectation,
+                "disk-full",
+                AlertSeverity::Warning,
+                summary,
+            );
+            a.labels.insert("mount".into(), "/var".into());
+            store.apply(a);
+            render(&store)
+        };
+
+        let at_91 = render_with("disk /var 91 % full");
+        let at_92 = render_with("disk /var 92 % full");
+        assert_eq!(
+            at_91, at_92,
+            "the same alert, re-worded, must be the same series"
+        );
+        assert!(!at_91.contains("summary="), "{at_91}");
+        assert!(
+            !at_91.contains("91 %"),
+            "the text must not reach the series at all: {at_91}"
+        );
+        // The labels that DO identify it are still there.
+        assert!(at_91.contains("rule=\"disk-full\""), "{at_91}");
+        assert!(at_91.contains("mount=\"/var\""), "{at_91}");
+    }
+
+    /// **#1144, the sibling.** `is_acked` builds the `AlertRef` from
+    /// `alert.protocol`'s `Display`, while the correlator builds it from the
+    /// KEY's producer chunk. They are the same string today, and nothing in
+    /// the tree said so — a producer whose chunk differed from its `Display`
+    /// would render `acked="false"` forever, silently, for every alert it
+    /// ever raised.
+    ///
+    /// One ref through both constructors, for every protocol, so the day they
+    /// diverge is the day this fails rather than the day someone notices an
+    /// acknowledgement that never lands.
+    #[test]
+    fn the_exporter_and_the_correlator_build_the_same_alert_ref() {
+        use zensight_common::alert::AlertRef;
+        let every_protocol = [
+            Protocol::Snmp,
+            Protocol::Logs,
+            Protocol::Gnmi,
+            Protocol::Netflow,
+            Protocol::Opcua,
+            Protocol::Modbus,
+            Protocol::Sysinfo,
+            Protocol::Netlink,
+            Protocol::Netring,
+            Protocol::Systemd,
+            Protocol::Parallax,
+            Protocol::Hostspec,
+            Protocol::Pve,
+            Protocol::Container,
+            Protocol::Probe,
+            Protocol::Historian,
+            Protocol::Bmc,
+        ];
+        for p in every_protocol {
+            let a = Alert::new(
+                "host01",
+                p,
+                AlertKind::Expectation,
+                "a-rule",
+                AlertSeverity::Warning,
+                "text",
+            );
+            let origin = "h-0123456789ab";
+            let alert_key = a.alert_key();
+
+            // The exporter's construction, from `is_acked`.
+            let from_display =
+                AlertRef::parse(&format!("{origin}.{}.{alert_key}", a.protocol)).unwrap();
+            // The correlator's, from the key's producer chunk — which is
+            // `Protocol::as_str`, the keyspace token.
+            let from_chunk =
+                AlertRef::parse(&format!("{origin}.{}.{alert_key}", p.as_str())).unwrap();
+
+            assert_eq!(
+                from_display, from_chunk,
+                "{p:?}: the exporter would never match the catalog's ack"
+            );
+        }
+    }
+
+    /// A sensor's own `summary` label must not put the free text back
+    /// (#1144). `RESERVED` still names it for exactly that reason.
+    #[test]
+    fn a_structured_summary_label_is_still_refused() {
+        let store = AlertStore::new();
+        let mut a = Alert::new(
+            "host01",
+            Protocol::Sysinfo,
+            AlertKind::Expectation,
+            "disk-full",
+            AlertSeverity::Warning,
+            "not a label",
+        );
+        a.labels
+            .insert("summary".into(), "disk /var 91 % full".into());
+        store.apply(a);
+        let out = render(&store);
+        assert!(!out.contains("summary="), "{out}");
     }
 
     /// A firing alert leaves only when its SOURCE goes away (#758).

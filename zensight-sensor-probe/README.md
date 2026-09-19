@@ -124,6 +124,18 @@ between a number and a wrong number:
 - **Startup refuses a burst that cannot finish inside its own interval.**
   Overlapping bursts do not merely queue: the figures then describe two
   overlapping bursts rather than one link.
+- **The target is resolved once, before any packet** (#1135). A name that does
+  not resolve fails the *check*, with a sentence that says so, and counts no
+  packets as lost. The ICMP path used to parse an `IpAddr` and return "this
+  probe did not answer" for anything else — and an ICMP burst target is a bare
+  host by design, since `validate()` only requires `host:port` for tcp. So
+  `{kind: "burst", transport: "icmp", target: "gw.example.net"}` published
+  `loss_pct: 100` every interval and a critical `probe-down` over a perfectly
+  healthy link. Resolving once is also what makes a burst one *path*: a
+  per-packet lookup lets a round-robin name spread the burst over several
+  hosts and calls the result one target's latency distribution. For `tcp` the
+  whole answer is kept in order, as `TcpStream::connect(host)` would, so a
+  dual-stack name whose first address is unreachable still works.
 
 `tcp` transport works in a default build with no capability; `icmp` needs the
 `icmp` feature and `CAP_NET_RAW`, and startup refuses it in a build without

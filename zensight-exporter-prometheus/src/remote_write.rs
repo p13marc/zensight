@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use prost::Message;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use tokio::sync::watch;
 use tracing::{debug, info, warn};
 
@@ -101,7 +101,20 @@ pub struct Sample {
 /// the subject leaf — byte-identical to `/metrics` (#752), because two
 /// spellings of the same series is a bug waiting to be found in production.
 pub fn build_write_request(metrics: &[StoredMetric], timestamp_ms: i64) -> WriteRequest {
-    build_write_request_since(metrics, timestamp_ms, &mut HashMap::new())
+    build_write_request_since(metrics, timestamp_ms, &HashMap::new()).request
+}
+
+/// What one build produced: the request to send, and the watermarks that
+/// become true **only if it is delivered** (#1143).
+pub struct PendingPush {
+    pub request: WriteRequest,
+    /// `(series, timestamp)` for every series in `request`, to be committed
+    /// after a 2xx and not before.
+    pub advanced: Vec<(SeriesKey, i64)>,
+    /// The series the snapshot still holds, so the watermark map can be
+    /// pruned to them. Independent of delivery: a series the collector has
+    /// aged out is gone whether or not this push lands.
+    pub live: std::collections::HashSet<SeriesKey>,
 }
 
 /// Build a `WriteRequest`, skipping series whose point timestamp has not
@@ -126,14 +139,33 @@ pub fn build_write_request(metrics: &[StoredMetric], timestamp_ms: i64) -> Write
 ///
 /// `/metrics` deliberately stays UNtimestamped — see this module's note on the
 /// asymmetry.
+///
+/// # Why this does not advance the watermark itself (#1143)
+///
+/// It used to: the skip test read `last_pushed` and wrote it back in the same
+/// `filter_map`, while *building* the request — before a byte had been sent.
+/// A push that then failed (connection refused, a 503 from Mimir, an auth
+/// blip) left every series in it marked as delivered, so the next tick skipped
+/// each one whose point timestamp had not moved since. A series slower than
+/// the push interval — sysinfo at 60 s against the 30 s default — lost that
+/// datapoint **permanently**. `run`'s own doc promises "push failures are
+/// logged and retried on the next tick"; the tick retried, the samples did
+/// not.
+///
+/// So this reads the map and returns what the watermarks *would* be. The
+/// caller commits them on a 2xx.
 pub fn build_write_request_since(
     metrics: &[StoredMetric],
     fallback_ms: i64,
-    last_pushed: &mut HashMap<SeriesKey, i64>,
-) -> WriteRequest {
+    last_pushed: &HashMap<SeriesKey, i64>,
+) -> PendingPush {
+    // `filter_map` takes `&mut self` through a closure, so the watermarks it
+    // would set go into a cell rather than into the map it is reading.
+    let advanced = std::cell::RefCell::new(Vec::new());
     let mut timeseries: Vec<TimeSeries> = metrics
         .iter()
         .filter_map(|m| {
+            let mut advanced = advanced.borrow_mut();
             let (value, extra_label) = match m.metric_type {
                 PrometheusType::Text => {
                     let text = m.text_value.as_ref()?;
@@ -175,12 +207,12 @@ pub fn build_write_request_since(
             } else {
                 fallback_ms
             };
-            match last_pushed.get(&m.key) {
-                Some(&prev) if prev >= ts => return None,
-                _ => {
-                    last_pushed.insert(m.key.clone(), ts);
-                }
+            if let Some(&prev) = last_pushed.get(&m.key)
+                && prev >= ts
+            {
+                return None;
             }
+            advanced.push((m.key.clone(), ts));
 
             Some(TimeSeries {
                 labels,
@@ -195,9 +227,10 @@ pub fn build_write_request_since(
     // A series the collector has aged out stops appearing in the snapshot;
     // its watermark goes with it, or the map is bounded by lifetime label
     // churn rather than by `max_series` — a slow, monotonic leak on a fleet
-    // with per-container or per-target labels.
-    let live: std::collections::HashSet<&SeriesKey> = metrics.iter().map(|m| &m.key).collect();
-    last_pushed.retain(|k, _| live.contains(k));
+    // with per-container or per-target labels. Pruning is a fact about the
+    // COLLECTOR and not about this push, so it is not held back by delivery.
+    let live: std::collections::HashSet<SeriesKey> =
+        metrics.iter().map(|m| m.key.clone()).collect();
 
     // Deterministic batch order (stable pushes, stable tests).
     timeseries.sort_by(|a, b| {
@@ -211,7 +244,23 @@ pub fn build_write_request_since(
         key(a).cmp(&key(b))
     });
 
-    WriteRequest { timeseries }
+    PendingPush {
+        request: WriteRequest { timeseries },
+        advanced: advanced.into_inner(),
+        live,
+    }
+}
+
+/// What makes two samples the same sample to a receiver: the label set and
+/// the timestamp. Two of these in one request is the duplicate #759 is about.
+fn sample_identity(ts: &TimeSeries) -> (String, i64) {
+    let labels = ts
+        .labels
+        .iter()
+        .map(|l| format!("{}={}", l.name, l.value))
+        .collect::<Vec<_>>()
+        .join("\0");
+    (labels, ts.samples.first().map(|s| s.timestamp).unwrap_or(0))
 }
 
 /// Encode a [`WriteRequest`] to the wire form: protobuf, then snappy raw
@@ -230,14 +279,38 @@ pub struct RemoteWriteClient {
     interval: Duration,
     headers: HeaderMap,
     client: reqwest::Client,
-    /// Last timestamp pushed per series, so an unchanged series is skipped
-    /// rather than re-sent as a duplicate sample (#759).
+    /// Last timestamp **delivered** per series, so an unchanged series is
+    /// skipped rather than re-sent as a duplicate sample (#759).
+    ///
+    /// Written after a 2xx and never before (#1143): a watermark advanced
+    /// while *building* a request is a claim that the receiver has the sample,
+    /// and a failed push makes it a false one that nothing later corrects.
     ///
     /// Bounded by the collector's own `max_series` in practice, and pruned
     /// alongside it: a series the collector has aged out stops appearing in
     /// the snapshot, so its watermark is dropped on the next sweep.
     last_pushed: parking_lot::Mutex<HashMap<SeriesKey, i64>>,
+    /// Series a failed push still owes the receiver, oldest first (#1143).
+    ///
+    /// The watermark fix alone replays a series whose value has not moved —
+    /// the next snapshot still carries the same point, and it is no longer
+    /// skipped. It cannot replay one that HAS moved: the collector keeps only
+    /// the latest value per series, so the datapoint the failed push was
+    /// carrying is gone by the next tick. This holds it.
+    ///
+    /// Bounded and drop-oldest, because a backlog that grows without limit
+    /// turns a receiver outage into an exporter OOM — the failure mode this
+    /// whole crate exists to notice in other processes.
+    backlog: parking_lot::Mutex<VecDeque<TimeSeries>>,
 }
+
+/// How many series a failed push may hold for replay.
+///
+/// At roughly 200 bytes of `TimeSeries` this is a few MB — an hour of
+/// 30-second pushes for a 1 000-series fleet, which is the outage shape worth
+/// surviving. Beyond it the oldest go, because the newest sample of a series
+/// is the one a dashboard is about to ask for.
+pub const MAX_BACKLOG_SERIES: usize = 20_000;
 
 impl RemoteWriteClient {
     /// Create a new client from configuration. Fails on malformed custom
@@ -274,6 +347,7 @@ impl RemoteWriteClient {
             headers,
             client,
             last_pushed: parking_lot::Mutex::new(HashMap::new()),
+            backlog: parking_lot::Mutex::new(VecDeque::new()),
         })
     }
 
@@ -281,34 +355,104 @@ impl RemoteWriteClient {
     /// of series pushed (0 = nothing to send, no request made).
     pub async fn push_once(&self) -> anyhow::Result<usize> {
         let metrics = self.collector.snapshot_metrics();
-        let request = {
-            let mut seen = self.last_pushed.lock();
-            build_write_request_since(&metrics, current_timestamp_millis(), &mut seen)
+        let mut pending = {
+            let seen = self.last_pushed.lock();
+            build_write_request_since(&metrics, current_timestamp_millis(), &seen)
         };
-        if request.timeseries.is_empty() {
+
+        // Prune the watermarks to what the collector still holds. Not held
+        // back by delivery: a series it has aged out is gone either way.
+        self.last_pushed
+            .lock()
+            .retain(|k, _| pending.live.contains(k));
+
+        // What a previous push failed to deliver goes first, so each series'
+        // samples stay in ascending timestamp order within the request.
+        //
+        // Deduplicated on `(labels, timestamp)`: when the value has NOT moved
+        // since the failed push, the collector re-offers the very same point
+        // and the backlog is holding a copy of it. Sending both would be an
+        // identical `(series, timestamp)` twice in one request, which is
+        // exactly the duplicate sample #759 exists to avoid.
+        let replayed = {
+            let backlog = self.backlog.lock();
+            let fresh: std::collections::HashSet<(String, i64)> = pending
+                .request
+                .timeseries
+                .iter()
+                .map(sample_identity)
+                .collect();
+            let mut all: Vec<TimeSeries> = backlog
+                .iter()
+                .filter(|t| !fresh.contains(&sample_identity(t)))
+                .cloned()
+                .collect();
+            let n = all.len();
+            all.append(&mut pending.request.timeseries);
+            pending.request.timeseries = all;
+            n
+        };
+
+        if pending.request.timeseries.is_empty() {
             debug!("remote-write: no series to push");
             return Ok(0);
         }
-        let series = request.timeseries.len();
-        let body = encode_write_request(&request)?;
+        let series = pending.request.timeseries.len();
+        let body = encode_write_request(&pending.request)?;
 
-        let response = self
+        let sent = self
             .client
             .post(&self.url)
             .headers(self.headers.clone())
             .body(body)
             .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("remote-write POST failed: {e}"))?;
+            .await;
 
+        // EVERY failure path below retries. The watermark is not advanced, so
+        // the next snapshot re-offers each series whose value has not moved;
+        // the backlog holds the ones whose value has.
+        let response = match sent {
+            Ok(r) => r,
+            Err(e) => {
+                self.hold_for_retry(std::mem::take(&mut pending.request.timeseries));
+                return Err(anyhow::anyhow!("remote-write POST failed: {e}"));
+            }
+        };
         let status = response.status();
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
+            self.hold_for_retry(std::mem::take(&mut pending.request.timeseries));
             anyhow::bail!("remote-write endpoint returned {status}: {}", detail.trim());
         }
 
-        debug!(series, %status, "remote-write push ok");
+        // Delivered. Only now is the watermark true, and only now is the
+        // backlog owed nothing.
+        {
+            let mut seen = self.last_pushed.lock();
+            for (key, ts) in pending.advanced {
+                seen.insert(key, ts);
+            }
+        }
+        self.backlog.lock().clear();
+
+        debug!(series, replayed, %status, "remote-write push ok");
         Ok(series)
+    }
+
+    /// Keep a failed push's series for the next tick, newest wins.
+    fn hold_for_retry(&self, series: Vec<TimeSeries>) {
+        let mut backlog = self.backlog.lock();
+        backlog.clear();
+        backlog.extend(series);
+        let over = backlog.len().saturating_sub(MAX_BACKLOG_SERIES);
+        if over > 0 {
+            backlog.drain(..over);
+            warn!(
+                dropped = over,
+                cap = MAX_BACKLOG_SERIES,
+                "remote-write: retry backlog full; dropped the oldest series"
+            );
+        }
     }
 
     /// Run the periodic push loop until the shutdown signal fires. Push
@@ -369,11 +513,23 @@ mod tests {
     /// the publish boundary (#559). A test using `sysDescr` would be testing a
     /// key no sensor can publish.
     fn record(collector: &MetricCollector, source: &str, metric: &str, value: TelemetryValue) {
+        record_at(collector, source, metric, value, 1_700_000_000_000);
+    }
+
+    /// The same, with the sensor's own clock — what makes two observations of
+    /// one series two SAMPLES rather than one restated.
+    fn record_at(
+        collector: &MetricCollector,
+        source: &str,
+        metric: &str,
+        value: TelemetryValue,
+        timestamp: i64,
+    ) {
         let key = format!("v1/h-0123456789ab/telemetry/snmp/{source}/{metric}");
         collector.record(
             &key,
             &TelemetryPoint {
-                timestamp: 1_700_000_000_000,
+                timestamp,
                 source: source.to_string(),
                 protocol: Protocol::Snmp,
                 metric: metric.to_string(),
@@ -642,6 +798,180 @@ mod tests {
         assert!(ts.samples[0].timestamp > 0);
     }
 
+    /// **#1143, the acceptance.** A sink that fails once must have the sample
+    /// on the second push.
+    ///
+    /// It did not. The watermark was written while *building* the request, so
+    /// the failed push had already marked the series delivered and the next
+    /// tick skipped it — the sample was lost for good. A series slower than
+    /// the push interval (sysinfo at 60 s against the 30 s default) loses
+    /// every datapoint that lands on a failed push, permanently, while
+    /// `run`'s own doc promises "push failures are logged and retried on the
+    /// next tick". The tick retried. The samples did not.
+    #[tokio::test]
+    async fn a_sink_that_fails_once_gets_the_sample_on_the_second_push() {
+        use axum::Router;
+        use axum::body::Bytes;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Fail the first POST with a 503 — an overloaded Mimir, the commonest
+        // shape of this — then accept.
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delivered = Arc::new(parking_lot::Mutex::new(Vec::<WriteRequest>::new()));
+        let app = Router::new().route(
+            "/api/v1/write",
+            post({
+                let attempts = attempts.clone();
+                let delivered = delivered.clone();
+                move |body: Bytes| {
+                    let attempts = attempts.clone();
+                    let delivered = delivered.clone();
+                    async move {
+                        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        let raw = snap::raw::Decoder::new().decompress_vec(&body).unwrap();
+                        delivered
+                            .lock()
+                            .push(WriteRequest::decode(&raw[..]).unwrap());
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let collector = make_collector();
+        record(
+            &collector,
+            "router01",
+            "cpu/load",
+            TelemetryValue::Gauge(0.5),
+        );
+        let cfg = RemoteWriteConfig {
+            enabled: true,
+            url: format!("http://{addr}/api/v1/write"),
+            interval_secs: 30,
+            headers: HashMap::new(),
+        };
+        let client = RemoteWriteClient::new(collector.clone(), &cfg).unwrap();
+
+        assert!(
+            client.push_once().await.is_err(),
+            "the first push must surface the 503"
+        );
+        client.push_once().await.expect("the second push lands");
+
+        let got = delivered.lock();
+        assert_eq!(got.len(), 1, "exactly one delivery");
+        assert_eq!(
+            got[0].timeseries.len(),
+            1,
+            "the sample the failed push was carrying must be in the second"
+        );
+        assert_eq!(
+            label(&got[0].timeseries[0], "__name__"),
+            Some("zensight_snmp_cpu_load")
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    }
+
+    /// The other half of the same fix: a value that MOVED between the failed
+    /// push and the retry is not simply re-offered by the collector — it only
+    /// keeps the latest — so the failed push's sample is replayed from the
+    /// backlog, and both land in timestamp order.
+    #[tokio::test]
+    async fn a_value_that_moved_during_an_outage_is_replayed_not_dropped() {
+        use axum::Router;
+        use axum::body::Bytes;
+        use axum::http::StatusCode;
+        use axum::routing::post;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let delivered = Arc::new(parking_lot::Mutex::new(Vec::<WriteRequest>::new()));
+        let app = Router::new().route(
+            "/api/v1/write",
+            post({
+                let attempts = attempts.clone();
+                let delivered = delivered.clone();
+                move |body: Bytes| {
+                    let attempts = attempts.clone();
+                    let delivered = delivered.clone();
+                    async move {
+                        if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                            return StatusCode::SERVICE_UNAVAILABLE;
+                        }
+                        let raw = snap::raw::Decoder::new().decompress_vec(&body).unwrap();
+                        delivered
+                            .lock()
+                            .push(WriteRequest::decode(&raw[..]).unwrap());
+                        StatusCode::NO_CONTENT
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let collector = make_collector();
+        record(
+            &collector,
+            "router01",
+            "cpu/load",
+            TelemetryValue::Gauge(0.5),
+        );
+        let cfg = RemoteWriteConfig {
+            enabled: true,
+            url: format!("http://{addr}/api/v1/write"),
+            interval_secs: 30,
+            headers: HashMap::new(),
+        };
+        let client = RemoteWriteClient::new(collector.clone(), &cfg).unwrap();
+        assert!(client.push_once().await.is_err());
+
+        // The sensor publishes again during the outage, with its own newer
+        // clock. The collector keeps only this value; the 0.5 exists nowhere
+        // but the backlog.
+        record_at(
+            &collector,
+            "router01",
+            "cpu/load",
+            TelemetryValue::Gauge(0.9),
+            1_700_000_060_000,
+        );
+        client.push_once().await.expect("the second push lands");
+
+        let got = delivered.lock();
+        let values: Vec<f64> = got[0]
+            .timeseries
+            .iter()
+            .flat_map(|t| t.samples.iter().map(|s| s.value))
+            .collect();
+        assert!(
+            values.contains(&0.5) && values.contains(&0.9),
+            "both the replayed and the fresh sample must arrive, got {values:?}"
+        );
+        let stamps: Vec<i64> = got[0]
+            .timeseries
+            .iter()
+            .flat_map(|t| t.samples.iter().map(|s| s.timestamp))
+            .collect();
+        assert!(
+            stamps.windows(2).all(|w| w[0] <= w[1]),
+            "a series' samples must be in ascending timestamp order: {stamps:?}"
+        );
+    }
+
     /// Nothing in the collector -> no HTTP request is made at all.
     #[tokio::test]
     async fn push_once_skips_when_empty() {
@@ -674,13 +1004,20 @@ mod tests {
             TelemetryValue::Gauge(0.5),
         );
 
+        // The watermarks are DELIVERED ones (#1143), so the test commits them
+        // by hand where `push_once` would commit them on a 2xx.
         let mut seen = HashMap::new();
-        let first = build_write_request_since(&collector.snapshot_metrics(), 1, &mut seen);
-        assert_eq!(first.timeseries.len(), 1, "first push sends the series");
+        let first = build_write_request_since(&collector.snapshot_metrics(), 1, &seen);
+        assert_eq!(
+            first.request.timeseries.len(),
+            1,
+            "first push sends the series"
+        );
+        seen.extend(first.advanced);
 
-        let second = build_write_request_since(&collector.snapshot_metrics(), 2, &mut seen);
+        let second = build_write_request_since(&collector.snapshot_metrics(), 2, &seen);
         assert!(
-            second.timeseries.is_empty(),
+            second.request.timeseries.is_empty(),
             "an unchanged series must not be re-pushed as a duplicate sample"
         );
 
@@ -689,7 +1026,22 @@ mod tests {
         for m in &mut newer {
             m.timestamp_ms += 1_000;
         }
-        let third = build_write_request_since(&newer, 3, &mut seen);
-        assert_eq!(third.timeseries.len(), 1, "a fresh observation is pushed");
+        let third = build_write_request_since(&newer, 3, &seen);
+        assert_eq!(
+            third.request.timeseries.len(),
+            1,
+            "a fresh observation is pushed"
+        );
+
+        // AND THE OTHER HALF (#1143): that third build was never delivered —
+        // nothing committed `third.advanced` — so the same observation must
+        // still be offered. Before the fix the build itself had already
+        // written the watermark, and this series was skipped forever.
+        let retry = build_write_request_since(&newer, 4, &seen);
+        assert_eq!(
+            retry.request.timeseries.len(),
+            1,
+            "building a request must not be what marks a series delivered"
+        );
     }
 }
