@@ -213,14 +213,19 @@ impl RigBuilder {
         let filter = Arc::new(FilterManager::pass_all());
         let (ring, capacity) = query::new_ring(10_000);
 
-        // Serve @rpc/<producer>/events (no durable store in the socket rigs;
-        // the store's query path is exercised by a dedicated e2e test).
-        tokio::spawn(query::run_events(
-            session.clone(),
-            producer.clone(),
-            ring.clone(),
-            None,
-        ));
+        // Serve both event procedures (no durable store in the socket rigs;
+        // the store's query path is exercised by a dedicated e2e test). The
+        // rigs get the sibling too (#1147), so an integration test can ask the
+        // one that reports whether the walk finished.
+        for procedure in [query::Procedure::Bare, query::Procedure::Paged] {
+            tokio::spawn(query::run_events_procedure(
+                session.clone(),
+                producer.clone(),
+                ring.clone(),
+                None,
+                procedure,
+            ));
+        }
 
         // Intake bridge (faithful to main.rs's inlined loop, minus analytics).
         if self.drain {

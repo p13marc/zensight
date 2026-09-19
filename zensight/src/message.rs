@@ -53,6 +53,36 @@ impl Reading {
     }
 }
 
+/// One fleet-wide answer to `@rpc/logs/events/page` (#1147).
+///
+/// `partial` is the whole reason this is not a bare `Vec`. The GUI used to
+/// infer "the store had nothing more" from a **short page**, which is wrong in
+/// exactly the case the paging exists for: a search truncated by the sensor's
+/// scan cap returns *zero* rows, zero is shorter than the cap, and the operator
+/// was told the walk had finished. `?pattern=OOM;from=<7d>` over a large store
+/// with the last OOM far back read as "no OOM this week", permanently.
+///
+/// Fleet fan-in (RFC 05 §2.1): every logs sensor answers, so the rows are
+/// concatenated and `partial` is the **disjunction** — one sensor with more to
+/// give means the fleet walk is not done, whatever the others said.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LogPage {
+    pub records: Vec<zensight_common::LogRecord>,
+    /// At least one sensor stopped before finishing its walk.
+    pub partial: bool,
+}
+
+impl LogPage {
+    /// A complete walk that returned these rows.
+    #[must_use]
+    pub fn complete(records: Vec<zensight_common::LogRecord>) -> Self {
+        Self {
+            records,
+            partial: false,
+        }
+    }
+}
+
 /// Messages for the ZenSight application.
 #[derive(Debug, Clone)]
 pub enum Message {
@@ -95,7 +125,7 @@ pub enum Message {
     /// On-demand `@rpc/logs/events` fetch finished (#358): per-line log events
     /// pulled from the logs sensors' rings (all repliers concatenated), to
     /// merge into the rolling buffer + persist for search-back.
-    LogEventsLoaded(Result<Vec<zensight_common::LogRecord>, String>),
+    LogEventsLoaded(Result<LogPage, String>),
 
     /// Sensor health snapshot received.
     HealthSnapshotReceived(HealthSnapshot),
@@ -777,7 +807,7 @@ pub enum Message {
     /// An older-page fetch finished (#601). Kept separate from
     /// `LogEventsLoaded` so a page merge never advances the live-tail
     /// watermark — an older page must not make the tail skip forward.
-    LogOlderPageLoaded(Result<Vec<zensight_common::LogRecord>, String>),
+    LogOlderPageLoaded(Result<LogPage, String>),
     /// Open the Alerts view scoped to one device (#578): the trap-feed row's
     /// pivot, and still the honest link for a record that drove no alert
     /// transition, or one written before #651.

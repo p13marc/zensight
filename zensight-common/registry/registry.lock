@@ -50,6 +50,7 @@ procedure	logs	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	logs	artifact/status	read	-	ArtifactStatus
 procedure	logs	describe	read	-	SchemaSet
 procedure	logs	events	read	-	Vec<LogRecord>
+procedure	logs	events/page	read	-	Page<LogRecord>
 procedure	logs	filter	read	-	TopicStatus
 procedure	logs	filter/set	write	TopicConfig	Ack
 procedure	logs	introspect	read	-	RegistrySlice

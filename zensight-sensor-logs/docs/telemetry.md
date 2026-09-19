@@ -64,6 +64,51 @@ with web01's twenty-five — and the caller, paging from web01's twenty-fifth
 row, got an empty next page and read it as end-of-history with days of matches
 still behind the cursor.
 
+### `@rpc/logs/events/page` — the same walk, in an envelope (#1147)
+
+`events` replies with a bare `Vec<LogRecord>`, which has **nowhere to say "I
+stopped early"**. A search truncated by the scan cap (`MAX_SEARCH_SCAN`,
+500 000 rows) returns zero rows, and zero rows is exactly what "no matches"
+looks like: `?pattern=OOM;from=<7 d>` over a large store with the last OOM nine
+hundred thousand rows back replied `[]`, deterministically, and the operator
+read "no OOM this week".
+
+`events` **cannot be changed in place** — RFC 08 §3 calls a changed reply type
+on an existing path incompatible, and `registry.lock` refuses it — so the
+envelope is a **sibling**. Both are served; they run the same walk over the
+same store and differ only in what goes on the wire:
+
+| Procedure | Reply | Can say "I stopped early" |
+|---|---|---|
+| `@rpc/logs/events` | `Vec<LogRecord>` | no |
+| `@rpc/logs/events/page` | `Page<LogRecord>` | **yes** |
+
+```
+zensight/v1/*/@rpc/logs/events/page?pattern=OOM;from=1719999000000;max=500
+→ { "items": [...], "next_cursor": "1720000000000000000000042",
+    "partial": true, "scanned": 500000 }
+```
+
+It accepts every selector `events` does. `partial` is the required marker:
+`zenkey_fleet::CallAnswer::page_signal()` reads a **boolean field named exactly
+`partial`** and deliberately does not synthesise `partial: false` for a bare
+list, so a reply without it is invisible to `zenctl call` and to every RFC 13
+judge. `next_cursor` is the last uid **examined**, not the last matched — a
+truncated page that matched nothing still carries one, which is what lets the
+caller resume. `partial: true` with a null cursor is a contract violation
+(RFC 05 §3.2).
+
+The hot-ring path reports truncation too. It used to answer `Page::complete`
+unconditionally, on the reasoning that "the ring is the whole of recent
+history, so a short page really is the end of it" — true of a short page, false
+of a full one: `?max=2` over a ring holding a hundred matches replied with two
+and `partial: false`.
+
+**The GUI uses the sibling.** `exhausted` is now `!partial` rather than
+`records.len() < LOG_FETCH_MAX`; the length rule got the truncated-empty case
+backwards, so the feed said "no messages match the current filters" where it
+should have said the sensors had not finished looking.
+
 Ring size is `events_ring_capacity` (default 10 000 ≈ 3 MB, min 100). The GUI
 seeds its buffer from this queryable on open and refreshes on a slow tick.
 

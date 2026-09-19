@@ -267,11 +267,12 @@ async fn durable_store_serves_paginated_time_range() {
     // old `test_{nanos}/logs` spelling; 0.7 refuses it.
     let producer = format!("test-{nanos}-logs");
     let (ring, _cap) = query::new_ring(100); // empty ring; the store answers
-    tokio::spawn(query::run_events(
+    tokio::spawn(query::run_events_procedure(
         session.clone(),
         producer.clone(),
         ring,
         Some(store),
+        query::Procedure::Bare,
     ));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -358,11 +359,12 @@ async fn server_side_search_filters_the_store() {
     // old `test_{nanos}/logs` spelling; 0.7 refuses it.
     let producer = format!("test-{nanos}-logs");
     let (ring, _cap) = query::new_ring(100);
-    tokio::spawn(query::run_events(
+    tokio::spawn(query::run_events_procedure(
         session.clone(),
         producer.clone(),
         ring,
         Some(store),
+        query::Procedure::Bare,
     ));
     tokio::time::sleep(Duration::from_millis(200)).await;
 
