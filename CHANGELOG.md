@@ -469,7 +469,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it read as project config — beside a repo whose CI is Forgejo and which
   has no `.github/` at all. Git keeps both.
 
+### Changed — BREAKING
+
+- **gnmi: `tls.skip_verify` is refused at startup** (#1137). It was documented
+  as "disables server-certificate validation — development only", shipped in
+  `configs/gnmi.json5`, and did **nothing**: the connect path logged a warning
+  and built the same TLS config. An operator set it, read the warning
+  confirming it was off, and watched the connection keep failing
+  `UnknownIssuer` while the backoff climbed to 300 s — with no per-target error
+  document, only the log line they had already dismissed.
+
+  A flag that cannot do what it says refuses loudly rather than sitting inert,
+  which is the call `bmc` already makes for `ipmi`, and the refusal names
+  `ca_cert`: a switch's own self-signed certificate works there, which is what
+  an operator reaching for `skip_verify` actually needs. With
+  `tls.enabled: false` there is nothing to verify, so the flag stays inert
+  rather than a lie and a config carrying it still starts.
+
 ### Fixed
+
+- **gnmi: one awkward leaf name tore the subscription down** (#1137). Path
+  elements went into the key **unslugged** — the one remote sensor that did
+  not slug at that boundary. `Ethernet1/1/1`, an ordinary Arista interface
+  name, split the key into extra chunks and published that leaf at a different
+  subject depth from every other interface's; a `*`, `?` or `#` in a
+  description leaf made the key **illegal**, so `put_point` returned `Err` —
+  and that `Err` propagated out of `process_notification`, out of
+  `subscribe_loop`, into `run`'s error arm. A working subscription, torn down
+  and reconnected with backoff, because one leaf had an awkward name.
+
+  Slugged per **element**, before the join: the join is where the element
+  boundary is lost, and the boundary is exactly what a key needs. A failed
+  publish drops the **point** now, not the connection — the stream is the
+  expensive thing.
+
+  Two more on the same path. `notification.delete` tombstones the key; it was
+  ignored, so the last value a removed leaf ever had stayed on the bus forever
+  (a chart showing the optical power of a transceiver that is in someone's
+  pocket). And two targets may not share a `name`, as `bmc` and `probe`
+  already refuse — it is the key chunk *and* the `source` of every point, so a
+  duplicate publishes over the other with nothing on the bus to say which
+  device a reading came from.
 
 - **probe: an ICMP burst against a hostname reported 100 % loss forever**
   (#1135). The burst path parsed an `IpAddr` and returned "this probe did not
