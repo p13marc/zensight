@@ -212,6 +212,16 @@ The batching seam is explicit in the API: the in-memory side accumulates writes
 `(PersistentStore, rows)` to be flushed on a blocking task, keeping the redb
 transaction off the render path.
 
+`record`'s doc says "O(1), safe to call inline on the UI thread", and every
+accessor beside it has to keep that true for the *other* caller. The historian
+asks `pending_sample_count()` on **every ingested point**, while holding this
+store's mutex — the same one every `@rpc` query handler takes — to decide
+whether its `batch_size` early flush is due. Summing `pending.len()` across the
+series map made that O(series) and put the cost inside the lock, on a path that
+was already starving the query surface (#1211). It is a maintained counter now,
+touched in exactly the two places `series.pending` is: the push in `record` and
+the drain in `take_flush_batch`.
+
 ## Other tables
 
 The store also defines a content-addressed `chunks` table (key `<algo>/<hex>`,

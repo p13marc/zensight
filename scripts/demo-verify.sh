@@ -56,12 +56,11 @@ tmp=""
 pids=()
 cleanup() {
     local rc=$?
-    for pid in "${pids[@]:-}"; do
-        [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
-    done
-    for pid in "${pids[@]:-}"; do
-        [[ -n "$pid" ]] && wait "$pid" 2>/dev/null || true
-    done
+    # Bounded (#1211): TERM, a few seconds, then KILL. An unbounded `wait` on
+    # a child that ignores SIGTERM held this job open until the 45-minute
+    # runner timeout, three runs in a row, after the diagnosis had already
+    # been printed.
+    stop_children "${pids[@]:-}"
     # Keep the evidence when a failure pointed at it (#790).
     if [[ -n "$tmp" ]]; then
         if [[ "$KEEP_TMP" == 1 ]]; then

@@ -122,6 +122,25 @@ pub async fn run(
                 record_sample(&sample, &store, &counters, &shedding, &batch);
             }
         }
+        // GIVE THE SCHEDULER THE THREAD BACK (#1211).
+        //
+        // `recv_async` is zenoh's `FifoChannelHandler`, a flume channel, and
+        // flume does not participate in tokio's cooperative budget.
+        // `select!` adds no yield either — it returns the moment a branch is
+        // ready. So while a backlog drains, the sample branch is ready every
+        // time and this task owns its worker thread outright.
+        //
+        // What that starved is the `@rpc` surface of THIS process: `range`,
+        // `series`, `stats` and `timeline` are tasks on the same runtime, and
+        // with two producers on an oversubscribed box not one of them answered
+        // a single query in 235 seconds — the transport backed up far enough
+        // that publishers could no longer push a non-droppable message to us
+        // at all.
+        //
+        // The backlog that matters most is the first: the subscriber asks
+        // every late-detected publisher for its whole history at startup,
+        // which is exactly when someone is watching.
+        tokio::task::yield_now().await;
     }
 }
 
