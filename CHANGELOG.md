@@ -319,6 +319,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **exporter-prometheus: `zensight_alert` carried an unbounded free-text
+  `summary` label** (#1144). A summary typically embeds the measured value —
+  *"disk /var 91 % full"*, *"load 14.2 > 8.0"* — so every distinct wording
+  minted a TSDB series that lived for the retention period, multiplied by a
+  churning `acked`. The canonical Prometheus cardinality anti-pattern, on the
+  family that exists to be scraped by Alertmanager.
+
+  A single scrape could not show it, which is why it looked harmless: this
+  exporter's own store holds one alert at a time, and the TSDB is what
+  remembers. So the fix is asserted where the claim is actually made — the
+  series a given alert renders does not vary with its summary. Alertmanager
+  wants a summary as an *annotation* and gets it from the alert document;
+  `alert_key` identifies the series. `summary` stays in the reserved set so a
+  sensor's own structured label of that name cannot put the free text back.
+
+  Two siblings the issue bundled. `is_acked` builds its `AlertRef` from
+  `alert.protocol`'s `Display` while the correlator builds it from the key's
+  producer chunk; they are the same string today and **nothing said so**, so a
+  producer whose chunk diverged would have rendered `acked="false"` forever,
+  silently, for every alert it ever raised. One ref now goes through both
+  constructors for every protocol. And `# TYPE`, `# HELP` and the unit note
+  are taken from `series[0]` of a group that came out of a `HashMap` — so a
+  family whose series disagree emitted a TYPE that depended on hash order. The
+  group is sorted before anything is read from it.
+
 - **exporter-prometheus: a failed remote-write push lost its samples for
   good** (#1143). `build_write_request_since` read the per-series watermark
   and wrote it back **in the same closure**, while *building* the request —
