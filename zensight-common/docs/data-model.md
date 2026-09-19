@@ -257,18 +257,42 @@ envelope beside the old one, the old one deprecated.
 `serialization.rs` encodes with either format:
 
 ```rust
-use zensight_common::{encode, decode, decode_auto, Format};
+use zensight_common::{encode, decode, decode_auto, decode_with_encoding, Format};
 
 let bytes = encode(&point, Format::Cbor)?;      // Cbor is the default
 let back: TelemetryPoint = decode(&bytes, Format::Cbor)?;
-let sniffed: TelemetryPoint = decode_auto(&bytes)?; // detects format from first byte
+
+// What a subscriber should call: the sample says what it is (RFC 08 §7).
+let p: TelemetryPoint = decode_with_encoding(sample.encoding(), &bytes)?;
+
+// The last resort, for bytes with no metadata attached.
+let sniffed: TelemetryPoint = decode_auto(&bytes)?;
 ```
 
 - **`Format::Cbor` is the default** — compact binary, the right choice on
   bandwidth-sensitive links (a regression test pins CBOR at < 80% of JSON size).
-- **`decode_auto`** sniffs the first byte: `{` or `[` ⇒ JSON, otherwise CBOR. Every
-  consumer decodes via `decode_auto`, so JSON and CBOR senders stay interoperable
-  during a rollout.
+- **`decode_with_encoding`** reads the sample's declared `Encoding` and only
+  sniffs when it declared nothing this build knows. That is RFC 08 §7's
+  precedence in order, and until #1148 **nothing read it**: every producer
+  stamped `Format::encoding()` on every put and every consumer threw it away.
+- **`decode_auto`** sniffs the first byte, and **only two shapes decide**: `{`
+  or `[` ⇒ JSON, `0x80`–`0xDB` (CBOR array, map or tag) ⇒ CBOR. Anything else is
+  an `AmbiguousEncoding` error rather than a guess.
+
+  The guess was not survivable. JSON `42` is `0x34`, which is a complete, valid
+  CBOR negative integer, so `decode_auto::<i64>(b"42")` returned **−21** with no
+  error anywhere. Everything this bus carries at the top level is a struct or a
+  sequence, so refusing scalars costs nothing real; a caller that genuinely has
+  one knows its format and should say so.
+
+  The reverse mis-sniff survives and is fine: `0x7B` is both `{` and CBOR major
+  3 / ai 27, so a top-level CBOR string reads as JSON and **fails**. A wrong
+  answer that says it is wrong is a different class of problem.
+- **Request bodies** on the `<topic>/set` seam go through `RpcRequest::decode`,
+  which is `decode_auto` — so a caller whose session serialises CBOR is
+  answered. Before #1148 that half was `serde_json::from_slice` alone, and every
+  `expectations/set` and `rules/set` answered `error/invalid-args` to this
+  tree's own default encoding.
 
 ## QosClass
 

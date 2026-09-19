@@ -113,7 +113,7 @@ async fn handle_set(
     // What was acted on, for the trail. An override names one host's one
     // topic, and the record is read without the payload.
     let target = req
-        .json::<DesiredOverride>()
+        .decode::<DesiredOverride>()
         .ok()
         .map(|o| format!("{}:{}", o.host, o.key()));
 
@@ -126,7 +126,9 @@ async fn handle_set(
             )
             .with_refused_by("allow_overrides"));
         }
-        let mut o: DesiredOverride = req.json()?;
+        // JSON or CBOR (#1148): the caller's session picks the encoding, and
+        // this tree's default is CBOR.
+        let mut o: DesiredOverride = req.decode()?;
         // The actor is the call's, never the body's. An author who reports
         // themselves is an author nobody can be asked about.
         o.by = req.param("actor");

@@ -153,8 +153,10 @@ pub async fn fetch_latency(
         .ok()?;
     while let Ok(reply) = replies.recv_async().await {
         if let Ok(sample) = reply.result()
-            && let Ok(report) =
-                zensight_common::decode_auto::<LatencyReport>(&sample.payload().to_bytes())
+            && let Ok(report) = zensight_common::decode_with_encoding::<LatencyReport>(
+                sample.encoding(),
+                &sample.payload().to_bytes(),
+            )
         {
             return Some(report);
         }
