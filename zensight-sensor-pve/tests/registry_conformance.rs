@@ -36,12 +36,17 @@ fn every_registered_family_has_an_emitter() {
         "guest/140/provisioned_bytes",
         "guest/140/uptime_secs",
         "guest/140/running",
-        "storage/local-lvm/total_bytes",
-        "storage/local-lvm/used_bytes",
-        "storage/local-lvm/avail_bytes",
-        "storage/local-lvm/used_ratio",
-        "storage/local-lvm/allocated_bytes",
-        "storage/local-lvm/overcommit_ratio",
+        // `{node}-{pool}` for a non-shared pool, the bare name for a shared
+        // one (#1132). `{storage}` is a wildcard chunk, so the registry does
+        // not care which — but this list is meant to read as what a real
+        // deployment publishes, and on a cluster it publishes both shapes.
+        "storage/pve-local-lvm/total_bytes",
+        "storage/pve-local-lvm/used_bytes",
+        "storage/pve-local-lvm/avail_bytes",
+        "storage/pve-local-lvm/used_ratio",
+        "storage/pve-local-lvm/allocated_bytes",
+        "storage/pve-local-lvm/overcommit_ratio",
+        "storage/ceph-vm/used_ratio",
         "backup/140/size_bytes",
         "backup/140/size_change_pct",
         "backup/140/age_secs",

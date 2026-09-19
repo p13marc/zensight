@@ -49,6 +49,20 @@ fn default_expiry_critical_days() -> i64 {
     7
 }
 
+/// Drop a trailing `:port`, leaving a bracketed IPv6 literal intact.
+///
+/// `rsplit_once(':')` alone cuts `[::1]:8443` at the last colon **inside** the
+/// address when there is no port at all, which is how `[::1]` became `[::`
+/// (#1134). A colon after the closing bracket is a port; one before it is the
+/// address.
+fn strip_port(host: &str) -> &str {
+    match host.rsplit_once(':') {
+        Some((head, _)) if !head.ends_with(']') && head.contains(':') => host,
+        Some((head, _)) => head,
+        None => host,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeSensorConfig {
     #[serde(default)]
@@ -303,11 +317,26 @@ impl Target {
 
     /// The host this target is about — for SNI, for SAN matching, and for
     /// deciding whether a redirect left it.
+    ///
+    /// Always lowercase and always without brackets, whatever the kind
+    /// (#1134): the comparison it feeds is against a URL parser's `host_str`,
+    /// which is lowercase, and DNS names are case-insensitive by definition.
     pub fn host(&self) -> Option<String> {
         if let Some(n) = &self.server_name {
-            return Some(n.clone());
+            // Lowercased like every other path (#1134): this feeds an
+            // off-host comparison against a URL parser's `host_str`, and SNI,
+            // and SAN matching — all three of which are case-insensitive by
+            // definition, and the first of which was not.
+            return Some(n.trim_matches(['[', ']']).to_ascii_lowercase());
         }
         match self.kind {
+            // Brackets trimmed and lowercased like every other arm (#1134).
+            // Without the trim, `https://[::1]:8443/` yielded `[::1]` while
+            // the URL parser yields `[::1]` too — but the port split on the
+            // LAST colon cut the address itself, so the comparison was against
+            // `[::` and every poll reported a permanent off-host redirect.
+            // Without the lowercase, a target written `https://Example.com/`
+            // reported one against its own answer.
             ProbeKind::Http => self
                 .target
                 .split("://")
@@ -315,13 +344,12 @@ impl Target {
                 .unwrap_or(&self.target)
                 .split(['/', '?'])
                 .next()
-                .map(|h| h.rsplit_once(':').map_or(h, |(x, _)| x).to_string()),
+                .map(strip_port)
+                .map(|h| h.trim_matches(['[', ']']).to_ascii_lowercase()),
             ProbeKind::Tls | ProbeKind::Tcp => Some(
-                self.target
-                    .rsplit_once(':')
-                    .map_or(self.target.as_str(), |(h, _)| h)
+                strip_port(&self.target)
                     .trim_matches(['[', ']'])
-                    .to_string(),
+                    .to_ascii_lowercase(),
             ),
             // An ntp target is a host, optionally with a port.
             ProbeKind::Dns | ProbeKind::Icmp | ProbeKind::Ntp => Some(
