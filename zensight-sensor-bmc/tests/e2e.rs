@@ -232,11 +232,23 @@ async fn fan_collection() -> Json<Value> {
         "/redfish/v1/Chassis/1/ThermalSubsystem/Fans",
     ))
 }
-async fn thermal_collection() -> Json<Value> {
-    Json(member_links(
-        2,
-        "/redfish/v1/Chassis/1/ThermalSubsystem/ThermalMetrics",
-    ))
+/// `ThermalMetrics` is a **singleton** — no `Members`, the readings on the
+/// body (#1131).
+///
+/// This fixture used to serve it as a collection, with per-index member
+/// routes, which is a shape Redfish does not have. That is why the bug
+/// survived a passing test suite: the fixture had been written to match the
+/// client rather than the protocol, so the client's collection read found the
+/// `Members` array the fixture invented, and the assertion below passed
+/// against a fiction. Against real firmware it found nothing and this sensor
+/// published no temperature at all on the modern surface.
+async fn thermal_metrics() -> Json<Value> {
+    Json(json!({
+        "@odata.id": "/redfish/v1/Chassis/1/ThermalSubsystem/ThermalMetrics",
+        "Id": "ThermalMetrics",
+        "Name": "Thermal Metrics",
+        "TemperatureReadingsCelsius": temperatures(),
+    }))
 }
 
 async fn psu_member(
@@ -248,9 +260,6 @@ async fn psu_member(
 }
 async fn fan_member(axum::extract::Path(i): axum::extract::Path<usize>) -> Json<Value> {
     Json(fans().as_array().unwrap()[i].clone())
-}
-async fn thermal_member(axum::extract::Path(i): axum::extract::Path<usize>) -> Json<Value> {
-    Json(temperatures().as_array().unwrap()[i].clone())
 }
 
 async fn spawn(fixture: Fixture) -> SocketAddr {
@@ -293,11 +302,7 @@ async fn spawn(fixture: Fixture) -> SocketAddr {
         )
         .route(
             "/redfish/v1/Chassis/1/ThermalSubsystem/ThermalMetrics",
-            get(thermal_collection),
-        )
-        .route(
-            "/redfish/v1/Chassis/1/ThermalSubsystem/ThermalMetrics/{i}",
-            get(thermal_member),
+            get(thermal_metrics),
         )
         // A read-only account legitimately cannot see Systems on some
         // firmware. It comes back as no MACs, not as a failed sweep.

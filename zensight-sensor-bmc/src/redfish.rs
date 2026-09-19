@@ -197,15 +197,26 @@ impl RedfishClient {
                 let fans = self
                     .collection(&format!("/redfish/v1/Chassis/{id}/ThermalSubsystem/Fans"))
                     .await?;
-                let sensors = self
-                    .collection(&format!(
+                // ThermalMetrics is a SINGLETON, not a collection (#1131).
+                // It has no `Members`; it carries `TemperatureReadingsCelsius`
+                // — an array of sensor excerpts — directly on the body. Read
+                // through `collection()` it yielded nothing, every time, so
+                // this sensor published no temperature at all on the modern
+                // surface while the legacy arm below worked correctly. A BMC
+                // old enough to serve only `Chassis/{id}/Thermal` reported
+                // temperatures and a new one did not, which is the inversion
+                // that kept it hidden.
+                let sensors = thermal_readings(
+                    self.get(&format!(
                         "/redfish/v1/Chassis/{id}/ThermalSubsystem/ThermalMetrics"
                     ))
-                    .await?;
+                    .await?
+                    .as_ref(),
+                );
                 (
                     supplies.iter().map(parse_supply).collect::<Vec<_>>(),
                     fans.iter().map(parse_fan).collect::<Vec<_>>(),
-                    sensors.iter().map(parse_thermal).collect::<Vec<_>>(),
+                    sensors,
                     RedfishSurface::Subsystem,
                 )
             } else {
@@ -355,6 +366,40 @@ pub fn members(body: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// The temperature excerpts on a `ThermalMetrics` **singleton** (#1131).
+///
+/// Redfish puts these on the body as `TemperatureReadingsCelsius`, not behind
+/// a `Members` collection — the mistake this exists to make impossible to
+/// repeat. `TemperatureSummaryCelsius` is accepted as the older spelling some
+/// firmware still serves.
+///
+/// The excerpts are a reduced shape (`DeviceName`/`Reading`, no `Status`), and
+/// `parse_thermal` already tolerates it: it tries `Reading` beside
+/// `ReadingCelsius`, and `MemberId` beside `Id`. `DeviceName` is mapped onto
+/// `Name` here so the series is labelled with something an operator recognises
+/// rather than an empty string.
+pub fn thermal_readings(body: Option<&Value>) -> Vec<ThermalSensor> {
+    let Some(body) = body else {
+        return Vec::new();
+    };
+    let readings = body
+        .get("TemperatureReadingsCelsius")
+        .or_else(|| body.get("TemperatureSummaryCelsius"))
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    readings
+        .iter()
+        .map(|r| {
+            let mut sensor = parse_thermal(r);
+            if sensor.name.is_none() {
+                sensor.name = text(r, "DeviceName").or_else(|| text(r, "DataSourceUri"));
+            }
+            sensor
+        })
+        .collect()
 }
 
 /// A legacy embedded array (`Power.PowerSupplies`, `Thermal.Fans`).
@@ -687,6 +732,61 @@ mod tests {
         fill_ids(&mut fans, |f| &mut f.id);
         assert_eq!(fans[0].id, "0");
         assert_eq!(fans[1].id, "1");
+    }
+
+    /// #1131: `ThermalMetrics` is a singleton. Read as a collection it yielded
+    /// nothing on every BMC serving the modern surface, so the sensor whose
+    /// whole purpose is "a physical fault the host cannot see" published no
+    /// temperature at all — silently, because an empty list is what a chassis
+    /// with no sensors also looks like.
+    ///
+    /// This body is the shape Redfish actually serves: NO `Members`.
+    #[test]
+    fn thermal_metrics_is_a_singleton_not_a_collection() {
+        let body = json!({
+            "@odata.id": "/redfish/v1/Chassis/1/ThermalSubsystem/ThermalMetrics",
+            "Id": "ThermalMetrics",
+            "TemperatureReadingsCelsius": [
+                {"DeviceName": "CPU1 Temp", "Reading": 47.0, "MemberId": "0"},
+                {"DeviceName": "Inlet Temp", "Reading": 21.5, "MemberId": "1"},
+            ],
+        });
+
+        // The old path: no `Members`, so a collection read finds nothing.
+        assert!(
+            members(&body).is_empty(),
+            "if this ever grows a Members array the singleton premise is wrong"
+        );
+
+        let sensors = thermal_readings(Some(&body));
+        assert_eq!(sensors.len(), 2, "both readings must survive");
+        assert_eq!(sensors[0].name.as_deref(), Some("CPU1 Temp"));
+        assert_eq!(sensors[0].celsius, Some(47.0));
+        assert_eq!(sensors[1].name.as_deref(), Some("Inlet Temp"));
+        assert_eq!(sensors[1].celsius, Some(21.5));
+        assert_eq!(sensors[1].id, "1", "MemberId keys the series");
+    }
+
+    /// A chassis that really has no thermal readings, and a BMC that does not
+    /// serve the resource at all, are both an empty list — not a panic and not
+    /// a fabricated zero.
+    #[test]
+    fn an_absent_or_empty_thermal_metrics_is_no_readings() {
+        assert!(thermal_readings(None).is_empty());
+        assert!(thermal_readings(Some(&json!({"Id": "ThermalMetrics"}))).is_empty());
+        assert!(thermal_readings(Some(&json!({"TemperatureReadingsCelsius": []}))).is_empty());
+    }
+
+    /// Some firmware serves the older `TemperatureSummaryCelsius` spelling.
+    #[test]
+    fn the_older_temperature_summary_spelling_is_read_too() {
+        let body = json!({
+            "TemperatureSummaryCelsius": [{"DeviceName": "Exhaust", "Reading": 33.0}],
+        });
+        let sensors = thermal_readings(Some(&body));
+        assert_eq!(sensors.len(), 1);
+        assert_eq!(sensors[0].name.as_deref(), Some("Exhaust"));
+        assert_eq!(sensors[0].celsius, Some(33.0));
     }
 
     #[test]
