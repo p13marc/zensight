@@ -49,8 +49,20 @@ zensight/v1/*/@rpc/logs/events?since=1719999000000;max=500;source=web01
 | Param | Meaning |
 |---|---|
 | `since=<epoch_ms>` | only records with `ts >= since` (inclusive) |
-| `max=<n>` | reply cap, newest-first (default 500, clamped to the ring capacity) |
+| `max=<n>` | reply cap, newest-first (default 500, **hard-clamped to 10 000**, #1147) |
 | `source=<name>` | only records from one observed device (a central receiver holds many); `host=` is accepted as a legacy alias |
+
+`max` is clamped because the reply is built in one `Vec` on a blocking thread
+the handler awaits: the documentation claimed a clamp and there was none, so
+`?max=5000000` asked this process to materialise five million records and
+serialise them into one message (#1147).
+
+`source=` is applied **inside** the store walk. It used to be applied after the
+store had already returned `max` rows, so on a receiver holding twenty hosts
+`?source=web01;max=500` fetched five hundred rows from all of them and replied
+with web01's twenty-five — and the caller, paging from web01's twenty-fifth
+row, got an empty next page and read it as end-of-history with days of matches
+still behind the cursor.
 
 Ring size is `events_ring_capacity` (default 10 000 ≈ 3 MB, min 100). The GUI
 seeds its buffer from this queryable on open and refreshes on a slow tick.

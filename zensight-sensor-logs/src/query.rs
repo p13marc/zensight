@@ -25,11 +25,22 @@ use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use zensight_common::LogRecord;
+use zensight_common::page::Page;
 
 use crate::store::LogStore;
 
 /// Default reply cap when no `?max=` selector is supplied.
 pub const DEFAULT_EVENTS_REPLY_MAX: usize = 500;
+
+/// The largest `?max=` a caller may ask for (#1147).
+///
+/// The documentation claimed a clamp and there was none: any `usize` parsed,
+/// so `?max=5000000` asked one blocking thread — which the query handler
+/// awaits — to materialise five million `LogRecord`s into a `Vec` and then
+/// serialise them into one reply. A reply cap is a memory bound on this
+/// process, not a courtesy to the caller, and `partial` + `next_cursor` is
+/// how a caller asks for more.
+pub const MAX_EVENTS_REPLY_MAX: usize = 10_000;
 
 /// Minimum ring capacity (config values below this are clamped up).
 pub const MIN_EVENTS_RING_CAPACITY: usize = 100;
@@ -118,7 +129,9 @@ pub async fn run_events(
             .or_else(|| params.get("limit"))
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_EVENTS_REPLY_MAX);
+            .unwrap_or(DEFAULT_EVENTS_REPLY_MAX)
+            // Clamped, as the documentation has always said it was (#1147).
+            .min(MAX_EVENTS_REPLY_MAX);
 
         let from = params.get("from").and_then(|v| v.parse::<i64>().ok());
         let to = params.get("to").and_then(|v| v.parse::<i64>().ok());
@@ -144,39 +157,61 @@ pub async fn run_events(
             }
         };
 
-        let records: Vec<LogRecord> = if durable_query && store.is_some() {
+        let page: Page<LogRecord> = if durable_query && store.is_some() {
             // Durable, paginated path — blocking redb range walk off the runtime.
             let store = store.clone().expect("checked is_some");
             let host_f = host.clone();
             let (from_ms, to_ms) = (from.unwrap_or(i64::MIN), to.unwrap_or(i64::MAX));
             let after = after_uid.clone();
             tokio::task::spawn_blocking(move || {
-                let page = if matcher.is_trivial() {
-                    store.query(from_ms, to_ms, after.as_deref(), max)
-                } else {
-                    store.search(
+                // ONE walk that knows every filter (#1147). The host filter
+                // used to be applied by this closure, AFTER the store had
+                // returned `max` rows — so `max` counted rows the caller had
+                // not asked for and the page that came back was a fraction of
+                // one.
+                store
+                    .page(crate::store::PageQuery {
                         from_ms,
                         to_ms,
-                        after.as_deref(),
-                        max,
-                        &matcher,
-                        MAX_SEARCH_SCAN,
-                    )
-                };
-                page.unwrap_or_default()
-                    .into_iter()
-                    .filter(|r| host_f.as_deref().is_none_or(|h| r.host == h))
-                    .collect::<Vec<_>>()
+                        after_uid: after.as_deref(),
+                        limit: max,
+                        host: host_f.as_deref(),
+                        matcher: &matcher,
+                        max_scan: MAX_SEARCH_SCAN,
+                    })
+                    .unwrap_or_else(|_| Page::complete(Vec::new()))
             })
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|_| Page::complete(Vec::new()))
         } else {
             // Hot path — snapshot the ring under the lock, reply outside it.
+            // The ring is the whole of recent history, so a short page there
+            // really is the end of it.
             match ring.lock() {
-                Ok(r) => filter_ring(&r, since, host.as_deref(), max, &matcher),
-                Err(_) => Vec::new(),
+                Ok(r) => Page::complete(filter_ring(&r, since, host.as_deref(), max, &matcher)),
+                Err(_) => Page::complete(Vec::new()),
             }
         };
+        debug_assert!(
+            !page.is_contract_violation(),
+            "a truncated page must carry a cursor (RFC 05 §3.2)"
+        );
+        // STILL A BARE `Vec` ON THE WIRE (#1147, partly).
+        //
+        // The envelope is built — `LogStore::page` returns a `Page<LogRecord>`
+        // with the cursor and `scanned` the RFC requires — and it is not sent,
+        // because `registry/logs.toml` declares this procedure's reply as
+        // `Vec<LogRecord>` and RFC 08 §3 calls a changed reply type on an
+        // existing path **incompatible**: the lock refuses it, and the
+        // sanctioned path is to retire `events` and add a sibling. That is a
+        // keyspace decision with a GUI migration attached, not a line to slip
+        // into a bug fix, so it stays open on #1147.
+        //
+        // What ships here is the half the issue's own comment calls local and
+        // unblocked: the filter moved inside the walk, the `max` clamp, and
+        // the bounded start. The truncated-search blind spot is the half that
+        // waits.
+        let records = page.items;
         match serde_json::to_vec(&records) {
             Ok(payload) => {
                 if let Err(e) = query.reply(key.as_str(), payload).await {

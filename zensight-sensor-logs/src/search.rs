@@ -33,8 +33,8 @@ impl PatternMatch {
     }
 }
 
-/// A compiled set of content selectors. An empty matcher matches every record;
-/// [`LogMatcher::is_trivial`] reports that so callers can skip it.
+/// A compiled set of content selectors. An empty matcher matches every record,
+/// which [`LogMatcher::is_trivial`] reports.
 pub struct LogMatcher {
     pattern: Option<PatternMatch>,
     /// Syslog severity number (0=emerg … 7=debug); match records at least this
@@ -77,8 +77,18 @@ impl LogMatcher {
         })
     }
 
-    /// True when no selector is set — every record matches, so the caller can
-    /// skip per-record evaluation entirely.
+    /// True when no selector is set — every record matches.
+    ///
+    /// The query handler used to branch on this to choose between two
+    /// different store walks, and that seam was the bug (#1147): only one of
+    /// them applied the host filter inside the walk. There is one walk now
+    /// and `matches` on a trivial matcher is five `is_none()` checks, so the
+    /// branch bought nothing and cost a filter. Kept because it says
+    /// something true about a matcher, and asserted by the tests below.
+    #[allow(
+        dead_code,
+        reason = "#1147: the one walk needs no fast path; still true of a matcher"
+    )]
     pub fn is_trivial(&self) -> bool {
         self.pattern.is_none()
             && self.severity_max_num.is_none()

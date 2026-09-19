@@ -266,8 +266,23 @@ latency. Health gauges: `store/records`, `store/oldest_age_secs`,
 
 **Query** (`@rpc/logs/events`): `from=<ms>`/`to=<ms>` select an inclusive time
 window; `after_uid=<uid>` is a pagination cursor (pass the previous page's
-last/oldest uid) and `limit=<n>` caps the page. Pages are newest-first. The
-legacy `since`/`max` ring selectors keep working.
+last/oldest uid) and `limit=<n>` caps the page (clamped to 10 000, #1147).
+Pages are newest-first. The legacy `since`/`max` ring selectors keep working.
+
+A `to=`-only walk **starts at the window** rather than at the newest row
+(#1147). The uid is `<13-digit ts_ms><12-digit seq>`, so the range is bounded
+above by `to_ms + 1` padded with zeroes; before that, `?to=<a week ago>` began
+at the newest record and skipped down, unbounded, on the blocking thread the
+handler awaits.
+
+**A truncated search is still indistinguishable from no matches.** The walk
+knows — it returns a `Page` with `partial`, `scanned` and a cursor taken from
+the last row *examined* rather than the last row matched — but the reply on the
+wire is still the bare `Vec<LogRecord>` `registry/logs.toml` declares. Changing
+a procedure's reply type is an RFC 08 §3 **incompatible** edit, so it needs a
+retirement and a sibling procedure rather than an in-place change; that half of
+#1147 is open. Until then, `?pattern=OOM;from=<7d>` over a store large enough
+to hit `MAX_SEARCH_SCAN` can answer `[]` when the match is behind the cap.
 
 **Server-side search** (#553): `pattern=<regex>` (message; a
 metacharacter-free pattern takes a substring fast path), `severity_min=<slug|n>`

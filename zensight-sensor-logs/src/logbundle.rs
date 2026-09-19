@@ -141,10 +141,18 @@ impl ArtifactProducer for LogBundleProducer {
             // Durable store (scan bounded so a huge range can't run forever).
             if let Some(store) = &store {
                 let scan_cap = max_lines.saturating_mul(4).max(100_000);
-                if let Ok(recs) =
-                    store.search(from_ms, to_ms, None, max_lines + 1, &matcher, scan_cap)
-                {
-                    for r in recs {
+                // No host filter: a bundle is about this receiver, whatever
+                // it holds.
+                if let Ok(page) = store.page(crate::store::PageQuery {
+                    from_ms,
+                    to_ms,
+                    after_uid: None,
+                    limit: max_lines + 1,
+                    host: None,
+                    matcher: &matcher,
+                    max_scan: scan_cap,
+                }) {
+                    for r in page.items {
                         by_uid.insert(r.uid.clone(), r);
                     }
                 }
