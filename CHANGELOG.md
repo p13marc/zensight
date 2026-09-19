@@ -317,7 +317,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   where it read as project config — beside a repo whose CI is Forgejo and which
   has no `.github/` at all. Git keeps both.
 
+### Added
+
+- **`listening` sees UDP** (#1138). `ListeningExpectation` gains `proto`
+  (`tcp` · `udp` · `both`, **`tcp` by default**) and `dual_stack`, and
+  `read_listeners` reads `/proc/net/{udp,udp6}` beside the TCP tables.
+
 ### Fixed
+
+- **hostspec: `forbid: true` on a UDP port was a false all-clear** (#1138).
+  `listening` parsed `/proc/net/tcp{,6}` only and the expectation had no
+  protocol field, so there was no way to say otherwise. `{port: 53}` for a
+  resolver or `{port: 514}` for a syslog receiver was a permanent false
+  *"nothing is listening"* — and `{port: 53, forbid: true}`, which is how an
+  operator writes *"this host must not expose an open resolver"*, reported
+  **clean** while the port was wide open. From the sensor whose entire purpose
+  is machine-checked assertions.
+
+  `proto` defaults to `tcp`, so every expectation written before this means
+  what it meant and matches what it matched; a `tcp` expectation is **not**
+  satisfied by a UDP listener on the same port, and `both` is satisfied by
+  either. Findings carry a `proto` label, and the summary reads `53/udp`.
+
+  `dual_stack` comes with it. The exact `0.0.0.0` / `::` comparison is
+  deliberate and stays the default — it is what lets each family be forbidden
+  alone — but *"not world-reachable"* is the commoner intent by far, and
+  writing it needed two expectations that had to be kept in step.
+
+  UDP has no listen state: the parser selects `st == 07` (`TCP_CLOSE`), which
+  is what an unconnected datagram socket reports and what `ss -ulnp` counts as
+  listening. `read_listeners` is `Unreadable` only when **no** table could be
+  read, so a kernel built without IPv6 is an absent table rather than a failed
+  observation.
 
 - **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
   (#1094). Three ways the one job that guards an opt-in feature was weaker than

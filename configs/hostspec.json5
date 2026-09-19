@@ -93,14 +93,24 @@
       //     newer_than_secs: 93600, size_within_pct_of_previous: 40 },
       // ],
 
-      // listening — TCP listeners in this namespace, by port and exact bound
-      // address; forbid: true fires when a matching listener EXISTS. NOTE
-      // "0.0.0.0" and "::" are DISTINCT wildcards: forbid both if you mean
-      // "not world-reachable" on a dual-stack host.
+      // listening — TCP and UDP listeners in this namespace, by port and
+      // exact bound address; forbid: true fires when a matching listener
+      // EXISTS. proto is "tcp" (the default) / "udp" / "both".
+      //
+      // NOTE "0.0.0.0" and "::" are DISTINCT wildcards: forbid both if you
+      // mean "not world-reachable" on a dual-stack host, or set
+      // dual_stack: true and write it once.
       // listening: [
       //   { name: "api-vpn-only",  port: 8443, addr: "10.8.0.1" },
       //   { name: "api-not-any4",  port: 8443, addr: "0.0.0.0", forbid: true, for_secs: 120 },
       //   { name: "api-not-any6",  port: 8443, addr: "::",      forbid: true, for_secs: 120 },
+      //   // The same intent as the pair above, in one assertion.
+      //   { name: "api-not-any",   port: 8443, addr: "0.0.0.0", dual_stack: true,
+      //     forbid: true, for_secs: 120 },
+      //   // A resolver that must answer, and must not answer the world.
+      //   { name: "dns-listening", port: 53,  proto: "both" },
+      //   { name: "no-open-resolver", port: 53, proto: "udp", addr: "0.0.0.0",
+      //     dual_stack: true, forbid: true },
       // ],
 
       // symlinks — the LITERAL readlink target (never canonicalized: the
