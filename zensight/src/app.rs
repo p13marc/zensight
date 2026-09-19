@@ -2044,16 +2044,27 @@ impl ZenSight {
                     device.parallax_detail.apply_stream_status(&status);
                 }
             }
-            Message::SnmpInterfaceTable { device, table } => {
+            Message::SnmpInterfaceTable {
+                origin,
+                device,
+                table,
+            } => {
                 // Fleet-wide map for the overview's rate-based rankings
-                // (#533); LWW per device.
+                // (#533); LWW per **device**, and a device is the triple
+                // (#1118) — two pollers polling one `switch01` are two
+                // switches, and on a name key they took turns overwriting
+                // each other.
+                let id = DeviceId {
+                    protocol: zensight_common::Protocol::Snmp,
+                    origin,
+                    source: device,
+                };
                 self.dashboard
                     .snmp_interfaces
-                    .insert(device.clone(), table.clone());
+                    .insert(id.clone(), table.clone());
                 // The currently-open SNMP device view consumes it too (#530).
                 if let Some(selected) = self.selected_device.as_mut()
-                    && selected.device_id.protocol == zensight_common::Protocol::Snmp
-                    && selected.device_id.source == device
+                    && selected.device_id == id
                 {
                     let DeviceDetailState {
                         snmp_detail,
@@ -2063,11 +2074,19 @@ impl ZenSight {
                     snmp_detail.apply_interfaces(table, metrics);
                 }
             }
-            Message::SnmpEventReceived(record) => {
+            Message::SnmpEventReceived { origin, record } => {
                 // Selected SNMP device gets its own ring for the Events card.
+                //
+                // Matched on the triple (#1118). `record.source` alone routed
+                // one poller's trap about its `switch01` to another poller's
+                // open view of a different `switch01`.
+                let id = DeviceId {
+                    protocol: zensight_common::Protocol::Snmp,
+                    origin,
+                    source: record.source.clone(),
+                };
                 if let Some(selected) = self.selected_device.as_mut()
-                    && selected.device_id.protocol == zensight_common::Protocol::Snmp
-                    && selected.device_id.source == record.source
+                    && selected.device_id == id
                 {
                     let events = &mut selected.snmp_detail.events;
                     if !events.iter().any(|e| e.id == record.id) {
@@ -10027,6 +10046,12 @@ impl ZenSight {
                     &id.origin,
                     &id.source,
                 ));
+                // And the device's interface table (#1118). A renamed or
+                // retired device left its entry in the fleet-wide map forever,
+                // counted in the overview's device tally and ranked in its
+                // hotlists — now that the map is keyed on the triple, the
+                // eviction can reach it.
+                self.dashboard.snmp_interfaces.remove(id);
             }
             tracing::info!(
                 evicted = gone.len(),

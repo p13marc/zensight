@@ -245,10 +245,18 @@ pub struct DashboardState {
     /// Active status filter (None = show all). Driven by the fleet summary
     /// chips so a click on "3 Offline" narrows the grid to the problems (#34).
     pub status_filter: Option<DeviceStatus>,
-    /// Fleet-wide SNMP `InterfaceTable` docs (#533), keyed by device name —
-    /// LWW off `state/snmp/<device>/interfaces`, feeding the SNMP overview's
-    /// rate-based rankings.
-    pub snmp_interfaces: HashMap<String, zensight_common::InterfaceTable>,
+    /// Fleet-wide SNMP `InterfaceTable` docs (#533), keyed by
+    /// [`DeviceId`] — LWW off `state/snmp/<device>/interfaces`, feeding the
+    /// SNMP overview's rate-based rankings.
+    ///
+    /// Keyed on the **triple**, not on the bare device name (#1118). Two SNMP
+    /// pollers in two racks both polling a `switch01` publish two documents
+    /// about two different switches; on a name key they collided LWW, mixing
+    /// their interfaces in the top-talkers and oper-down hotlists and flapping
+    /// between them every poll. That is the class #474 fixed for `DeviceId`:
+    /// the origin says who is talking, the source says who they are talking
+    /// about, and neither alone names a device.
+    pub snmp_interfaces: HashMap<DeviceId, zensight_common::InterfaceTable>,
     /// Recent SNMP trap/event records off the events plane (#536), newest
     /// first, deduped by ULID, capped.
     pub snmp_events: std::collections::VecDeque<zensight_common::EventRecord>,

@@ -1021,7 +1021,14 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
             zensight_common::registry::AnySubject::Snmp(
                 zensight_common::registry::snmp::Subject::Trap { .. },
             ) => match decode_auto::<zensight_common::EventRecord>(payload) {
-                Ok(record) => Some(Message::SnmpEventReceived(record)),
+                // The publishing poller's origin rides along (#1118): two
+                // pollers polling one `switch01` are two devices, and matching
+                // a trap on `record.source` alone routes one's trap to the
+                // other's open view.
+                Ok(record) => Some(Message::SnmpEventReceived {
+                    origin: origin.clone(),
+                    record,
+                }),
                 Err(e) => {
                     tracing::warn!(error = %e, key = %key, "Failed to decode EventRecord");
                     None
@@ -1076,7 +1083,11 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         ZensightState::SnmpInterfaces { device } => {
             let device = device.to_string();
             decode!(zensight_common::InterfaceTable, |table| {
-                Message::SnmpInterfaceTable { device, table }
+                Message::SnmpInterfaceTable {
+                    origin,
+                    device,
+                    table,
+                }
             })
         }
         // Subnet-discovery proposals (#579): the sensor's LWW report of

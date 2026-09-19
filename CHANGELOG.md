@@ -582,6 +582,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui: two SNMP pollers polling one `switch01` collided into one device**
+  (#1118). `decode_sample` computes the publishing origin for every class and
+  **dropped it** for the interface table, so `Message::SnmpInterfaceTable`
+  carried only the device name and the fleet-wide map was keyed on it.
+
+  Two pollers in two racks both polling a `switch01` publish two documents
+  about two different switches. On a name key they collided LWW: their
+  interfaces mixed in the top-talkers and oper-down hotlists, and the map
+  flapped between them every poll. `SnmpEventReceived` matched traps on
+  `record.source` with the same blindness, so one poller's trap landed in the
+  other's open device view.
+
+  That is the class #474 fixed for `DeviceId`: **the origin says who is
+  talking, the source says who they are talking about, and neither alone names
+  a device.** Both messages carry the origin now, the map is keyed on the
+  triple, and the device view matches on it.
+
+  With the key fixed, the **eviction can reach it**: a renamed or retired
+  device left its entry in the map forever, counted in the overview's device
+  tally and ranked in its hotlists. It goes with the device now.
+
+  The acceptance test renders two pollers' `switch01` and asserts six
+  interfaces rather than three. It also asserts the half the map cannot show —
+  that the decode carries the origin at all — because the map holding two
+  entries follows from the key type, while the field being dropped is what was
+  actually wrong.
+
 - **gui: one host an hour ahead pinned the freshness indicator at "Live"** —
   including after every sensor on the fleet had died (#1117).
   `last_telemetry_ms` is a monotone **max** over publishers' clocks, and
