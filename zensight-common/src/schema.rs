@@ -173,6 +173,9 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::bmc::PowerSupply>("BmcPowerSupply")
         .json::<crate::bmc::Fan>("BmcFan")
         .json::<crate::bmc::ThermalSensor>("BmcThermalSensor")
+        .json::<crate::bmc::Drive>("BmcDrive")
+        .json::<crate::bmc::MemoryModule>("BmcMemoryModule")
+        .json::<crate::bmc::RedundancyGroup>("BmcRedundancyGroup")
         // container's state document (#819).
         .json::<crate::container::ContainerInfo>("ContainerInfo")
         // Threshold rules a sensor owns (#928, epic #901).

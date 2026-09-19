@@ -7,7 +7,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -29,6 +29,20 @@ struct Fixture {
     bare: Arc<AtomicBool>,
     /// Flip the failing supply back to healthy.
     repaired: Arc<AtomicBool>,
+    /// Serve `SessionService/Sessions` (#1140). Off by default so every
+    /// pre-existing test keeps exercising the basic-auth path, which is what a
+    /// firmware without a session service still gets.
+    sessions: bool,
+    /// Sessions minted. The count is the assertion: the bug this closes is a
+    /// *session per request*, so "one session for a whole sweep" is the thing
+    /// to prove.
+    sessions_minted: Arc<AtomicUsize>,
+    /// Requests that arrived carrying `X-Auth-Token`.
+    token_requests: Arc<AtomicUsize>,
+    /// Requests that arrived carrying basic auth instead.
+    basic_requests: Arc<AtomicUsize>,
+    /// Sessions handed back with a DELETE.
+    sessions_released: Arc<AtomicUsize>,
 }
 
 /// **Every** bay this service fronts, which is what a blade enclosure or a
@@ -227,7 +241,151 @@ async fn power_subsystem(State(f): State<Fixture>) -> Result<Json<Value>, axum::
     if !f.modern || f.bare.load(Ordering::Relaxed) {
         return Err(axum::http::StatusCode::NOT_FOUND);
     }
-    Ok(Json(json!({"Id": "PowerSubsystem"})))
+    // The `Redundancy` array real firmware carries on this body (#1140). The
+    // group is **Degraded while both surviving members report Full** — the
+    // case a per-member read could not see, and the reason this is read from
+    // the group.
+    Ok(Json(json!({
+        "Id": "PowerSubsystem",
+        "Redundancy": [{
+            "MemberId": "0",
+            "Name": "PSU Redundancy Group 1",
+            "Status": {"Health": "Warning", "State": "Enabled"},
+            "MinNumNeeded": 2,
+            "MaxNumSupported": 2,
+            "RedundancySet": [
+                {"@odata.id": "/redfish/v1/Chassis/1/PowerSubsystem/PowerSupplies/0"},
+            ],
+        }],
+    })))
+}
+
+/// Page 1 or page 2, on `?page=`. Redfish's `nextLink` is a full URL and
+/// commonly differs only in a query parameter, which is exactly the shape a
+/// path-only router has to handle in one place.
+async fn storage_page(axum::extract::RawQuery(q): axum::extract::RawQuery) -> Json<Value> {
+    if q.as_deref() == Some("page=2") {
+        storage_collection_page2().await
+    } else {
+        storage_collection().await
+    }
+}
+
+/// `Systems/1/Storage`, served **in two pages** (#1140).
+///
+/// `Members@odata.nextLink` is how Redfish paginates, and this client read one
+/// page: a chassis with more members than the firmware's page size silently
+/// lost the tail. Not an error anywhere — a shorter list.
+async fn storage_collection() -> Json<Value> {
+    Json(json!({
+        "Members": [{"@odata.id": "/redfish/v1/Systems/1/Storage/ctrl0"}],
+        "Members@odata.nextLink": "/redfish/v1/Systems/1/Storage?page=2",
+    }))
+}
+
+async fn storage_collection_page2() -> Json<Value> {
+    Json(json!({
+        "Members": [{"@odata.id": "/redfish/v1/Systems/1/Storage/ctrl1"}],
+    }))
+}
+
+async fn storage_ctrl0() -> Json<Value> {
+    Json(json!({
+        "Id": "ctrl0",
+        "Drives": [
+            {"@odata.id": "/redfish/v1/Systems/1/Storage/ctrl0/Drives/0"},
+            {"@odata.id": "/redfish/v1/Systems/1/Storage/ctrl0/Drives/1"},
+        ],
+    }))
+}
+
+async fn storage_ctrl1() -> Json<Value> {
+    Json(json!({
+        "Id": "ctrl1",
+        // The drive only reachable through page 2. Two bays numbered `0` on
+        // two controllers, which is why the document carries the controller.
+        "Drives": [{"@odata.id": "/redfish/v1/Systems/1/Storage/ctrl1/Drives/0"}],
+    }))
+}
+
+async fn drive_ctrl0_0() -> Json<Value> {
+    Json(json!({
+        "Id": "0",
+        "Name": "Solid State Disk 0:1:0",
+        "Status": {"Health": "OK", "State": "Enabled"},
+        "Model": "ACME-SSD",
+        "SerialNumber": "DR-0001",
+        "MediaType": "SSD",
+        "Protocol": "NVMe",
+        "CapacityBytes": 960_197_124_096u64,
+        "PredictedMediaLifeLeftPercent": 94,
+        "FailurePredicted": false,
+    }))
+}
+
+/// A drive the BMC has marked `Warning` — the SMART predictive-failure one.
+/// This is the fault `chassis-health` used to gesture at without naming.
+async fn drive_ctrl0_1() -> Json<Value> {
+    Json(json!({
+        "Id": "1",
+        "Name": "Solid State Disk 0:1:1",
+        "Status": {"Health": "Warning", "State": "Enabled"},
+        "MediaType": "SSD",
+        "Protocol": "NVMe",
+        "CapacityBytes": 960_197_124_096u64,
+        "PredictedMediaLifeLeftPercent": 3,
+        "FailurePredicted": true,
+    }))
+}
+
+async fn drive_ctrl1_0() -> Json<Value> {
+    Json(json!({
+        "Id": "0",
+        "Name": "Physical Disk 1:1:0",
+        "Status": {"Health": "OK", "State": "Enabled"},
+        "MediaType": "HDD",
+        "Protocol": "SAS",
+        "CapacityBytes": 4_000_787_030_016u64,
+    }))
+}
+
+async fn memory_collection() -> Json<Value> {
+    Json(json!({"Members": [
+        {"@odata.id": "/redfish/v1/Systems/1/Memory/DIMM_A1"},
+        {"@odata.id": "/redfish/v1/Systems/1/Memory/DIMM_A2"},
+        {"@odata.id": "/redfish/v1/Systems/1/Memory/DIMM_A3"},
+    ]}))
+}
+
+async fn memory_member(axum::extract::Path(id): axum::extract::Path<String>) -> Json<Value> {
+    match id.as_str() {
+        "DIMM_A1" => Json(json!({
+            "Id": "DIMM_A1",
+            "DeviceLocator": "DIMM_A1",
+            "Status": {"Health": "OK", "State": "Enabled"},
+            "CapacityMiB": 32768,
+            "MemoryDeviceType": "DDR4",
+            "Manufacturer": "ACME",
+            "SerialNumber": "MM-0001",
+            "OperatingSpeedMhz": 3200,
+        })),
+        // Marked by the BMC for a correctable-error rate.
+        "DIMM_A2" => Json(json!({
+            "Id": "DIMM_A2",
+            "DeviceLocator": "DIMM_A2",
+            "Status": {"Health": "Warning", "State": "Enabled"},
+            "CapacityMiB": 32768,
+            "MemoryDeviceType": "DDR4",
+        })),
+        // An EMPTY slot, served the way firmware that has no `Status.State:
+        // Absent` serves it: present-looking, with a zero capacity. A slot
+        // with no DIMM in it is not a 0 GiB DIMM.
+        _ => Json(json!({
+            "Id": "DIMM_A3",
+            "DeviceLocator": "DIMM_A3",
+            "CapacityMiB": 0,
+        })),
+    }
 }
 
 async fn thermal_subsystem(
@@ -346,6 +504,23 @@ async fn spawn(fixture: Fixture) -> SocketAddr {
                 ]}))
             }),
         )
+        .route("/redfish/v1/Systems/1/Storage", get(storage_page))
+        .route("/redfish/v1/Systems/1/Storage/ctrl0", get(storage_ctrl0))
+        .route("/redfish/v1/Systems/1/Storage/ctrl1", get(storage_ctrl1))
+        .route(
+            "/redfish/v1/Systems/1/Storage/ctrl0/Drives/0",
+            get(drive_ctrl0_0),
+        )
+        .route(
+            "/redfish/v1/Systems/1/Storage/ctrl0/Drives/1",
+            get(drive_ctrl0_1),
+        )
+        .route(
+            "/redfish/v1/Systems/1/Storage/ctrl1/Drives/0",
+            get(drive_ctrl1_0),
+        )
+        .route("/redfish/v1/Systems/1/Memory", get(memory_collection))
+        .route("/redfish/v1/Systems/1/Memory/{id}", get(memory_member))
         .route("/redfish/v1/Systems/2", get(system_two))
         .route(
             "/redfish/v1/Systems/2/EthernetInterfaces",
@@ -355,6 +530,22 @@ async fn spawn(fixture: Fixture) -> SocketAddr {
             "/redfish/v1/Systems/2/EthernetInterfaces/nic1",
             get(system_two_nic1),
         )
+        // The session service (#1140). `POST` mints, `DELETE` releases; both
+        // count, because the assertion is *how many*.
+        .route(
+            "/redfish/v1/SessionService/Sessions",
+            axum::routing::post(open_session),
+        )
+        .route(
+            "/redfish/v1/SessionService/Sessions/{id}",
+            axum::routing::delete(close_session),
+        )
+        // Counts every request's auth scheme, so a test can say "one session,
+        // and every request after it used the token".
+        .layer(axum::middleware::from_fn_with_state(
+            fixture.clone(),
+            count_auth,
+        ))
         .with_state(fixture);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -362,6 +553,59 @@ async fn spawn(fixture: Fixture) -> SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
     addr
+}
+
+/// Mint a session, the way real firmware does: `X-Auth-Token` in the headers
+/// and the session's own resource in `Location`.
+async fn open_session(
+    State(f): State<Fixture>,
+    Json(body): Json<Value>,
+) -> Result<axum::response::Response, axum::http::StatusCode> {
+    if !f.sessions {
+        // What a firmware without a session service answers — and the reason
+        // basic auth has to keep working.
+        return Err(axum::http::StatusCode::NOT_FOUND);
+    }
+    if body.get("UserName").and_then(Value::as_str) != Some("monitor") {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    let n = f.sessions_minted.fetch_add(1, Ordering::Relaxed) + 1;
+    let id = format!("sess{n}");
+    let mut resp = axum::response::IntoResponse::into_response(Json(json!({
+        "@odata.id": format!("/redfish/v1/SessionService/Sessions/{id}"),
+        "Id": id,
+    })));
+    resp.headers_mut()
+        .insert("X-Auth-Token", format!("tok-{id}").parse().unwrap());
+    resp.headers_mut().insert(
+        axum::http::header::LOCATION,
+        format!("/redfish/v1/SessionService/Sessions/{id}")
+            .parse()
+            .unwrap(),
+    );
+    Ok(resp)
+}
+
+async fn close_session(State(f): State<Fixture>) -> axum::http::StatusCode {
+    f.sessions_released.fetch_add(1, Ordering::Relaxed);
+    axum::http::StatusCode::NO_CONTENT
+}
+
+/// Tally which auth scheme each request carried.
+async fn count_auth(
+    State(f): State<Fixture>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    if req.headers().contains_key("X-Auth-Token") {
+        f.token_requests.fetch_add(1, Ordering::Relaxed);
+    } else if req
+        .headers()
+        .contains_key(axum::http::header::AUTHORIZATION)
+    {
+        f.basic_requests.fetch_add(1, Ordering::Relaxed);
+    }
+    next.run(req).await
 }
 
 /// The fake speaks plain HTTP; the client builds an `https://` base, so the
@@ -385,6 +629,19 @@ fn fixture(modern: bool) -> Fixture {
         modern,
         bare: Arc::new(AtomicBool::new(false)),
         repaired: Arc::new(AtomicBool::new(false)),
+        sessions: false,
+        sessions_minted: Arc::new(AtomicUsize::new(0)),
+        token_requests: Arc::new(AtomicUsize::new(0)),
+        basic_requests: Arc::new(AtomicUsize::new(0)),
+        sessions_released: Arc::new(AtomicUsize::new(0)),
+    }
+}
+
+/// A fixture whose firmware has a session service (#1140).
+fn fixture_with_sessions() -> Fixture {
+    Fixture {
+        sessions: true,
+        ..fixture(true)
     }
 }
 
@@ -485,6 +742,9 @@ async fn an_unreachable_bmc_produces_one_assertion_and_no_readings() {
             supplies: &[],
             fans: &[],
             thermal: &[],
+            drives: &[],
+            memory: &[],
+            redundancy: &[],
             known_present: &[],
             consecutive_failures: 3,
         },
@@ -514,6 +774,9 @@ async fn the_documented_faults_each_assert_once_and_then_resolve() {
             supplies: &sweep.supplies,
             fans: &sweep.fans,
             thermal: &sweep.thermal,
+            drives: &[],
+            memory: &[],
+            redundancy: &[],
             known_present: &[],
             consecutive_failures: 0,
         },
@@ -551,6 +814,9 @@ async fn the_documented_faults_each_assert_once_and_then_resolve() {
             supplies: &sweep.supplies,
             fans: &sweep.fans,
             thermal: &sweep.thermal,
+            drives: &[],
+            memory: &[],
+            redundancy: &[],
             known_present: &[],
             consecutive_failures: 0,
         },
@@ -811,4 +1077,314 @@ async fn every_chassis_of_an_enclosure_gets_its_own_keys_and_its_own_verdict() {
         "two chassis, one endpoint, the same bay id — these must be distinct \
          alerts, got {keys:?}"
     );
+}
+
+// ── #1140: pagination, storage, memory, redundancy groups ────────────────────
+
+/// **The tail of a paginated collection is read.**
+///
+/// Redfish paginates with `Members@odata.nextLink`, and this client read one
+/// page. A chassis with more members than the firmware's page size lost the
+/// rest — silently, as a shorter list, which reads as fewer drives rather than
+/// as an error. The fake serves `Systems/1/Storage` in two pages and the drive
+/// behind page 2 is only reachable if the walk follows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_paginated_collection_is_walked_to_the_end() {
+    let addr = spawn(fixture(true)).await;
+    let sweep = client(addr).sweep("1").await.expect("sweep");
+
+    let ids: Vec<String> = sweep
+        .drives
+        .iter()
+        .map(|d| format!("{}/{}", d.controller.clone().unwrap_or_default(), d.id))
+        .collect();
+    assert!(
+        ids.contains(&"ctrl1/0".to_string()),
+        "the drive behind page 2 is missing — nextLink was not followed: {ids:?}"
+    );
+    assert_eq!(sweep.drives.len(), 3, "{ids:?}");
+
+    // Two bays numbered `0` on two controllers stay distinguishable, which is
+    // what the `controller` field is for.
+    let zeros: Vec<&str> = sweep
+        .drives
+        .iter()
+        .filter(|d| d.id == "0")
+        .filter_map(|d| d.controller.as_deref())
+        .collect();
+    assert_eq!(zeros.len(), 2, "both bay-0 drives are present: {ids:?}");
+    assert_ne!(zeros[0], zeros[1], "and they name different controllers");
+}
+
+/// A drive the BMC has already marked is **named**, not rolled up.
+///
+/// This is the fault `chassis-health` used to gesture at: it fired saying "the
+/// BMC reports the chassis as Warning — check its own event log", and the
+/// thing in the event log was a drive this sensor could have named.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failing_drive_is_named_rather_than_rolled_up() {
+    let addr = spawn(fixture(true)).await;
+    let sweep = client(addr).sweep("1").await.expect("sweep");
+
+    let bad = sweep
+        .drives
+        .iter()
+        .find(|d| d.health == Health::Warning)
+        .expect("the Warning drive is in the sweep");
+    assert_eq!(bad.failure_predicted, Some(true));
+    assert_eq!(bad.life_left_percent, Some(3.0));
+    assert_eq!(bad.media_type.as_deref(), Some("SSD"));
+
+    let firing = alerts::grade(
+        &AlertsConfig::default(),
+        &Observation {
+            source: "mgmt01",
+            endpoint: "rack-a-1",
+            chassis: Some(&sweep.chassis),
+            supplies: &[],
+            fans: &[],
+            thermal: &[],
+            drives: &sweep.drives,
+            memory: &[],
+            redundancy: &[],
+            known_present: &[],
+            consecutive_failures: 0,
+        },
+    );
+    let drive_alerts: Vec<&zensight_common::Alert> = firing
+        .iter()
+        .filter(|a| a.rule == alerts::RULE_DRIVE_FAILED)
+        .collect();
+    assert_eq!(drive_alerts.len(), 1, "one drive, one alert: {firing:?}");
+    let a = drive_alerts[0];
+    assert!(
+        a.summary.contains("Solid State Disk 0:1:1"),
+        "the alert names the drive: {}",
+        a.summary
+    );
+    assert!(
+        a.labels.get("drive").is_some_and(|v| v == "1"),
+        "and carries its id: {:?}",
+        a.labels
+    );
+
+    // The healthy drives do not alert — including the spinning disk with no
+    // SMART summary at all, whose absent `FailurePredicted` must not read as
+    // a prediction.
+    assert!(
+        sweep
+            .drives
+            .iter()
+            .any(|d| d.media_type.as_deref() == Some("HDD") && d.failure_predicted.is_none()),
+        "the HDD reports no SMART bit, which is not the same as `false`"
+    );
+}
+
+/// An empty DIMM slot is **not a 0 GiB DIMM**, and a marked one alerts.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn memory_health_is_read_and_an_empty_slot_is_not_a_zero() {
+    let addr = spawn(fixture(true)).await;
+    let sweep = client(addr).sweep("1").await.expect("sweep");
+
+    let empty = sweep
+        .memory
+        .iter()
+        .find(|m| m.id == "DIMM_A3")
+        .expect("the empty slot is listed");
+    assert!(!empty.present, "a slot with no DIMM in it is not populated");
+    assert_eq!(
+        empty.capacity_mib, None,
+        "and publishes no capacity rather than zero"
+    );
+
+    let good = sweep.memory.iter().find(|m| m.id == "DIMM_A1").unwrap();
+    assert_eq!(good.capacity_mib, Some(32768));
+    assert_eq!(good.speed_mhz, Some(3200));
+
+    let firing = alerts::grade(
+        &AlertsConfig::default(),
+        &Observation {
+            source: "mgmt01",
+            endpoint: "rack-a-1",
+            chassis: Some(&sweep.chassis),
+            supplies: &[],
+            fans: &[],
+            thermal: &[],
+            drives: &[],
+            memory: &sweep.memory,
+            redundancy: &[],
+            known_present: &[],
+            consecutive_failures: 0,
+        },
+    );
+    let mem: Vec<&zensight_common::Alert> = firing
+        .iter()
+        .filter(|a| a.rule == alerts::RULE_MEMORY_FAILED)
+        .collect();
+    assert_eq!(
+        mem.len(),
+        1,
+        "only the marked DIMM alerts — never the empty slot: {firing:?}"
+    );
+    assert!(mem[0].summary.contains("DIMM_A2"), "{}", mem[0].summary);
+}
+
+/// **The group's verdict, read from the group.**
+///
+/// The fake's `PowerSubsystem.Redundancy` is `Warning` while every *member*
+/// supply reports its own group as Full — which is what a degraded group looks
+/// like from a surviving member, and is precisely why reading the per-member
+/// copy could not see it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_degraded_redundancy_group_is_seen_though_its_members_are_fine() {
+    let addr = spawn(fixture(true)).await;
+    let sweep = client(addr).sweep("1").await.expect("sweep");
+
+    let group = sweep
+        .redundancy
+        .iter()
+        .find(|g| g.subsystem == "power")
+        .expect("the power redundancy group is read");
+    assert_eq!(
+        group.redundancy,
+        Some(zensight_common::bmc::Redundancy::Degraded)
+    );
+    assert_eq!(group.min_needed, Some(2));
+    assert_eq!(group.members, Some(1), "one survivor of the two needed");
+
+    // The claim, shown rather than asserted in a comment: the SURVIVING supply
+    // says nothing about the group at all. So on a chassis where the failed
+    // supply has been pulled — or on firmware that only puts `Redundancy` on
+    // the member that noticed — the per-member read has no input, and
+    // `psu-redundancy-lost` resolves while the group is still degraded.
+    let survivor = sweep.supplies.iter().find(|p| p.id == "0").unwrap();
+    assert_eq!(
+        survivor.redundancy, None,
+        "the healthy member carries no opinion of its group"
+    );
+
+    let survivors_only = [survivor.clone()];
+    let per_member = alerts::grade(
+        &AlertsConfig::default(),
+        &Observation {
+            source: "mgmt01",
+            endpoint: "rack-a-1",
+            chassis: Some(&sweep.chassis),
+            supplies: &survivors_only,
+            fans: &[],
+            thermal: &[],
+            drives: &[],
+            memory: &[],
+            redundancy: &[],
+            known_present: &[],
+            consecutive_failures: 0,
+        },
+    );
+    assert!(
+        !per_member
+            .iter()
+            .any(|a| a.rule == alerts::RULE_PSU_REDUNDANCY),
+        "the per-member rule is silent on a degraded group — the gap this closes: {per_member:?}"
+    );
+
+    let firing = alerts::grade(
+        &AlertsConfig::default(),
+        &Observation {
+            source: "mgmt01",
+            endpoint: "rack-a-1",
+            chassis: Some(&sweep.chassis),
+            supplies: &survivors_only,
+            fans: &[],
+            thermal: &[],
+            drives: &[],
+            memory: &[],
+            redundancy: &sweep.redundancy,
+            known_present: &[],
+            consecutive_failures: 0,
+        },
+    );
+    let lost: Vec<&zensight_common::Alert> = firing
+        .iter()
+        .filter(|a| a.rule == alerts::RULE_REDUNDANCY_LOST)
+        .collect();
+    assert_eq!(
+        lost.len(),
+        1,
+        "and the group rule, on the same supplies, is not: {firing:?}"
+    );
+    assert!(
+        lost[0].summary.contains("1 member(s), 2 needed"),
+        "the alert says how far short the group is: {}",
+        lost[0].summary
+    );
+}
+
+/// **One session for a whole sweep, not one per request.**
+///
+/// The client sent `basic_auth` on every one of the dozens of requests a sweep
+/// makes. Several firmwares — iDRAC and some Supermicro builds — mint a
+/// session per basic-auth request and never reap it, so a few sweeps later the
+/// BMC answers "maximum number of sessions reached" to everything, the
+/// operator's own browser included. A read-only sensor taking the management
+/// interface down is the one failure it must not have.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn one_session_serves_a_whole_sweep() {
+    let f = fixture_with_sessions();
+    let addr = spawn(f.clone()).await;
+    let c = client(addr);
+
+    c.sweep("1").await.expect("sweep");
+    let after_one = f.token_requests.load(Ordering::Relaxed);
+    assert_eq!(
+        f.sessions_minted.load(Ordering::Relaxed),
+        1,
+        "one sweep, one session"
+    );
+    assert!(
+        after_one > 10,
+        "the sweep really is dozens of requests ({after_one}), which is the point"
+    );
+    assert_eq!(
+        f.basic_requests.load(Ordering::Relaxed),
+        0,
+        "and none of them fell back to basic auth"
+    );
+
+    // A second sweep reuses it.
+    c.sweep("1").await.expect("second sweep");
+    assert_eq!(
+        f.sessions_minted.load(Ordering::Relaxed),
+        1,
+        "the session is reused across sweeps, not re-minted"
+    );
+
+    // And it is given back. A session this process forgets is one the firmware
+    // keeps until its own timeout, out of a table that on some builds holds
+    // eight entries for everything.
+    c.close().await;
+    assert_eq!(
+        f.sessions_released.load(Ordering::Relaxed),
+        1,
+        "the session is released on shutdown"
+    );
+}
+
+/// A firmware with **no** session service still works, on basic auth.
+///
+/// The fallback is not a nicety: plenty of shipped BMCs serve no
+/// `SessionService`, and a client that required one would stop reading them
+/// entirely.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_firmware_without_a_session_service_still_reads() {
+    let f = fixture(true); // `sessions: false`
+    let addr = spawn(f.clone()).await;
+    let sweep = client(addr).sweep("1").await.expect("sweep");
+
+    assert_eq!(sweep.supplies.len(), 3, "the sweep is unaffected");
+    assert_eq!(f.sessions_minted.load(Ordering::Relaxed), 0);
+    assert!(
+        f.basic_requests.load(Ordering::Relaxed) > 10,
+        "every request used basic auth"
+    );
+    assert_eq!(f.token_requests.load(Ordering::Relaxed), 0);
 }

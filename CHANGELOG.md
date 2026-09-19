@@ -9,6 +9,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **bmc: one Redfish session instead of one per request, paginated collections,
+  and the drive and DIMM faults `chassis-health` could only gesture at**
+  (#1140). Three things a real BMC would have found, before one is asked
+  (#990).
+
+  **Sessions.** The client sent `basic_auth` on every one of the dozens of
+  requests a sweep makes. Several firmwares — iDRAC and some Supermicro builds
+  — mint a *session* per basic-auth request and never reap it, so a few sweeps
+  later the BMC answers "maximum number of sessions reached" to everything,
+  **the operator's own browser included**. A read-only monitor taking the
+  management interface down is the one failure it must not have. It mints one
+  session, reuses it across sweeps, re-mints once on a 401 (a BMC that rebooted
+  between sweeps costs one extra request, not a failed sweep), gives it back
+  with a `DELETE` on shutdown, and falls back to basic auth on firmware that
+  serves no session service — which is plenty of shipped hardware, so the
+  fallback is not a nicety.
+
+  With it, the retry budget and breaker the issue asks for: one retry per GET
+  (a slow iDRAC answers in one to two seconds and a sweep at
+  `max_concurrent: 4` against a 60 s interval has no room for a third), and
+  after five consecutive transport failures the client pauses for 30 s rather
+  than spending a whole sweep of timeouts every interval on a BMC that has gone
+  away.
+
+  **Pagination.** `Members@odata.nextLink` was handled nowhere, so a chassis
+  with more members than the firmware's page size lost the tail — silently, as
+  a shorter list, which reads as fewer fans. Every collection walk follows it
+  now, bounded at 50 pages and by a repeat check, because the cursor is the
+  device's.
+
+  **Storage, memory and the redundancy groups.** A drive the BMC had already
+  marked `Warning` — the SMART predictive-failure one — or a DIMM marked for
+  correctable-error rate rolled up into `Chassis.Status.Health` and nowhere
+  else. `chassis-health` fired saying "the BMC reports the chassis as Warning —
+  check its own event log", about a fact this sensor could have named. Three
+  new state documents (`chassis/{chassis}/drive/{drive}`, `…/memory/{dimm}`,
+  `…/redundancy/{group}`), one gauge (an SSD's `PredictedMediaLifeLeftPercent`)
+  and three rules (`drive-failed`, `memory-failed`, `redundancy-lost`). Scoped
+  to the systems **this chassis links**, exactly as the identity claim is and
+  for the same reason (#1110).
+
+  `redundancy-lost` is not a rename of `psu-redundancy-lost`, and both stay.
+  The old rule reads a *member's* copy of its group's status; a supply that is
+  itself healthy commonly carries no `Redundancy` array at all, so on a chassis
+  whose failed supply has been **pulled** the per-member rule loses its input
+  and resolves — announcing that redundancy is fine at the moment there is
+  none. The group knows: `MinNumNeeded: 2` with one member in the set. The e2e
+  asserts exactly that contrast on one sweep.
+
+  The crate's **no-action guard was narrowed rather than removed.** A session
+  `POST`/`DELETE` writes to the BMC's session table and to nothing else, so the
+  guard now pins the verb *and* the path: exactly one `.post(`, targeting
+  `SessionService/Sessions`; exactly one `.delete(`, of the session's own
+  `Location`; `Actions/`, `Chassis.Reset`, `ComputerSystem.Reset`, `.put(` and
+  `.patch(` still fail the build outright.
+
+  Three of the six new e2e tests fail with the mechanism reverted; the other
+  three cover surfaces that did not exist to revert.
+
 - **A misspelled config key is a startup refusal, and `--check-config` tells
   you before the deploy** (#1150). No producer's config checked for keys it did
   not declare, so `poll_interval_sec` for `poll_interval_secs` parsed clean and
