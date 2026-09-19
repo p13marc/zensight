@@ -512,35 +512,41 @@ echo "OK — demo/fleet-policy.json5 validates, and a never-list violation is re
 # It opens no session and costs milliseconds per binary.
 echo
 echo "==> phase 3b: --check-config over every shipped config"
+#
+# The pairs this script BUILDS, named explicitly rather than discovered by
+# globbing `configs/` and skipping what is missing. This is a debug-profile
+# run of seven binaries, not a workspace build — and a loop that skips an
+# absent binary reports success just as loudly as one that checked it (the
+# `head`/SIGPIPE lesson, one shape over). Naming them means an added binary
+# has to be added here too, which is the point.
+check_pairs=(
+    "zensight-sensor-sysinfo:sysinfo"
+    "zensight-sensor-netlink:netlink"
+    "zensight-exporter-prometheus:prometheus-exporter"
+    "zensight-exporter-otel:otel-exporter"
+    "zensight-historian:historian"
+    "zensight-correlator:correlator"
+    "zensight-desired:desired"
+)
 checked=0
-for cfg in "$ROOT"/configs/*.json5; do
-    name=$(basename "$cfg" .json5)
-    case "$name" in
-        router-*) continue ;;   # zenohd's own config, not a ZenSight one
-    esac
-    case "$name" in
-        prometheus-exporter) bin="$BIN/zensight-exporter-prometheus" ;;
-        otel-exporter)       bin="$BIN/zensight-exporter-otel" ;;
-        syslog)              bin="$BIN/zensight-sensor-logs" ;;
-        desired)             bin="$BIN/zensight-desired" ;;
-        correlator|historian|rerun) bin="$BIN/zensight-$name" ;;
-        *)                   bin="$BIN/zensight-sensor-$name" ;;
-    esac
-    [ -x "$bin" ] || continue
+for pair in "${check_pairs[@]}"; do
+    bin="$BIN/${pair%%:*}"
+    cfg="$ROOT/configs/${pair##*:}.json5"
+    [ -x "$bin" ] || die "phase 3b: $bin was not built — the build step above \
+and this list have drifted apart"
+    [ -f "$cfg" ] || die "phase 3b: $cfg does not exist"
     # `desired` compiles a policy, so point it at the one this repo ships
     # rather than at /etc.
     extra=()
-    [ "$name" = "desired" ] && extra=(--policy "$ROOT/demo/fleet-policy.json5")
+    [ "${pair##*:}" = "desired" ] && extra=(--policy "$ROOT/demo/fleet-policy.json5")
     if ! out=$("$bin" --config "$cfg" "${extra[@]}" --check-config 2>&1); then
-        die "configs/$name.json5 does not pass its own --check-config:
+        die "configs/${pair##*:}.json5 does not pass its own --check-config:
 $out"
     fi
     checked=$((checked + 1))
 done
-# A count, not "no failures": a loop whose binaries all went missing reports
-# success just as loudly (the `head`/SIGPIPE lesson, one shape over).
-[ "$checked" -ge 15 ] \
-    || die "--check-config ran over only $checked config(s); expected at least 15"
+[ "$checked" -eq "${#check_pairs[@]}" ] \
+    || die "--check-config ran over $checked of ${#check_pairs[@]} config(s)"
 
 # And the check must REFUSE a bad one, or the phase above is theatre.
 sed 's/poll_interval_secs/poll_interval_sec/' "$ROOT/configs/sysinfo.json5" \
