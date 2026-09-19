@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::error::{Result, SensorError};
 use crate::{LoggingConfig, ZenohConfig};
 use zensight_common::ArtifactLimits;
+use zensight_common::Format;
 
 /// The declared resource envelope (#811/#1091).
 ///
@@ -94,6 +95,31 @@ pub trait SensorConfig: Sized + DeserializeOwned {
 
     /// Get the logging configuration.
     fn logging(&self) -> &LoggingConfig;
+
+    /// The wire format this producer's framework documents use (#1155).
+    ///
+    /// Defaults to [`Format::default`], which is **CBOR** — and that agreement
+    /// is the point. `SensorRunner` used to hard-code `Format::Json` here with
+    /// the comment "Default to JSON, can be overridden", while
+    /// `Format::default()` has been CBOR since the wire was made
+    /// bytes-sensitive. Two defaults disagreeing meant every sensor had to
+    /// remember `.with_format(config.serialization)`, and **five did not** —
+    /// gnmi, logs, modbus, netflow and snmp all read `config.serialization`
+    /// for their own publishers and left the runner's on JSON, so their
+    /// health, registration and evidence documents went out in a format the
+    /// deployment had not asked for. Nothing broke, because every consumer
+    /// sniffs; the bandwidth CBOR exists to save simply was not saved.
+    ///
+    /// Override it when the config carries the operator's choice:
+    ///
+    /// ```ignore
+    /// fn serialization(&self) -> Format {
+    ///     self.serialization
+    /// }
+    /// ```
+    fn serialization(&self) -> Format {
+        Format::default()
+    }
 
     /// The producer name ("netlink", "logs", …) — the registry chunk this
     /// sensor publishes under. A constant per crate; the legacy config

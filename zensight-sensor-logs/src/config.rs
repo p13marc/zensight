@@ -1270,6 +1270,14 @@ impl SyslogSensorConfig {
 }
 
 impl zensight_sensor_core::SensorConfig for SyslogSensorConfig {
+    /// The operator's `serialization`, for the framework documents too
+    /// (#1155). Without this the runner's own publisher kept its old
+    /// hard-coded JSON while this sensor's telemetry used the configured
+    /// format — the two disagreed and nothing said so.
+    fn serialization(&self) -> zensight_common::Format {
+        self.serialization
+    }
+
     fn zenoh(&self) -> &ZenohConfig {
         &self.zenoh
     }

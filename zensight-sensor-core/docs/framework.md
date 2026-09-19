@@ -19,7 +19,19 @@ loads config, builds a `SensorRunner`, spawns protocol workers that publish
    - `.with_identity()` — enables the identity envelope (see below).
    - `.with_artifacts(producers)` — enables the artifact channel
      ([artifacts.md](artifacts.md)).
-   - `.with_format(format)` — overrides the telemetry serialization format.
+   - `.with_format(format)` — overrides the serialization format. **Rarely
+     needed since #1155**: the runner now takes it from
+     `SensorConfig::serialization()`, whose default is `Format::default()`
+     (CBOR). It used to hard-code `Format::Json` with the comment "can be
+     overridden", while `Format::default()` had been CBOR for a long time —
+     two defaults disagreeing, so every sensor had to remember this call. Five
+     did not (gnmi, logs, modbus, netflow, snmp): they read
+     `config.serialization` for their own publishers and left the runner's
+     on JSON, so their health, registration and evidence documents went out in
+     a format the deployment had not asked for. Nothing broke — every consumer
+     sniffs the first byte — but the bandwidth CBOR exists to save was not
+     saved. If your config carries the operator's choice, implement
+     `serialization()` rather than calling this.
 3. `runner.spawn(future)` / `spawn_named(name, future)` / `spawn_with_error(...)`
    register worker tasks (tracked, **supervised**, and aborted on shutdown).
    `runner.publisher()`, `.health()`, `.session()`, `.identity()` hand workers

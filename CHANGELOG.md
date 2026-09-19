@@ -769,6 +769,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A key published under two QoS classes silently rode the first one**
+  (#1155). A Zenoh publisher carries its congestion control, priority,
+  reliability and express flag from the moment it is declared and they cannot
+  be changed afterwards; `PublisherRegistry` caches one publisher per key, and
+  `ensure` returned early on "a publisher exists" **without comparing the
+  class it was asked for**. So the first class a key was published under was
+  the one every later publication got, silently — and the dangerous direction
+  is the plausible one: a key first seen as `Telemetry` (BestEffort, **Drop**)
+  and later published as `Alert` keeps BestEffort and Drop, so the one class
+  that exists to be undroppable becomes droppable.
+
+  The registry now records the declared class beside the publisher and reports
+  a mismatch — a `warn!` naming the key and both classes, in release as well
+  as debug, plus a `debug_assert!`. The publisher is still reused, because
+  tearing one down mid-flight would lose what is in flight and could not
+  un-send what has already gone; the rule is the caller's obligation, and now
+  it is an audible one. **No call site in the tree trips it today**, which is
+  why this is a closed trap rather than a repair.
+
+- **Five sensors published their framework documents in a format the
+  deployment had not asked for** (#1155). `SensorRunner` hard-coded
+  `Format::Json` for its own publisher, with the comment *"Default to JSON,
+  can be overridden"* — while `Format::default()` has been **CBOR** since the
+  wire was made bytes-sensitive. Two defaults disagreeing meant every sensor
+  had to remember `.with_format(config.serialization)`, and gnmi, logs,
+  modbus, netflow and snmp did not: each read `config.serialization` for its
+  own publishers and left the runner's on JSON, so health, registration and
+  evidence documents went out as JSON regardless of the config. Nothing broke,
+  because every consumer sniffs the first byte — the bandwidth CBOR exists to
+  save simply was not saved.
+
+  `SensorConfig` gains a `serialization()` accessor defaulting to
+  `Format::default()`, the runner asks the config instead of inventing a
+  second default, and the five configs that carry the operator's choice now
+  hand it over.
+
 - **Two mounts could share one key, and the later one won** (#1153).
   `zensight-sensor-sysinfo` slugged foreign names — mount points, interfaces,
   hwmon chips and labels, RAPL zones, batteries, SMART devices, md arrays —
