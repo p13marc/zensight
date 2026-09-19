@@ -590,6 +590,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui: three time zones in one window, and a tree re-flattened for nobody**
+  (#1123, #1124).
+
+  **Three formatters, disagreeing.** The top bar hand-rolled
+  `(secs / 3600) % 24` — UTC, with **no suffix**; the systemd detail used
+  `chrono::Local`; the chart range was UTC and said so. An operator in UTC+2
+  read "as of 13:42" in the top bar and "15:42:10" on the unit that had just
+  restarted, and concluded the feed was two hours behind.
+
+  One formatter now, in the design system: **local, with the offset**
+  (`15:42:10 +02:00`). Local because the question an operator is answering is
+  "was that before or after I did the thing", and they know when they did the
+  thing in their own zone; the offset because a screenshot pasted into a ticket
+  has to stay unambiguous. The range picker reads local too — it was UTC and
+  labelled UTC, which was honest and still wrong, since everything an operator
+  reads a timestamp *from* is local. A DST fall-back resolves to the earlier of
+  the two instants; a spring-forward wall clock that never happened is refused
+  rather than silently moved an hour.
+
+  **The explorer pump re-flattened a 10 000-row tree four times a second after
+  you left the view.** Keeping the *pump* alive across views is documented and
+  deliberate — it is why returning shows live data rather than a blank tree.
+  Keeping the *flatten* was neither: nothing reads `rows` from another view.
+  The snapshot is still taken; the walk is deferred and done exactly once on
+  open.
+
+  **Nine `save_*` helpers each did `PersistentSettings::load()` — a JSON5 parse
+  off disk — then `save()`**, and `save_current_view` runs on every nav-rail
+  click. So changing view read and rewrote the whole settings file,
+  synchronously, on the UI thread. One in-memory copy now, written on the same
+  1 Hz debounce `write_topology_prefs` already used for itself — and **on
+  window close** (#1119), because a debounce that drops the last change is a
+  worse trade than the synchronous write it replaced.
+
+  And the `known_sensors` key is built by `sensor_instance_key` everywhere,
+  including the dashboard's chip label. It was spelled by hand in two places
+  beside it, and `sensor_health` is keyed by the builder — two spellings of one
+  key is how a second instance (`snmp-2`) lands somewhere nothing else looks.
+
 - **gui: two "unacknowledged" counts, and a log search that quietly stopped
   searching** (#1121, #1122). Two small ones in the same view.
 

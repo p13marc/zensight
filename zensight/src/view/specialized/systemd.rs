@@ -1072,11 +1072,10 @@ fn fmt_usec(usec: u64) -> String {
 }
 
 fn fmt_unix(secs: u64) -> String {
-    use chrono::TimeZone;
-    match chrono::Local.timestamp_opt(secs as i64, 0) {
-        chrono::offset::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S").to_string(),
-        _ => secs.to_string(),
-    }
+    // The shared formatter (#1123). This one was already local; what it did
+    // not carry was the **offset**, which is what made it indistinguishable
+    // from the top bar's unlabelled UTC.
+    crate::view::formatting::format_wall_clock((secs as i64).saturating_mul(1000))
 }
 
 fn opt_bytes(v: Option<u64>) -> String {

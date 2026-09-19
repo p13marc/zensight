@@ -81,21 +81,20 @@ impl Freshness {
     }
 }
 
-/// Format a clock time "as of HH:MM:SS" (local-ish, derived from epoch ms) for
-/// the newest data point. Returns `None` when there is no data yet.
+/// The "as of" clock for the newest data point. `None` when there is no data
+/// yet.
 ///
-/// Pure modular arithmetic on the epoch — no timezone library; this is a
-/// wall-clock-ish UTC stamp, which is what an operator wants for "as of".
+/// One formatter, shared (#1123). It used to hand-roll `(secs / 3600) % 24` —
+/// **UTC with no suffix** — while the systemd detail rendered `chrono::Local`
+/// and the chart range said "UTC" out loud. An operator in UTC+2 read
+/// "as of 13:42" here and "15:42:10" on the unit that had just restarted, and
+/// concluded the feed was two hours behind.
 pub fn as_of_clock(last_update_ms: Option<i64>) -> Option<String> {
     let ts = last_update_ms?;
     if ts <= 0 {
         return None;
     }
-    let secs = ts / 1000;
-    let h = (secs / 3600) % 24;
-    let m = (secs / 60) % 60;
-    let s = secs % 60;
-    Some(format!("{h:02}:{m:02}:{s:02}"))
+    Some(crate::view::formatting::format_clock(ts))
 }
 
 /// Format a data age (now - ts) as a compact "Ns ago" / "Nm ago" / "Nh ago"
@@ -310,14 +309,41 @@ mod tests {
         assert_eq!(Freshness::Paused.label(), "Paused");
     }
 
+    /// The guards, and **the offset suffix** (#1123).
+    ///
+    /// Asserted as a shape rather than a literal, because the output is the
+    /// viewer's local zone and a test that pinned a string would pass only on
+    /// a UTC machine — which is exactly the assumption that produced three
+    /// disagreeing formatters. What matters is that the clock *says which zone
+    /// it is in*: a bare `13:42:10` beside the systemd detail's local
+    /// `15:42:10` is what made an operator in UTC+2 conclude the feed was two
+    /// hours behind.
     #[test]
     fn as_of_clock_formats_and_guards() {
         assert_eq!(as_of_clock(None), None);
         assert_eq!(as_of_clock(Some(0)), None);
-        // 01:02:03 = 3723 s.
-        assert_eq!(as_of_clock(Some(3_723_000)).as_deref(), Some("01:02:03"));
-        // Wraps past 24h.
-        assert_eq!(as_of_clock(Some(90_000_000)).as_deref(), Some("01:00:00"));
+
+        let clock = as_of_clock(Some(3_723_000)).expect("a positive instant formats");
+        let (time, offset) = clock.split_once(' ').unwrap_or_else(|| {
+            panic!("the clock must carry its offset, got {clock:?}");
+        });
+        assert_eq!(time.len(), 8, "HH:MM:SS, got {time:?}");
+        assert_eq!(time.matches(':').count(), 2, "{time:?}");
+        assert!(
+            (offset.starts_with('+') || offset.starts_with('-')) && offset.contains(':'),
+            "the offset is signed and separated, got {offset:?}"
+        );
+
+        // Two instants an hour apart are an hour apart on the clock, whatever
+        // the zone.
+        let a = as_of_clock(Some(3_723_000)).unwrap();
+        let b = as_of_clock(Some(3_723_000 + 3_600_000)).unwrap();
+        assert_ne!(a, b);
+        assert_eq!(
+            a.split_once(' ').unwrap().0[3..],
+            b.split_once(' ').unwrap().0[3..],
+            "the minutes and seconds are unchanged: {a} vs {b}"
+        );
     }
 
     #[test]

@@ -333,6 +333,20 @@ pub struct ZenSight {
     /// Whether this process has ever been connected (#1116), so the freshness
     /// indicator can tell a *re*connect from the first one.
     has_connected: bool,
+    /// The settings **file**, in memory (#1124). Distinct from
+    /// [`Self::settings`], which is the Settings *view's* state.
+    ///
+    /// Nine `save_*` helpers each did `PersistentSettings::load()` — a JSON5
+    /// parse off disk — then `save()`, and `save_current_view` runs on every
+    /// nav-rail click. So changing view read and rewrote the whole settings
+    /// file, synchronously, on the UI thread.
+    ///
+    /// Held once and written on a debounce. `write_topology_prefs`' own
+    /// comment named the problem and debounced only itself; this is that
+    /// pattern, generalised.
+    persisted: PersistentSettings,
+    /// `persisted` differs from the file (#1124).
+    persisted_dirty: bool,
     /// Bus-explorer view state (#748): the live key-tree and its ledgers.
     explorer: crate::view::explorer::ExplorerState,
     /// Command handle on the running explorer pump (`None` = no pump). The
@@ -589,6 +603,8 @@ impl ZenSight {
             bandwidth: crate::view::bandwidth::BandwidthState::default(),
             fleet: crate::view::fleet::FleetState::default(),
             has_connected: false,
+            persisted: persistent.clone(),
+            persisted_dirty: false,
             explorer: crate::view::explorer::ExplorerState::default(),
             explorer_ctl: None,
             // In demo mode keep history in-memory only (no disk churn / restart survival
@@ -2370,8 +2386,12 @@ impl ZenSight {
             }
 
             Message::SensorInfoReceived(info) => {
-                self.known_sensors
-                    .insert(format!("{}@{}", info.name, info.source), info);
+                // Through the one builder (#1124). It was spelled by hand
+                // here, and `sensor_health` is keyed by `sensor_instance_key`
+                // — two spellings of one key is how a second instance
+                // (`snmp-2`) lands somewhere nothing else looks.
+                let key = sensor_instance_key(&info.name, Some(&info.source));
+                self.known_sensors.insert(key, info);
                 // A sentinel that just registered belongs in the pane's host
                 // picker (#1114); the choice already made is kept.
                 self.refresh_expectation_hosts();
@@ -3116,6 +3136,12 @@ impl ZenSight {
                 // pending, give the parallax sensors their refcounts back,
                 // then close.
                 let closes = self.teardown_parallax_tiles();
+                // Settings too (#1124). A debounce that drops the last change
+                // is a worse trade than the synchronous write it replaced, and
+                // the change an operator most wants kept is the one they made
+                // just before closing.
+                self.flush_topology_prefs();
+                self.flush_persisted();
                 let flushed = self.flush_on_exit();
                 tracing::info!(buckets = flushed, "Flushed on close; closing the window");
                 // The stream closes are `@rpc` GETs, and they are BATCHED
@@ -3359,6 +3385,9 @@ impl ZenSight {
             Message::OpenExplorer => {
                 self.set_view(CurrentView::Explorer);
                 self.save_current_view();
+                // Rebuild once if ticks arrived while we were elsewhere
+                // (#1124) — the flatten is skipped off-screen, not the data.
+                self.explorer.ensure_fresh();
                 return self.start_explorer();
             }
             Message::ExplorerStarted(ctl) => {
@@ -3367,7 +3396,13 @@ impl ZenSight {
                 self.explorer.error = None;
             }
             Message::ExplorerTick(snapshot) => {
-                self.explorer.apply_tick(snapshot);
+                // The flatten is gated on the view being on screen (#1124):
+                // `recompute` walks up to 10 000 keys four times a second, and
+                // nothing reads `rows` from anywhere else. The pump itself
+                // deliberately outlives the view — that part is documented —
+                // so returning shows live data rather than a blank tree.
+                self.explorer
+                    .apply_tick(snapshot, self.current_view == CurrentView::Explorer);
             }
             Message::ExplorerWatchInput(input) => {
                 self.explorer.watch_input = input;
@@ -4719,67 +4754,46 @@ impl ZenSight {
     }
 
     /// Save groups to persistent settings.
-    fn save_groups(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.groups = self.groups.clone();
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save groups: {}", e);
-        }
+    fn save_groups(&mut self) {
+        self.persisted.groups = self.groups.clone();
+        self.persisted_dirty = true;
     }
 
     /// Persist the saved alert-filter presets (#27).
-    fn save_alert_filter_presets(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.alert_filter_presets = self.alerts.alert_filter_presets.clone();
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save alert filter presets: {}", e);
-        }
+    fn save_alert_filter_presets(&mut self) {
+        self.persisted.alert_filter_presets = self.alerts.alert_filter_presets.clone();
+        self.persisted_dirty = true;
     }
 
     /// Save overview state to persistent settings.
-    fn save_overview_state(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.overview_selected_protocol = self.overview.selected_protocol;
-        persistent.overview_expanded = self.overview.expanded;
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save overview state: {}", e);
-        }
+    fn save_overview_state(&mut self) {
+        self.persisted.overview_selected_protocol = self.overview.selected_protocol;
+        self.persisted.overview_expanded = self.overview.expanded;
+        self.persisted_dirty = true;
     }
 
     /// Save theme preference to persistent settings.
-    fn save_theme(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.dark_theme = matches!(self.theme, AppTheme::Dark);
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save theme: {}", e);
-        }
+    fn save_theme(&mut self) {
+        self.persisted.dark_theme = matches!(self.theme, AppTheme::Dark);
+        self.persisted_dirty = true;
     }
 
     /// Persist the "group by host" dashboard preference (#306).
-    fn save_group_by_host(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.group_by_host = self.settings.group_by_host;
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save group-by-host preference: {}", e);
-        }
+    fn save_group_by_host(&mut self) {
+        self.persisted.group_by_host = self.settings.group_by_host;
+        self.persisted_dirty = true;
     }
 
     /// Persist the identity-details expansion state (#350).
-    fn save_identity_expanded(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.identity_expanded = self.identity_expanded;
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save identity-expanded preference: {}", e);
-        }
+    fn save_identity_expanded(&mut self) {
+        self.persisted.identity_expanded = self.identity_expanded;
+        self.persisted_dirty = true;
     }
 
     /// Persist the opt-in desktop-notifications preference (#26).
-    fn save_notification_pref(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.desktop_notifications = self.settings.desktop_notifications;
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save notification preference: {}", e);
-        }
+    fn save_notification_pref(&mut self) {
+        self.persisted.desktop_notifications = self.settings.desktop_notifications;
+        self.persisted_dirty = true;
     }
 
     /// The favorited metric names for `device_id` (#27), projected out of the
@@ -4793,12 +4807,9 @@ impl ZenSight {
     }
 
     /// Persist the favorited-metrics set (#27).
-    fn save_favorites(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.favorite_metrics = self.favorites.iter().cloned().collect();
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save favorites: {}", e);
-        }
+    fn save_favorites(&mut self) {
+        self.persisted.favorite_metrics = self.favorites.iter().cloned().collect();
+        self.persisted_dirty = true;
     }
 
     /// Mark the topology prefs dirty (#440). The actual settings.json5
@@ -4822,28 +4833,42 @@ impl ZenSight {
     /// labels, filters. Load-modify-save so unrelated settings are untouched
     /// (same pattern as [`Self::save_current_view`]). Focus and group
     /// expansions are session-transient by design.
-    fn write_topology_prefs(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.topology_lens = self.topology.prefs.lens;
-        persistent.topology_grouping = self.topology.prefs.grouping;
-        persistent.topology_edge_label = self.topology.prefs.edge_label;
-        persistent.topology_filters = self.topology.prefs.filters;
-        persistent.topology_layout = self.topology.prefs.layout;
+    fn write_topology_prefs(&mut self) {
+        self.persisted.topology_lens = self.topology.prefs.lens;
+        self.persisted.topology_grouping = self.topology.prefs.grouping;
+        self.persisted.topology_edge_label = self.topology.prefs.edge_label;
+        self.persisted.topology_filters = self.topology.prefs.filters;
+        self.persisted.topology_layout = self.topology.prefs.layout;
         // Manual arrangement (#394): pinned nodes only, pruned to what exists.
         let (pins, positions) = self.topology.pinned_positions();
-        persistent.topology_pinned = pins;
-        persistent.topology_positions = positions;
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save topology prefs: {}", e);
+        self.persisted.topology_pinned = pins;
+        self.persisted.topology_positions = positions;
+        self.persisted_dirty = true;
+        self.flush_persisted();
+    }
+
+    /// Write the settings file if it differs from memory (#1124).
+    ///
+    /// One load-modify-save became one write, and only when something
+    /// changed. Called from the 1 Hz tick and on window close — the exit path
+    /// matters, because a debounce that loses the last change is a worse trade
+    /// than the synchronous write it replaced.
+    fn flush_persisted(&mut self) {
+        if !self.persisted_dirty {
+            return;
+        }
+        self.persisted_dirty = false;
+        if let Err(e) = self.persisted.save() {
+            // Not fatal, and not silent: settings are a convenience, but an
+            // operator who arranged a topology and lost it should be able to
+            // find out why.
+            tracing::error!(error = %e, "Failed to save settings");
         }
     }
 
-    fn save_current_view(&self) {
-        let mut persistent = PersistentSettings::load();
-        persistent.current_view = self.current_view;
-        if let Err(e) = persistent.save() {
-            tracing::error!("Failed to save current view: {}", e);
-        }
+    fn save_current_view(&mut self) {
+        self.persisted.current_view = self.current_view;
+        self.persisted_dirty = true;
     }
 
     /// Set the current view.
@@ -10122,6 +10147,10 @@ impl ZenSight {
         // Land any debounced topology-pref changes (#440): at most one
         // settings.json5 write per second, off the interaction path.
         self.flush_topology_prefs();
+        // And every other pref, which used to load-modify-save the whole file
+        // synchronously on each change — `save_current_view` on every nav-rail
+        // click (#1124).
+        self.flush_persisted();
     }
 }
 

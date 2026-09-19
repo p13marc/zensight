@@ -40,8 +40,12 @@ pub struct ExplorerState {
     /// deliberately — a stopped monitor's final tree is still worth reading.
     pub running: bool,
     pub snapshot: Option<Arc<ExplorerSnapshot>>,
-    /// Flattened rows, recomputed on tick / toggle — never per redraw.
+    /// Flattened rows, recomputed on tick / toggle — never per redraw, and
+    /// **not while another view is on screen** (#1124).
     pub rows: Vec<TreeRow>,
+    /// A tick arrived while the Explorer was not visible, so `rows` no longer
+    /// matches `snapshot` (#1124). Rebuilt once, on open.
+    pub stale: bool,
     pub expansion: Expansion,
     /// The key whose retained sample the inspector shows.
     pub selected: Option<String>,
@@ -50,9 +54,33 @@ pub struct ExplorerState {
 }
 
 impl ExplorerState {
-    pub fn apply_tick(&mut self, snapshot: Arc<ExplorerSnapshot>) {
+    /// Take a pump snapshot. `visible` says whether the Explorer is the
+    /// current view (#1124).
+    ///
+    /// The snapshot is always kept — the pump deliberately outlives the view,
+    /// so returning to it shows live data rather than a blank tree. What is
+    /// **not** kept is the flatten: `recompute` walks up to 10 000 keys into
+    /// `rows`, four times a second, and nothing reads `rows` while another
+    /// view is on screen. Keeping the pump alive across views is documented;
+    /// keeping the flatten was not, and was not intended.
+    ///
+    /// `stale` marks that the rows no longer match the snapshot, so the next
+    /// [`ensure_fresh`](Self::ensure_fresh) rebuilds them exactly once.
+    pub fn apply_tick(&mut self, snapshot: Arc<ExplorerSnapshot>, visible: bool) {
         self.snapshot = Some(snapshot);
-        self.recompute();
+        if visible {
+            self.recompute();
+        } else {
+            self.stale = true;
+        }
+    }
+
+    /// Rebuild the rows if a tick arrived while the view was elsewhere
+    /// (#1124). Called when the Explorer is opened.
+    pub fn ensure_fresh(&mut self) {
+        if self.stale {
+            self.recompute();
+        }
     }
 
     pub fn toggle(&mut self, path: String) {
@@ -67,6 +95,7 @@ impl ExplorerState {
             Some(s) => tree_rows(&s.tree, &self.expansion),
             None => Vec::new(),
         };
+        self.stale = false;
     }
 }
 
@@ -342,4 +371,43 @@ fn tree_row<'a>(r: &'a TreeRow, state: &'a ExplorerState) -> Element<'a, Message
     }
 
     line.into()
+}
+
+#[cfg(test)]
+mod pump_tests {
+    use super::*;
+
+    fn snapshot() -> Arc<ExplorerSnapshot> {
+        let monitor = zenkey_fleet::MonitorCore::bounded(8, 4);
+        Arc::new(super::core::ExplorerCore::default().snapshot(&monitor, Vec::new(), None))
+    }
+
+    /// **The flatten is skipped while another view is on screen** (#1124).
+    ///
+    /// The pump deliberately outlives the view — that is documented, and it is
+    /// why returning shows live data rather than a blank tree. What was not
+    /// documented, or intended, is that `recompute` kept walking up to 10 000
+    /// keys four times a second for a `rows` nothing was reading.
+    #[test]
+    fn a_tick_while_invisible_does_not_flatten_but_is_not_lost() {
+        let mut state = ExplorerState::default();
+
+        // Visible: the rows are rebuilt now.
+        state.apply_tick(snapshot(), true);
+        assert!(!state.stale, "a visible tick flattens immediately");
+
+        // Not visible: the snapshot is kept, the flatten is not done.
+        state.apply_tick(snapshot(), false);
+        assert!(
+            state.snapshot.is_some(),
+            "the data is kept — the pump outliving the view is the feature"
+        );
+        assert!(state.stale, "but the rows are known to be behind");
+
+        // Opening the view rebuilds exactly once.
+        state.ensure_fresh();
+        assert!(!state.stale);
+        state.ensure_fresh();
+        assert!(!state.stale, "and not again");
+    }
 }

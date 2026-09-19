@@ -84,6 +84,49 @@ pub fn format_timestamp(timestamp_ms: i64) -> String {
     }
 }
 
+/// The **one** wall-clock formatter (#1123).
+///
+/// `YYYY-MM-DD HH:MM:SS` in the viewer's local zone, with the UTC offset —
+/// `2026-09-19 15:42:10 +02:00`.
+///
+/// There were three, and they disagreed. The top bar hand-rolled
+/// `(secs / 3600) % 24` — UTC, with **no suffix**; the systemd detail used
+/// `chrono::Local`; the chart range was UTC and said so. An operator in UTC+2
+/// read "as of 13:42" in the top bar and "15:42:10" on the unit that had just
+/// restarted, and concluded the feed was two hours behind.
+///
+/// **Local with the offset, not UTC**, because the question an operator is
+/// answering is "was that before or after I did the thing", and they know when
+/// they did the thing in their own zone. The offset is shown so a screenshot
+/// pasted into a ticket is still unambiguous.
+#[must_use]
+pub fn format_wall_clock(timestamp_ms: i64) -> String {
+    use chrono::TimeZone;
+    let secs = timestamp_ms.div_euclid(1000);
+    match chrono::Local.timestamp_opt(secs, 0) {
+        chrono::offset::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:%M:%S %:z").to_string(),
+        // An epoch a timezone database cannot place is shown as the number it
+        // is, rather than as some other instant.
+        _ => timestamp_ms.to_string(),
+    }
+}
+
+/// [`format_wall_clock`] without the date — `HH:MM:SS +02:00`, for the top
+/// bar's "as of", where the date is almost always today and the width is
+/// scarce (#1123).
+///
+/// The offset stays. It is the whole point: a bare `13:42:10` is what made
+/// three formatters indistinguishable from one broken feed.
+#[must_use]
+pub fn format_clock(timestamp_ms: i64) -> String {
+    use chrono::TimeZone;
+    let secs = timestamp_ms.div_euclid(1000);
+    match chrono::Local.timestamp_opt(secs, 0) {
+        chrono::offset::LocalResult::Single(dt) => dt.format("%H:%M:%S %:z").to_string(),
+        _ => timestamp_ms.to_string(),
+    }
+}
+
 /// Format a time offset for chart axis labels.
 ///
 /// Returns strings like "now", "-30s", "-5m", "-1h", "-2d".
@@ -103,6 +146,57 @@ pub fn format_time_offset(offset_ms: i64) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    /// **One formatter, and it says which zone it is in** (#1123).
+    ///
+    /// There were three and they disagreed: the top bar hand-rolled
+    /// `(secs / 3600) % 24` — UTC with **no suffix** — the systemd detail used
+    /// `chrono::Local`, and the chart range was UTC and said so. An operator in
+    /// UTC+2 read "as of 13:42" in the top bar and "15:42:10" on the unit that
+    /// had just restarted, and concluded the feed was two hours behind.
+    ///
+    /// Asserted as a shape, not a literal: the output is the viewer's local
+    /// zone, and a test that pinned a string would pass only on a UTC machine
+    /// — which is the assumption that produced three disagreeing formatters in
+    /// the first place.
+    #[test]
+    fn the_wall_clock_carries_its_offset() {
+        let ts = 1_700_000_000_000;
+
+        let full = format_wall_clock(ts);
+        let (date_time, offset) = full.rsplit_once(' ').expect("an offset suffix");
+        assert_eq!(
+            date_time.len(),
+            19,
+            "YYYY-MM-DD HH:MM:SS, got {date_time:?}"
+        );
+        assert!(
+            (offset.starts_with('+') || offset.starts_with('-')) && offset.contains(':'),
+            "signed, separated offset, got {offset:?}"
+        );
+
+        let short = format_clock(ts);
+        let (time, short_offset) = short.rsplit_once(' ').expect("an offset suffix");
+        assert_eq!(time.len(), 8, "HH:MM:SS, got {time:?}");
+        assert_eq!(
+            short_offset, offset,
+            "both spellings agree about the zone: {full} vs {short}"
+        );
+        assert!(
+            full.ends_with(&short),
+            "the short form is the tail of the long one: {full} vs {short}"
+        );
+    }
+
+    /// An hour on the clock is an hour of epoch, in any zone.
+    #[test]
+    fn an_hour_apart_reads_an_hour_apart() {
+        let a = format_clock(1_700_000_000_000);
+        let b = format_clock(1_700_000_000_000 + 3_600_000);
+        assert_ne!(a, b);
+        assert_eq!(&a[3..], &b[3..], "only the hour moves: {a} vs {b}");
+    }
+
     use super::*;
 
     #[test]

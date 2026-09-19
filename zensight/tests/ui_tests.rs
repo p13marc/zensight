@@ -7714,11 +7714,10 @@ mod explorer_ui {
 
         let mut state = ExplorerState::default();
         state.running = true;
-        state.apply_tick(Arc::new(ExplorerCore::default().snapshot(
-            &mcore,
-            Vec::new(),
-            None,
-        )));
+        state.apply_tick(
+            Arc::new(ExplorerCore::default().snapshot(&mcore, Vec::new(), None)),
+            true,
+        );
 
         let mut ui = simulator(explorer_view(&state));
         for label in ["keys evicted", "keys unwatched", "samples shed", "retained"] {
@@ -7764,7 +7763,10 @@ mod verdict_ui {
         let mut state = ExplorerState::default();
         state.running = true;
         state.selected = Some(key.to_string());
-        state.apply_tick(Arc::new(core.snapshot(&mcore, Vec::new(), Some(inspected))));
+        state.apply_tick(
+            Arc::new(core.snapshot(&mcore, Vec::new(), Some(inspected))),
+            true,
+        );
 
         let mut ui = simulator(explorer_view(&state));
         assert!(

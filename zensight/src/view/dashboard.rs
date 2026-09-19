@@ -956,11 +956,10 @@ fn render_sensor_health_summary(
             _ => icons::status_unknown(IconSize::Small),
         };
 
-        // Chip label: `sensor@source` when the instance is host-scoped.
-        let label = match snapshot.source.as_deref() {
-            Some(source) => format!("{}@{}", snapshot.sensor, source),
-            None => snapshot.sensor.clone(),
-        };
+        // Chip label: `sensor@source` when the instance is host-scoped —
+        // through the same builder the maps are keyed by (#1124), so a label
+        // and the key it names cannot drift apart.
+        let label = crate::app::sensor_instance_key(&snapshot.sensor, snapshot.source.as_deref());
 
         // Build tooltip with detailed health info
         let tooltip_content = format!(

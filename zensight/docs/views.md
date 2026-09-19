@@ -122,6 +122,29 @@ always do.
 The disagreement is **recorded, not corrected** (`DeviceState.clock_skew_ms`).
 Silently rewriting a sensor's own timestamp would hide the thing worth knowing.
 
+## One clock, and it says which zone (#1123)
+
+Every wall-clock timestamp goes through `view::formatting::format_wall_clock`
+(or `format_clock`, the same thing without the date): **local time, with the
+UTC offset**.
+
+There were three formatters and they disagreed — the top bar's hand-rolled
+`(secs / 3600) % 24` was UTC with no suffix, the systemd detail was
+`chrono::Local`, the chart range was UTC and said so. An operator in UTC+2 read
+"as of 13:42" in one and "15:42:10" in the other and concluded the feed was two
+hours behind.
+
+Local, because the question is "was that before or after I did the thing" and
+an operator knows when they did the thing in their own zone. The offset,
+because a screenshot pasted into a ticket has to stay unambiguous. The **range
+picker** reads local for the same reason: everything a timestamp is read
+*from* is local, so typing a UTC instant into one field on a page of local ones
+is a conversion nobody should be doing in their head.
+
+DST is handled rather than assumed away: an ambiguous fall-back hour resolves
+to the earlier instant, and a spring-forward wall clock that never existed is
+**refused** rather than silently moved an hour.
+
 ## Reconnect reconciles (#1116)
 
 A seed is a **snapshot of a class**, so it replaces one.
