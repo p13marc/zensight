@@ -4,6 +4,7 @@
 //! metrics and provides domain-appropriate visualizations.
 
 pub mod attribution;
+pub mod bmc;
 pub mod fetch;
 pub mod gnmi;
 pub mod modbus;
@@ -168,8 +169,12 @@ pub fn specialized_view<'a>(
         // documents in the Bus explorer. A hypervisor-shaped tab — guests,
         // pools, backup trend — is worth building and is a follow-up.
         Protocol::Pve => None,
-        // #953: the surfaces are the per-chassis device cards, the Alerts
-        // view and the component documents in the Bus explorer, as for pve.
+        // #1127: one panel per chassis — temperatures, fans and supplies, each
+        // reading beside the limits the BMC itself declared for it. The gate is
+        // "did this device publish anything a chassis panel shows": an
+        // unreachable BMC publishes `reachable = 0` every cycle, so it passes
+        // the gate and gets a tab that says so, rather than vanishing.
+        Protocol::Bmc if bmc::has_bmc_readings(state) => Some(bmc::bmc_chassis_view(state)),
         Protocol::Bmc => None,
         // #819: surfaces are the per-container device cards, the Alerts view
         // and the state documents in the Bus explorer, as for pve above.

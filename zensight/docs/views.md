@@ -801,6 +801,25 @@ briefly shows data, then empties". Keeping the fullest reply makes the panel
 deterministic, and a `warn` naming the key and the answer count says the
 deployment has a duplicate instead of leaving it as a UI mystery.
 
+**BMC out-of-band hardware** (`view/specialized/bmc.rs`, #1127) — one panel per
+**chassis**, with temperatures, fans and power supplies each rendered through
+`components::limit_table` beside the limits the BMC itself declared. Three
+things are load-bearing:
+
+- The fold goes through the registry's `{chassis}` chunk, not `split('/')`.
+  #1130 made that chunk `{endpoint}-{id}`, so it contains a `-`; reading it
+  positionally is how two blades behind one Redfish service get mixed back
+  together.
+- **Every threshold is the BMC's.** `thermal/{s}/upper_warning_c` and
+  `upper_critical_c` are sibling subjects on the wire. The GUI compares and
+  colours; it never derives a limit. Fans get no verdict at all, because no BMC
+  publishes a fan threshold and a number invented here would be a guess about
+  somebody else's cooling.
+- **An unreachable BMC keeps its tab.** `reachable = 0` is published every
+  interval precisely so silence is a reading, and the panel says the numbers
+  below it are the last ones given — above them, not below, because that is the
+  order they are read in.
+
 ## Zero, absent, and unreadable are three different things
 
 The latency panel above can say `available: false` because it *asks* a question
@@ -822,6 +841,13 @@ directions.
   names all three causes it cannot tell apart — no RAPL hardware, no permission,
   or a sensor that has only just started (watts are a rate derived from an energy
   delta, so the first poll interval legitimately has none).
+- **A supply's rating is not its draw** (#1127). A BMC may publish
+  `psu/{p}/capacity_watts` and never `input_watts` — plenty of them do — and a
+  panel showing `0 W` there would be inventing a measurement, exactly as with
+  RAPL above. `components::limit_table` renders that as `not metered`, an empty
+  bay (`present = 0`) as `absent`, and grades neither. A third case the fans
+  panel does not have: an **absent** row carries no verdict *even when limits
+  were declared*, because a bay with nothing in it cannot be over its capacity.
 - **The panel opens on `system/entropy_avail`.** That coupling is load-bearing,
   not incidental. Fans, batteries and RAPL are each hardware- or
   permission-dependent and legitimately empty on a normal server; entropy is the

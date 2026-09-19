@@ -16,7 +16,8 @@ use zensight_common::registry::sysinfo::Subject;
 use crate::message::Message;
 use crate::view::components::card;
 use crate::view::components::{
-    Gauge, ProgressBar, StatusLed, StatusLedState, empty_state, section_header,
+    Gauge, LimitRow, ProgressBar, StatusLed, StatusLedState, empty_state, limit_table,
+    section_header,
 };
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
@@ -705,64 +706,48 @@ fn has_fans_or_power(state: &DeviceDetailState) -> bool {
 }
 
 /// Render temperature sensors section (Linux-specific).
+///
+/// #1127: the limits here are **hwmon's own**. `temp*_crit` and `temp*_max` are
+/// both published (`sensors/{chip}/{label}/critical` and `.../max`) and both
+/// come off the chip's own registers, set by whoever knows what this silicon
+/// tolerates.
+///
+/// This panel used to read only `critical` and then colour against `crit * 0.9`
+/// and `crit * 0.75` — two thresholds the GUI invented, while the real warning
+/// threshold sat unread on the wire one key away. On a chip whose `max` is well
+/// under 0.75 × `crit` that arithmetic renders green straight through the
+/// manufacturer's warning; on one where they are close it cries wolf. Neither
+/// number was ever a measurement of anything.
 fn render_temperatures_section(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = row![text("Temperatures").size(font::EMPHASIS)]
         .spacing(8)
         .align_y(Alignment::Center);
 
-    let mut content = Column::new().spacing(8);
-
-    // Find all temperature sensors: sensors/{chip}/{label}/temp
-    let mut sensors: Vec<(String, String, f64, Option<f64>)> = Vec::new();
-
-    for key in state.metrics.keys() {
-        // `sensors/{chip}/{label}/temp` — two variables, both named by the
-        // registry instead of read off `parts[1]`/`parts[2]`.
-        if let Some(Subject::SensorsTemp { chip, label }) = Subject::parse_metric(key)
-            && let Some(temp) = get_metric_value(state, key)
-        {
-            let critical = get_metric_value(state, &format!("sensors/{chip}/{label}/critical"));
-            sensors.push((chip.to_string(), label.to_string(), temp, critical));
-        }
-    }
-
-    sensors.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-
-    for (chip, label, temp, critical) in &sensors {
-        let temp_text = text(format!("{:.1}°C", temp)).size(font::CAPTION);
-        let styled_temp = if let Some(crit) = critical {
-            if *temp >= *crit * 0.9 {
-                temp_text.style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).danger()),
-                })
-            } else if *temp >= *crit * 0.75 {
-                temp_text.style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).warning()),
-                })
-            } else {
-                temp_text.style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).success()),
-                })
+    // `sensors/{chip}/{label}/temp` — two variables, both named by the
+    // registry instead of read off `parts[1]`/`parts[2]`.
+    let mut rows: Vec<LimitRow> = state
+        .metrics
+        .keys()
+        .filter_map(|key| match Subject::parse_metric(key) {
+            Some(Subject::SensorsTemp { chip, label }) => {
+                let temp = get_metric_value(state, key);
+                let warning = get_metric_value(state, &format!("sensors/{chip}/{label}/max"));
+                let critical = get_metric_value(state, &format!("sensors/{chip}/{label}/critical"));
+                Some(
+                    LimitRow::new(format!("{chip}/{label}"), temp, "°C")
+                        .with_limits(warning, critical)
+                        .with_precision(1),
+                )
             }
-        } else {
-            temp_text
-        };
+            _ => None,
+        })
+        .collect();
 
-        let sensor_row = row![
-            text(format!("{}/{}", chip, label)).size(font::DENSE),
-            styled_temp,
-        ]
-        .spacing(15)
-        .align_y(Alignment::Center);
+    rows.sort_by(|a, b| a.label.cmp(&b.label));
 
-        content = content.push(sensor_row);
-    }
-
-    if sensors.is_empty() {
-        content = content.push(empty_state("No temperature sensors found", None));
-    }
-
-    column![title, content].spacing(10).into()
+    column![title, limit_table(&rows, "No temperature sensors found"),]
+        .spacing(10)
+        .into()
 }
 
 /// The copy for "no RAPL watts", kept as a constant because it is the
@@ -1542,7 +1527,7 @@ fn latency_stat<'a>(label: &'a str, us: u64) -> Element<'a, Message> {
 mod tests {
     use super::*;
     use crate::message::DeviceId;
-    use zensight_common::Protocol;
+    use zensight_common::{Protocol, TelemetryPoint};
 
     #[test]
     fn test_format_bytes() {
@@ -1550,6 +1535,42 @@ mod tests {
         assert_eq!(format_bytes(1536.0), "1.5 KB");
         assert_eq!(format_bytes(1_572_864.0), "1.5 MB");
         assert_eq!(format_bytes(1_610_612_736.0), "1.5 GB");
+    }
+
+    /// #1127: the host's own `temp*_max` is the warning threshold, and the GUI
+    /// used to ignore it in favour of `crit * 0.75`.
+    ///
+    /// This NVMe controller is the case that arithmetic gets wrong: hwmon says
+    /// warn at 70 °C and shut down at 85 °C, and at 72 °C the drive is past the
+    /// manufacturer's warning. `crit * 0.75` is 63.75 and `crit * 0.9` is 76.5,
+    /// so the old panel painted 72 °C amber by luck of the ratio rather than by
+    /// the threshold — and on a chip with `max` at 45 °C and `crit` at 100 °C it
+    /// would have painted 60 °C green, fifteen degrees over the line.
+    #[test]
+    fn a_temperature_is_graded_against_hwmons_own_limits_not_a_fraction_of_crit() {
+        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+        for (metric, v) in [
+            ("sensors/nvme/composite/temp", 72.0),
+            ("sensors/nvme/composite/max", 70.0),
+            ("sensors/nvme/composite/critical", 85.0),
+        ] {
+            state.metrics.insert(
+                metric.to_string(),
+                TelemetryPoint::new(
+                    "server01",
+                    Protocol::Sysinfo,
+                    metric.to_string(),
+                    TelemetryValue::Gauge(v),
+                ),
+            );
+        }
+
+        let mut ui = simulator(render_temperatures_section(&state));
+        assert!(ui.find("72.0°C").is_ok(), "the reading renders");
+        assert!(
+            ui.find("warn 70.0°C · crit 85.0°C").is_ok(),
+            "beside both of hwmon's declared limits — neither of them derived"
+        );
     }
 
     #[test]
