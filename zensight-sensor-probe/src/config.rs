@@ -206,6 +206,52 @@ pub struct Target {
     #[serde(default = "default_true")]
     pub inspect_untrusted: bool,
 
+    /// A PEM file of additional trust anchors for **this target** (#1136).
+    ///
+    /// Until now the root store was `webpki_roots::TLS_SERVER_ROOTS` and
+    /// nothing else, so every internal-CA endpoint was a permanent critical:
+    /// a `tls` target published `chain_valid: false` and fired
+    /// `probe-certificate-chain-invalid` every sweep, and an `http` target
+    /// failed the handshake outright. That included **the ZenSight mesh
+    /// certificates this crate's README says it exists to watch** — a mesh
+    /// certificate is signed by an internal CA by definition.
+    ///
+    /// **Added, not replaced** (the bmc client's rule): a target behind an
+    /// internal CA still needs the public roots for anything in its redirect
+    /// chain. To trust *only* this CA, do not point the target at anything
+    /// else.
+    ///
+    /// A **local path**, and it may never ride `@desired` — it is trust
+    /// material, and a fleet controller that could hand a sensor a new trust
+    /// anchor could hand it any trust anchor. That is enforced structurally:
+    /// the never-list in `zensight-common/src/desired.rs` refuses the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ca_file: Option<String>,
+
+    /// Client certificate chain (PEM) for an mTLS endpoint (#1136), with
+    /// [`client_key_file`](Self::client_key_file). Both or neither — a chain
+    /// without its key is refused at startup rather than producing a handshake
+    /// failure every sweep that reads like the server's fault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_cert_file: Option<String>,
+
+    /// The private key (PEM) for [`client_cert_file`](Self::client_cert_file).
+    /// PKCS#8, PKCS#1 or SEC1 — whichever the file holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_key_file: Option<String>,
+
+    /// Per-target opt-out from `probe-certificate-chain-invalid` (#1136).
+    ///
+    /// `alerts.chain_invalid` is global, so silencing one deliberately
+    /// self-signed endpoint silenced the rule for **every** target — which is
+    /// the wrong trade and the only escape this sensor had. `None` inherits
+    /// the global setting; `Some(false)` exempts this target alone.
+    ///
+    /// Prefer `ca_file`. This says "I know this chain does not validate and I
+    /// accept that", which is a weaker statement than naming the CA.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chain_invalid_alert: Option<bool>,
+
     // ── DNS ──────────────────────────────────────────────────────────────
     /// Resolver to ask, `ip:port`. Default: the system resolver — and whichever
     /// it is, it is named in the result. **That is the check**: the 2026-08-20
@@ -449,6 +495,36 @@ impl SensorConfig for ProbeSensorConfig {
                     t.name
                 ));
             }
+            // Trust material (#1136). Checked at startup, because the failure
+            // it prevents is a handshake error every sweep that reads like the
+            // server's fault.
+            for (label, path) in [
+                ("ca_file", t.ca_file.as_ref()),
+                ("client_cert_file", t.client_cert_file.as_ref()),
+                ("client_key_file", t.client_key_file.as_ref()),
+            ] {
+                if let Some(p) = path
+                    && !std::path::Path::new(p).exists()
+                {
+                    problems.push(format!(
+                        "target {:?}: {label} {p:?} does not exist — a trust anchor the \
+                         sensor cannot read is a permanent handshake failure that reads \
+                         like the peer's fault",
+                        t.name
+                    ));
+                }
+            }
+            // A chain without its key, or a key without its chain, is a
+            // half-configured mTLS target. Refuse it here rather than every
+            // sweep.
+            if t.client_cert_file.is_some() != t.client_key_file.is_some() {
+                problems.push(format!(
+                    "target {:?}: client_cert_file and client_key_file must be set \
+                     together — one without the other cannot complete an mTLS handshake",
+                    t.name
+                ));
+            }
+
             match t.kind {
                 ProbeKind::Http if !t.target.starts_with("http") => problems.push(format!(
                     "target {:?}: an http probe needs a URL, got {:?}",
@@ -752,11 +828,22 @@ pub fn targets_from_wire(
     wire.targets
         .iter()
         .map(|w| {
-            let headers = file_baseline
-                .iter()
-                .find(|f| f.name == w.name)
-                .map(|f| f.headers.clone())
-                .unwrap_or_default();
+            let baseline = file_baseline.iter().find(|f| f.name == w.name);
+            let headers = baseline.map(|f| f.headers.clone()).unwrap_or_default();
+            // Trust material is FILE-ONLY (#1136). It is not on the wire type
+            // at all, so a pushed target set cannot introduce, change or
+            // remove a trust anchor — a fleet controller that could hand a
+            // sensor a new CA could hand it any CA. A target the operator
+            // configured with a `ca_file` keeps it across a push; a target the
+            // push invents has none, which fails closed.
+            //
+            // Same shape as `headers`, and for a stronger reason: a header is
+            // a secret this sensor sends, a trust anchor decides what it
+            // believes.
+            let ca_file = baseline.and_then(|f| f.ca_file.clone());
+            let client_cert_file = baseline.and_then(|f| f.client_cert_file.clone());
+            let client_key_file = baseline.and_then(|f| f.client_key_file.clone());
+            let chain_invalid_alert = baseline.and_then(|f| f.chain_invalid_alert);
             Target {
                 name: w.name.clone(),
                 kind: w.kind,
@@ -776,6 +863,10 @@ pub fn targets_from_wire(
                 inspect_untrusted: w.inspect_untrusted,
                 resolver: w.resolver.clone(),
                 expect_addrs: w.expect_addrs.clone(),
+                ca_file,
+                client_cert_file,
+                client_key_file,
+                chain_invalid_alert,
                 enabled: w.enabled,
             }
         })
@@ -788,6 +879,12 @@ pub fn targets_from_wire(
 /// procedure that returned them would put every configured bearer token on the
 /// bus in reply to an unauthenticated GET — the same leak as publishing them,
 /// arrived at from the other direction.
+///
+/// **Trust material is not on the wire type at all** (#1136) — `ca_file`,
+/// `client_cert_file`, `client_key_file` and `chain_invalid_alert` are
+/// file-only. That is a structural defence rather than a lint: a pushed target
+/// set has no field in which to carry a trust anchor, so no `@desired`
+/// document and no `@rpc` write can change what this sensor believes.
 pub fn targets_to_wire(targets: &[Target]) -> zensight_common::targets::ProbeTargets {
     zensight_common::targets::ProbeTargets {
         targets: targets
@@ -841,6 +938,10 @@ mod wire_tests {
             inspect_untrusted: true,
             resolver: None,
             expect_addrs: Vec::new(),
+            ca_file: None,
+            client_cert_file: None,
+            client_key_file: None,
+            chain_invalid_alert: None,
             enabled: true,
         }
     }

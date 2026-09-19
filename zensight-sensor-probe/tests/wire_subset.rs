@@ -38,6 +38,10 @@ fn file_target() -> Target {
         inspect_untrusted: true,
         resolver: Some("1.1.1.1:53".into()),
         expect_addrs: vec!["93.184.216.34".into()],
+        ca_file: None,
+        client_cert_file: None,
+        client_key_file: None,
+        chain_invalid_alert: None,
         enabled: true,
     }
 }

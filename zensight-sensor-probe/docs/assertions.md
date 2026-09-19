@@ -92,6 +92,26 @@ collapsing into a bare connection error. Reading a certificate is not trusting
 it: the real verifier's verdict is what gets published, and the bytes are only
 ever parsed.
 
+**`chain_valid: false` used to be unavoidable on an internal PKI** (#1136). The
+root store was `webpki_roots::TLS_SERVER_ROOTS` and nothing else, so every
+internal-CA endpoint fired `probe-certificate-chain-invalid` critical on every
+sweep — including the ZenSight mesh certificates this crate's README says it
+exists to watch, which are signed by an internal CA by definition. An `http`
+target against the same endpoint did not even complete the handshake.
+
+Two ways out, in preference order:
+
+1. **`ca_file` on the target** — name the CA. The chain then validates and the
+   rule says something true.
+2. **`chain_invalid_alert: false` on the target** — "I know this chain does not
+   validate and I accept that". Weaker, and per target: the global
+   `alerts.chain_invalid: false` was the only escape before, and silencing one
+   deliberately self-signed appliance silenced the rule for the whole fleet.
+
+The exemption is checked **inside** `grade` rather than at the call site, so a
+target that opts out *resolves* an alert it is already carrying instead of
+keeping it forever.
+
 ## DNS
 
 | Rule | Fires when | Severity |

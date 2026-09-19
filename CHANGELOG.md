@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **probe: a trust anchor per target — the sensor could not check the
+  certificates it exists to check** (#1136). The root store was
+  `webpki_roots::TLS_SERVER_ROOTS` and **nothing else**: no `ca_file`, no
+  system trust. So every internal-CA endpoint was a permanent critical — a
+  `tls` target published `chain_valid: false` and fired
+  `probe-certificate-chain-invalid` every sweep, and an `http` target failed
+  the handshake outright.
+
+  That included **the ZenSight mesh certificates this crate's README says it
+  exists to watch** — *"retires the monthly cron that warns when a ZenSight
+  mesh certificate is within 60 days of expiry"* — and a mesh certificate is
+  signed by an internal CA by definition. The only escape,
+  `alerts.chain_invalid: false`, is global: silencing one deliberately
+  self-signed appliance silenced the rule for the whole fleet.
+
+  Per-target `ca_file` (bmc's shape, blackbox_exporter's spelling),
+  `client_cert_file`/`client_key_file` for mTLS endpoints, and a per-target
+  `chain_invalid_alert` override. Trust anchors are **added to** the public
+  roots, not replacing them — a target behind an internal CA still needs them
+  for anything in its redirect chain.
+
+  **Trust material is file-only and has no field on the wire type.** A target
+  set pushed over `@rpc/probe/targets/set` or arriving on `@desired` has
+  nowhere to carry a CA, so no fleet controller can change what this sensor
+  believes. That is a structural defence rather than a lint: a controller that
+  could hand a sensor a new CA could hand it *any* CA, which is a
+  categorically larger power than telling it which URL to check. A pushed
+  target inherits the file's trust material for the same name, and has none
+  otherwise — it fails closed.
+
+  Startup refuses a trust file that does not exist, and a client certificate
+  without its key: both are handshake failures every sweep that read like the
+  *peer's* fault. The HTTP path gets a per-target client, cached on the trust
+  material itself so two targets behind one CA share a connection pool and a
+  hot-swapped `ca_file` does not inherit the old one's beliefs.
+
+  The acceptance test builds a real internal CA with `rcgen`, signs a
+  `localhost` certificate with it, stands up a rustls listener and inspects it
+  twice: `chain_valid: false` without the `ca_file` and `true` with it, same
+  endpoint, same certificate.
+
 - **pve: the hypervisor itself, the backup job *schedules*, Ceph, and the four
   counters already in the rows** (#1141). The sensor reported every guest and
   every pool while the node those guests run on was invisible — which is the

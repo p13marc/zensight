@@ -31,9 +31,33 @@ looking broken — and is what CI runs.
 | `allow_offhost_redirect` | http | **false** by default. Every hop is checked, not only the last — a chain that leaves the host and comes back has still left it |
 | `server_name` | tls, certfile | SNI, and the name matched against SANs |
 | `inspect_untrusted` | tls | true by default — report a bad certificate instead of erroring |
+| `ca_file` | tls, http | a PEM of extra trust anchors for **this target** (#1136). **Added to** the public roots, not replacing them — a target behind an internal CA still needs them for anything in its redirect chain. A local path, and it is never on the wire: see below |
+| `client_cert_file` / `client_key_file` | tls, http | a client chain and its key, for an mTLS endpoint (#1136). Both or neither; one without the other is refused at startup. The key may be PKCS#8, PKCS#1 or SEC1 |
+| `chain_invalid_alert` | tls | per-target override for `alerts.chain_invalid` (#1136). `false` exempts **this target alone**. Prefer `ca_file`: this says "I know this chain does not validate and I accept it", which is a weaker statement than naming the CA |
 | `resolver` | dns | `ip[:port]`; default is the system resolver, and either way it is **named in the result** |
 | `expect_addrs` | dns | the answer must contain **at least one** of them. It required *all* until #1134, which made a round-robin name with two A records a permanent critical: the resolver hands back one |
 | `enabled` | all | skip without deleting |
+
+## Trust material is file-only, and never on the wire
+
+`ca_file`, `client_cert_file`, `client_key_file` and `chain_invalid_alert` are
+**not fields of the wire target type** (#1136). A target set pushed over
+`@rpc/probe/targets/set` or arriving on `@desired` has nowhere to carry them,
+so no fleet controller can introduce, change or remove a trust anchor.
+
+That is a structural defence rather than a lint. A controller that could hand a
+sensor a new CA could hand it *any* CA, and the sensor would then believe
+whatever that CA signed — which is a categorically larger power than telling it
+which URL to check.
+
+The consequence, stated plainly: a target that arrives in a **push** inherits
+the trust material of the same-named target in the file, and has none if there
+is no such target. It fails closed.
+
+Before this, the root store was `webpki_roots` and nothing else, so **every
+internal-CA endpoint was a permanent critical** — including the ZenSight mesh
+certificates this crate exists to watch, which are signed by an internal CA by
+definition. The only escape was `alerts.chain_invalid: false`, which is global.
 
 ## The bounds are checked, not hoped for
 
@@ -43,6 +67,12 @@ Startup refuses:
   own tick is queued, not bounded"*;
 - a duplicate target name — names are the device slug and the alert key, so a
   duplicate silently overwrites another target's series;
+- a `ca_file`, `client_cert_file` or `client_key_file` that does not exist —
+  a trust anchor the sensor cannot read is a handshake failure every sweep that
+  reads like the *peer's* fault (#1136);
+- a `client_cert_file` without its `client_key_file`, or the reverse — a
+  half-configured mTLS target cannot complete a handshake, and refusing it here
+  costs one startup rather than one alert per interval;
 - a target whose shape does not match its kind (a URL-less `http`, a portless
   `tls`, a relative `certfile` path);
 - an `icmp` target in a build without the `icmp` feature, **naming the `tcp`

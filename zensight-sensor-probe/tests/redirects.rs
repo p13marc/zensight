@@ -43,6 +43,10 @@ fn target(name: &str, kind: ProbeKind, t: &str) -> Target {
         inspect_untrusted: true,
         resolver: None,
         expect_addrs: vec![],
+        ca_file: None,
+        client_cert_file: None,
+        client_key_file: None,
+        chain_invalid_alert: None,
         enabled: true,
     }
 }
