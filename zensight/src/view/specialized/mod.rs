@@ -20,6 +20,7 @@ pub mod parallax_h264;
 pub mod parallax_health;
 pub mod parallax_receiver;
 pub mod parallax_tier;
+pub mod probe;
 pub mod snmp;
 pub mod sysinfo;
 pub mod sysinfo_detail;
@@ -179,8 +180,13 @@ pub fn specialized_view<'a>(
         // #819: surfaces are the per-container device cards, the Alerts view
         // and the state documents in the Bus explorer, as for pve above.
         Protocol::Container => None,
-        // #820: the surfaces are the per-target device cards, the Alerts view
-        // and the result documents in the Bus explorer.
+        // #1126: one table per vantage point — outcome (with `timed out` as
+        // its own state, and its duration), burst latency, certificate expiry
+        // and the NTP set. The gate is "did this vantage publish any probe
+        // subject at all".
+        Protocol::Probe if probe::has_probe_results(state) => {
+            Some(probe::probe_vantage_view(state))
+        }
         Protocol::Probe => None,
         // #898: the historian's surface is every other view — the charts that
         // read `@rpc/historian/range` (#909) and the timeline that scrubs it
