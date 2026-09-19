@@ -54,6 +54,14 @@ pub struct Poller {
     vantage: String,
     source: String,
     client: reqwest::Client,
+    /// Per-target HTTP clients, for targets that name their own trust anchor
+    /// or client certificate (#1136).
+    ///
+    /// Cached, and keyed on the trust material itself so a hot-swapped target
+    /// that changes its `ca_file` gets a new client rather than the old one's
+    /// beliefs. Building one per sweep would also give each its own connection
+    /// pool, so every interval would be a fresh TLS handshake.
+    trust_clients: HashMap<TrustKey, reqwest::Client>,
     limit: Arc<tokio::sync::Semaphore>,
     publisher: Publisher,
     states: Arc<AdvancedPublisherRegistry>,
@@ -93,6 +101,76 @@ pub fn http_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
         .build()
 }
 
+/// An HTTP client that trusts **this target's** CA and presents its client
+/// certificate (#1136).
+///
+/// The shared client trusts `webpki_roots` and nothing else, so an `http`
+/// target against an internal-CA endpoint failed the handshake outright —
+/// including the ZenSight mesh endpoints this crate's README says it exists to
+/// watch.
+///
+/// Added, not replaced: a target behind an internal CA still needs the public
+/// roots for anything in its redirect chain.
+pub fn http_client_for(timeout: Duration, t: &Target) -> anyhow::Result<reqwest::Client> {
+    let mut b = reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(concat!("zensight-sensor-probe/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(path) = &t.ca_file {
+        let pem =
+            std::fs::read(path).map_err(|e| anyhow::anyhow!("target {:?}: {path}: {e}", t.name))?;
+        // A bundle, not one certificate: an internal PKI commonly ships root
+        // and intermediate in one file, and taking only the first would trust
+        // half a chain.
+        for cert in reqwest::Certificate::from_pem_bundle(&pem)
+            .map_err(|e| anyhow::anyhow!("target {:?}: {path}: {e}", t.name))?
+        {
+            b = b.add_root_certificate(cert);
+        }
+    }
+    if let (Some(cert), Some(key)) = (&t.client_cert_file, &t.client_key_file) {
+        // reqwest wants chain and key in ONE pem blob.
+        let mut pem =
+            std::fs::read(cert).map_err(|e| anyhow::anyhow!("target {:?}: {cert}: {e}", t.name))?;
+        pem.push(b'\n');
+        pem.extend_from_slice(
+            &std::fs::read(key).map_err(|e| anyhow::anyhow!("target {:?}: {key}: {e}", t.name))?,
+        );
+        b = b.identity(
+            reqwest::Identity::from_pem(&pem)
+                .map_err(|e| anyhow::anyhow!("target {:?}: client identity: {e}", t.name))?,
+        );
+    }
+    Ok(b.build()?)
+}
+
+/// Whether this target needs a client of its own at all.
+pub fn needs_own_client(t: &Target) -> bool {
+    t.ca_file.is_some() || t.client_cert_file.is_some()
+}
+
+/// What makes two targets able to share a client: the trust material and the
+/// timeout, and nothing else. Not the target's *name* — two targets behind the
+/// same internal CA should share one pool.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TrustKey {
+    ca_file: Option<String>,
+    client_cert_file: Option<String>,
+    client_key_file: Option<String>,
+    timeout_secs: u64,
+}
+
+impl TrustKey {
+    fn of(t: &Target, timeout: Duration) -> Self {
+        Self {
+            ca_file: t.ca_file.clone(),
+            client_cert_file: t.client_cert_file.clone(),
+            client_key_file: t.client_key_file.clone(),
+            timeout_secs: timeout.as_secs(),
+        }
+    }
+}
+
 impl Poller {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -114,6 +192,7 @@ impl Poller {
             vantage,
             source,
             client,
+            trust_clients: HashMap::new(),
             publisher,
             states,
             reporter,
@@ -176,9 +255,39 @@ impl Poller {
         let mut tasks = Vec::new();
         for t in due {
             let limit = self.limit.clone();
-            let client = self.client.clone();
             let vantage = self.vantage.clone();
             let timeout = Duration::from_secs(t.timeout(self.cfg.timeout_secs));
+            // A target that names its own trust anchor gets its own client
+            // (#1136); everything else shares the one built at startup.
+            let client = if needs_own_client(&t) {
+                let key = TrustKey::of(&t, timeout);
+                match self.trust_clients.get(&key) {
+                    Some(c) => c.clone(),
+                    None => match http_client_for(timeout, &t) {
+                        Ok(c) => {
+                            self.trust_clients.insert(key, c.clone());
+                            c
+                        }
+                        Err(e) => {
+                            // Startup validation checked the files exist; this
+                            // is a file that has since become unreadable or
+                            // unparseable. Say so once per sweep and fall back
+                            // to the shared client, which will fail the
+                            // handshake — a failure the operator can see,
+                            // rather than a target that silently stops being
+                            // checked.
+                            tracing::warn!(
+                                target = %t.name, error = %e,
+                                "probe: this target's trust material could not be loaded; \
+                                 falling back to the public roots"
+                            );
+                            self.client.clone()
+                        }
+                    },
+                }
+            } else {
+                self.client.clone()
+            };
             tasks.push(tokio::spawn(async move {
                 let _permit = limit.acquire().await;
                 crate::check::run(&t, &vantage, timeout, &client).await
@@ -365,7 +474,10 @@ impl Poller {
             // checked this tick — otherwise a target with a slow interval
             // would have its alerts resolved and re-fired on every fast tick.
             let all: Vec<ProbeResult> = self.last.values().cloned().collect();
-            let firing = alerts::grade(&self.cfg.alerts, &self.source, &all);
+            // Built from the LIVE target set, so a hot-swapped target that
+            // opts out takes effect on the next sweep (#1136).
+            let exempt = alerts::Exemptions::from_targets(&self.targets.snapshot());
+            let firing = alerts::grade(&self.cfg.alerts, &self.source, &all, &exempt);
             let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
             for a in &firing {
                 by_rule

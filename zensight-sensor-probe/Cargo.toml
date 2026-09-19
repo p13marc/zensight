@@ -67,6 +67,10 @@ anyhow.workspace = true
 tempfile = { workspace = true }
 toml.workspace = true
 axum = "0.8"
+# A real internal CA, for the #1136 tests: the whole claim is that a chain
+# signed by something outside webpki_roots now validates, and a fixture PEM
+# cannot demonstrate a handshake.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 
 [[bin]]
 name = "zensight-sensor-probe"

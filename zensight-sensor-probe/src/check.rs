@@ -590,7 +590,19 @@ async fn read_body_capped(mut resp: reqwest::Response, cap: usize) -> (String, b
 async fn tls(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
     let started = Instant::now();
     let name = t.host().unwrap_or_default();
-    match crate::tls::inspect_socket(&t.target, &name, timeout, t.inspect_untrusted).await {
+    match crate::tls::inspect_socket(
+        &t.target,
+        &name,
+        timeout,
+        t.inspect_untrusted,
+        crate::tls::TlsIdentity {
+            ca_file: t.ca_file.as_deref(),
+            client_cert_file: t.client_cert_file.as_deref(),
+            client_key_file: t.client_key_file.as_deref(),
+        },
+    )
+    .await
+    {
         Ok(tls) => {
             // The handshake succeeded, so the check ran. Whether the chain
             // validated, whether the name matches and how long the certificate
@@ -858,6 +870,10 @@ mod tests {
             inspect_untrusted: true,
             resolver: None,
             expect_addrs: vec![],
+            ca_file: None,
+            client_cert_file: None,
+            client_key_file: None,
+            chain_invalid_alert: None,
             enabled: true,
         }
     }

@@ -78,10 +78,85 @@ impl ServerCertVerifier for RecordingVerifier {
     }
 }
 
-fn root_store() -> Arc<rustls::RootCertStore> {
-    Arc::new(rustls::RootCertStore {
+/// The trust anchors for one target: the public roots, **plus** whatever
+/// `ca_file` names (#1136).
+///
+/// Added, not replaced — the bmc client's rule, and for the same reason: a
+/// target behind an internal CA still needs the public roots for anything in
+/// its redirect chain. To trust only the internal CA, do not point the target
+/// at anything else.
+///
+/// Until this existed the store was `webpki_roots::TLS_SERVER_ROOTS` and
+/// nothing else, so **every internal-CA endpoint was a permanent critical** —
+/// including the ZenSight mesh certificates this crate's README says it exists
+/// to watch, which are signed by an internal CA by definition.
+pub fn root_store(ca_file: Option<&str>) -> Result<Arc<rustls::RootCertStore>, String> {
+    let mut store = rustls::RootCertStore {
         roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    })
+    };
+    if let Some(path) = ca_file {
+        let pem = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
+        let mut rd = std::io::BufReader::new(&pem[..]);
+        let certs: Vec<_> = rustls_pemfile::certs(&mut rd)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("{path}: {e}"))?;
+        if certs.is_empty() {
+            // A file that parsed to nothing is the failure mode worth naming:
+            // silently keeping the public roots would look like the CA was
+            // trusted and produce a chain-invalid every sweep anyway.
+            return Err(format!("{path}: no CERTIFICATE block in this PEM file"));
+        }
+        let added = certs.len();
+        for c in certs {
+            store
+                .add(c)
+                .map_err(|e| format!("{path}: not a usable trust anchor: {e}"))?;
+        }
+        tracing::debug!(path, added, "probe: extra trust anchors loaded");
+    }
+    Ok(Arc::new(store))
+}
+
+/// The client certificate chain and key for an mTLS endpoint (#1136).
+fn client_identity(
+    cert_file: &str,
+    key_file: &str,
+) -> Result<
+    (
+        Vec<CertificateDer<'static>>,
+        rustls::pki_types::PrivateKeyDer<'static>,
+    ),
+    String,
+> {
+    let cert_pem = std::fs::read(cert_file).map_err(|e| format!("{cert_file}: {e}"))?;
+    let chain: Vec<CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut std::io::BufReader::new(&cert_pem[..]))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("{cert_file}: {e}"))?;
+    if chain.is_empty() {
+        return Err(format!(
+            "{cert_file}: no CERTIFICATE block in this PEM file"
+        ));
+    }
+    let key_pem = std::fs::read(key_file).map_err(|e| format!("{key_file}: {e}"))?;
+    // PKCS#8, PKCS#1 or SEC1 — whichever the file holds. Requiring one
+    // spelling would refuse keys `openssl` produces by default.
+    let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(&key_pem[..]))
+        .map_err(|e| format!("{key_file}: {e}"))?
+        .ok_or_else(|| format!("{key_file}: no PRIVATE KEY block in this PEM file"))?;
+    Ok((chain, key))
+}
+
+/// Everything one target says about what it will trust and what it will
+/// present (#1136).
+#[derive(Debug, Clone, Default)]
+pub struct TlsIdentity<'a> {
+    /// Extra trust anchors, added to the public roots.
+    pub ca_file: Option<&'a str>,
+    /// Client chain + key for an mTLS endpoint. Both or neither, which
+    /// `config::validate` refuses at startup.
+    pub client_cert_file: Option<&'a str>,
+    pub client_key_file: Option<&'a str>,
 }
 
 /// Handshake with `addr`, presenting `server_name`, and report what the peer
@@ -91,10 +166,17 @@ pub async fn inspect_socket(
     server_name: &str,
     timeout: Duration,
     inspect_untrusted: bool,
+    identity: TlsIdentity<'_>,
 ) -> Result<TlsResult, String> {
-    let roots = root_store();
+    let roots = root_store(identity.ca_file)?;
+    let client_auth = match (identity.client_cert_file, identity.client_key_file) {
+        (Some(c), Some(k)) => Some(client_identity(c, k)?),
+        // Startup validation refuses one without the other, so this arm is
+        // "no mTLS configured" and nothing else.
+        _ => None,
+    };
     let valid = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let mut cfg = if inspect_untrusted {
+    let builder = if inspect_untrusted {
         let inner = rustls::client::WebPkiServerVerifier::builder(roots.clone())
             .build()
             .map_err(|e| e.to_string())?;
@@ -104,11 +186,14 @@ pub async fn inspect_socket(
                 inner,
                 valid: valid.clone(),
             }))
-            .with_no_client_auth()
     } else {
-        rustls::ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth()
+        rustls::ClientConfig::builder().with_root_certificates(roots)
+    };
+    let mut cfg = match client_auth {
+        Some((chain, key)) => builder
+            .with_client_auth_cert(chain, key)
+            .map_err(|e| format!("client certificate unusable: {e}"))?,
+        None => builder.with_no_client_auth(),
     };
     cfg.alpn_protocols.clear();
 

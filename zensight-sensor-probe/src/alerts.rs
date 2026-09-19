@@ -83,7 +83,43 @@ fn alert(
 /// is the `source` of every alert, as of #883: a probe result is an
 /// observation made from somewhere, and two hosts probing the same target
 /// must not collide on one identity. The target rides in the labels.
-pub fn grade(cfg: &ProbeAlertsConfig, source: &str, results: &[ProbeResult]) -> Vec<Alert> {
+/// Per-target exemptions the global [`ProbeAlertsConfig`] cannot express
+/// (#1136).
+///
+/// `alerts.chain_invalid` is a single switch, so silencing one deliberately
+/// self-signed endpoint silenced the rule for **every** target — which was the
+/// only escape this sensor had from a permanent critical on an internal-CA
+/// endpoint. A per-target `chain_invalid_alert: false` exempts that target
+/// alone.
+///
+/// It is a set of names rather than a field on `ProbeResult`, because the
+/// result is a wire type and whether to alert is configuration, not an
+/// observation.
+#[derive(Debug, Clone, Default)]
+pub struct Exemptions {
+    /// Targets that opted out of `probe-certificate-chain-invalid`.
+    pub chain_invalid: std::collections::HashSet<String>,
+}
+
+impl Exemptions {
+    /// Build from the live target set.
+    pub fn from_targets(targets: &[crate::config::Target]) -> Self {
+        Self {
+            chain_invalid: targets
+                .iter()
+                .filter(|t| t.chain_invalid_alert == Some(false))
+                .map(|t| t.name.clone())
+                .collect(),
+        }
+    }
+}
+
+pub fn grade(
+    cfg: &ProbeAlertsConfig,
+    source: &str,
+    results: &[ProbeResult],
+    exempt: &Exemptions,
+) -> Vec<Alert> {
     let mut out = Vec::new();
     if !cfg.enabled {
         return out;
@@ -170,7 +206,15 @@ pub fn grade(cfg: &ProbeAlertsConfig, source: &str, results: &[ProbeResult]) -> 
 
         // `None` means nothing validated a chain — a PEM on disk has no chain
         // to check — and must not read as "invalid".
-        if cfg.chain_invalid && tls.chain_valid == Some(false) {
+        //
+        // The per-target opt-out (#1136) is checked here rather than at the
+        // call site so the rule still RECONCILES for an exempt target: a
+        // target that opts out must resolve any alert it is already carrying,
+        // not keep it forever.
+        if cfg.chain_invalid
+            && !exempt.chain_invalid.contains(&r.name)
+            && tls.chain_valid == Some(false)
+        {
             out.push(alert(
                 source,
                 r,
@@ -300,7 +344,12 @@ mod tests {
     fn the_hairpin_reports_as_a_timeout_with_its_duration_and_vantage() {
         let mut r = base(ProbeKind::Http, ProbeOutcome::Timeout);
         r.error = Some("operation timed out".into());
-        let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
+        let a = grade(
+            &ProbeAlertsConfig::default(),
+            HOST,
+            &[r],
+            &Exemptions::default(),
+        );
         assert_eq!(rules(&a), vec![RULE_TIMEOUT], "and NOT also probe-down");
         // The duration is in the sentence, never a label: a label is
         // identity, and a per-check wall-clock re-keyed every alert every
@@ -324,7 +373,12 @@ mod tests {
         let mut r = base(ProbeKind::Http, ProbeOutcome::Failed);
         r.error = Some("connection refused".into());
         assert_eq!(
-            rules(&grade(&ProbeAlertsConfig::default(), HOST, &[r])),
+            rules(&grade(
+                &ProbeAlertsConfig::default(),
+                HOST,
+                &[r],
+                &Exemptions::default()
+            )),
             vec![RULE_DOWN]
         );
     }
@@ -335,7 +389,8 @@ mod tests {
             grade(
                 &ProbeAlertsConfig::default(),
                 HOST,
-                &[base(ProbeKind::Http, ProbeOutcome::Ok)]
+                &[base(ProbeKind::Http, ProbeOutcome::Ok)],
+                &Exemptions::default(),
             )
             .is_empty()
         );
@@ -354,7 +409,12 @@ mod tests {
                 days_to_expiry: Some(days),
                 ..Default::default()
             });
-            let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
+            let a = grade(
+                &ProbeAlertsConfig::default(),
+                HOST,
+                &[r],
+                &Exemptions::default(),
+            );
             match want {
                 None => assert!(a.is_empty(), "{days} days should not fire"),
                 Some(sev) => {
@@ -379,7 +439,15 @@ mod tests {
             san_matched: None,
             ..Default::default()
         });
-        assert!(grade(&ProbeAlertsConfig::default(), HOST, &[r]).is_empty());
+        assert!(
+            grade(
+                &ProbeAlertsConfig::default(),
+                HOST,
+                &[r],
+                &Exemptions::default()
+            )
+            .is_empty()
+        );
     }
 
     #[test]
@@ -393,7 +461,12 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(
-            rules(&grade(&ProbeAlertsConfig::default(), HOST, &[r])),
+            rules(&grade(
+                &ProbeAlertsConfig::default(),
+                HOST,
+                &[r],
+                &Exemptions::default()
+            )),
             vec![RULE_CHAIN_INVALID, RULE_SAN_MISMATCH]
         );
     }
@@ -408,7 +481,12 @@ mod tests {
             resolver: Some("127.0.0.53".into()),
             expected_matched: Some(false),
         });
-        let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
+        let a = grade(
+            &ProbeAlertsConfig::default(),
+            HOST,
+            &[r],
+            &Exemptions::default(),
+        );
         assert!(rules(&a).contains(&RULE_DNS_UNEXPECTED));
         let dns = a.iter().find(|x| x.rule == RULE_DNS_UNEXPECTED).unwrap();
         assert_eq!(dns.labels["resolver"], "127.0.0.53");
@@ -423,7 +501,12 @@ mod tests {
             redirects: vec!["https://elsewhere.example/".into()],
             ..Default::default()
         });
-        let a = grade(&ProbeAlertsConfig::default(), HOST, &[r]);
+        let a = grade(
+            &ProbeAlertsConfig::default(),
+            HOST,
+            &[r],
+            &Exemptions::default(),
+        );
         assert!(rules(&a).contains(&RULE_OFFHOST_REDIRECT));
     }
 
@@ -469,6 +552,7 @@ mod tests {
             &ProbeAlertsConfig::default(),
             HOST,
             &[timeout, down, redirect, cert, dns, ntp],
+            &Exemptions::default(),
         )
         .iter()
         .map(|a| a.rule.clone())
