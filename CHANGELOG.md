@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **PVE backup freshness, container patch drift — and eight protocol tabs that
+  could never be reached** (#1128). `cluster/quorate`,
+  `backup/{vmid}/age_secs` + `ok`, `storage/{s}/overcommit_ratio`,
+  `image_behind_upstream`, `oom_kills_total` and the `*_pressure_avg10` gauges
+  have been on the bus since #818/#819 and reached a generic key/value row on a
+  device card. Two fleet tables now answer the questions they exist for: *which
+  guests are not backed up*, and *which containers run an image behind its
+  upstream digest*.
+
+  **The larger finding was the tab strip.** `render_protocol_tabs` iterated a
+  hard-coded array of nine protocols, frozen at whatever existed when it was
+  written, while `render_protocol_overview` had a match arm for every protocol
+  in the enum. Eight of those arms — systemd, parallax, hostspec, **pve**, bmc,
+  **container**, probe, historian — were therefore **unreachable code**.
+  `Protocol::Pve => generic_overview(…, "guests")` compiled, was covered by
+  nothing, and had never once been rendered. The array is now an ordering hint:
+  tabs are built from the protocols actually present, so a protocol nobody
+  remembered to list still gets a tab rather than silently vanishing.
+
+  Two absences carry the tables, and both render as their opposite if taken
+  naively. **A guest with no `backup/{vmid}/*` subject has never been backed
+  up** — the worst row in the table, not a missing one — so the table walks the
+  *guests* and left-joins their backups; built the other way round it would
+  omit exactly the rows it exists to find. **An unchecked image is not an
+  up-to-date one**: `image_behind_upstream` is published only when the
+  egressing collector actually resolved the upstream digest
+  (`zensight-sensor-container/src/poller.rs:322`), so the unchecked are counted
+  and named separately and never folded into "0 behind".
+
+  Also: a non-quorate cluster says so *above* the tables it casts doubt on, and
+  one node reporting lost quorum outweighs the majority side still reporting it
+  intact. And the events-plane decode's bare `_ => None`
+  (`subscription.rs:1018`) now logs the subject it is dropping — `Trap` is
+  still the only registered events subject, so it drops nothing today, which is
+  precisely why it was worth fixing before it did.
+
 - **The BMC's thermal, fan and power readings are in the GUI, each beside the
   limits its own hardware declared** (#1127). `zensight-sensor-bmc` has
   published `thermal/{s}/celsius` with `upper_warning_c`/`upper_critical_c` as

@@ -820,6 +820,35 @@ things are load-bearing:
   below it are the last ones given — above them, not below, because that is the
   order they are read in.
 
+**Protocol overviews** (`view/overview/`) — one fleet aggregate per protocol,
+selected by the tab strip above the dashboard.
+
+The tab strip is built from **the protocols that have devices**, ordered by
+`TAB_ORDER` and then by name. `TAB_ORDER` is an ordering hint and nothing more.
+Before #1128 it was the whole list, frozen at nine, and every protocol added
+since had a match arm in `render_protocol_overview` that could never run — for
+the pve sensor, its entire life. If you add a sensor, you may add it to
+`TAB_ORDER` for placement; if you forget, it still appears.
+
+**PVE** (`overview/pve.rs`, #1128) — backup freshness, quorum, overcommit.
+The backup table walks the **guests** and joins their backups, never the
+reverse: a guest with no `backup/{vmid}/*` subject at all has never been backed
+up, and is the top row. Built from the backup subjects it would contain only
+the guests that are fine. A failed recent run outranks a merely stale one,
+because age alone cannot say a backup failed. Quorum is rendered above
+everything it casts doubt on, and one node reporting `quorate = 0` outweighs
+the majority side still reporting `1` — a split cluster's majority is not the
+half worth hearing from.
+
+**Containers** (`overview/containers.rs`, #1128) — patch drift, OOM kills,
+restarts, PSI. `image_behind_upstream` is published **only** when the
+explicitly-egressing collector resolved the tag's upstream digest, so its
+absence means nobody looked. Unchecked containers are counted and named
+separately from drifted ones and never folded into "0 behind" — a clean bill of
+health over a fleet nothing checked is the one answer this table must not give.
+Rows are keyed `host/name`: a container name is unique on its host and nowhere
+else, and two hosts running `redis` are two containers.
+
 ## Zero, absent, and unreadable are three different things
 
 The latency panel above can say `available: false` because it *asks* a question

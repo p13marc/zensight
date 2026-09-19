@@ -1034,7 +1034,22 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                     None
                 }
             },
-            _ => None,
+            // #1128: `Trap` is the only registered events subject today, so
+            // this arm drops nothing yet — which is exactly why it is worth
+            // fixing now. It used to be a bare `_ => None`: the next producer
+            // to publish an events subject would have had it discarded here,
+            // silently, with the registry, the conformance judges and the bus
+            // explorer all agreeing the key was fine. A `debug!` naming the
+            // subject turns a silent drop into one grep.
+            other => {
+                tracing::debug!(
+                    key = %key,
+                    subject = ?other,
+                    "events-plane subject has no decode arm in the frontend — \
+                     dropping the sample; add one in decode_sample"
+                );
+                None
+            }
         };
     }
 
