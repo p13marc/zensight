@@ -12,7 +12,8 @@
 use std::collections::HashMap;
 
 use zensight_common::pve::{
-    PveBackupJob, PveBackupSummary, PveClusterHealth, PveGuest, PveStoragePool,
+    PveBackupJob, PveBackupSchedule, PveBackupSummary, PveCephStatus, PveClusterHealth, PveGuest,
+    PveNode, PveStoragePool,
 };
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
 
@@ -29,6 +30,19 @@ pub const RULE_BACKUP_STALE: &str = "backup-stale";
 pub const RULE_BACKUP_SHRUNK: &str = "backup-shrunk";
 pub const RULE_QUORUM: &str = "cluster-not-quorate";
 pub const RULE_REPLICATION: &str = "replication-failed";
+/// A node's root filesystem is nearly full (#1141) — invisible in every
+/// storage pool's numbers, and it stops PVE writing its own state.
+pub const RULE_NODE_ROOTFS: &str = "node-rootfs-full";
+/// A node's load average per CPU is above the configured ceiling (#1141).
+pub const RULE_NODE_LOAD: &str = "node-load-high";
+/// A node has started swapping (#1141) — the reading a guest's own numbers
+/// cannot show.
+pub const RULE_NODE_SWAP: &str = "node-swapping";
+/// An **enabled** backup job's `next-run` is in the past and nothing has run
+/// since (#1141). The assertion `backup-stale` cannot make.
+pub const RULE_BACKUP_OVERDUE: &str = "backup-job-overdue";
+/// Ceph's own health enum is not `HEALTH_OK` (#1141).
+pub const RULE_CEPH_HEALTH: &str = "ceph-health";
 
 /// The rules that are about ONE GUEST, and therefore about one node.
 ///
@@ -53,6 +67,11 @@ pub const ALL_RULES: &[&str] = &[
     RULE_BACKUP_SHRUNK,
     RULE_QUORUM,
     RULE_REPLICATION,
+    RULE_NODE_ROOTFS,
+    RULE_NODE_LOAD,
+    RULE_NODE_SWAP,
+    RULE_BACKUP_OVERDUE,
+    RULE_CEPH_HEALTH,
 ];
 
 /// One sweep's inputs.
@@ -71,6 +90,17 @@ pub struct Observation<'a> {
     /// Staleness is graded from each summary's own `age_secs`, computed by
     /// the poller against its clock — there is no second clock here.
     pub cluster: Option<&'a PveClusterHealth>,
+    /// The hypervisors themselves (#1141).
+    pub nodes: &'a [PveNode],
+    /// The scheduled vzdump jobs (#1141), so "due and did not run" is
+    /// separable from "merely young".
+    pub schedules: &'a [PveBackupSchedule],
+    /// Ceph's own verdict, where the cluster runs Ceph (#1141).
+    pub ceph: Option<&'a PveCephStatus>,
+    /// This sweep's wall clock, in epoch millis — passed in rather than read
+    /// here so the rules stay pure and a test can place "now" where it needs
+    /// it. The same discipline `age_secs` already follows.
+    pub now_ms: i64,
 }
 
 fn alert(
@@ -435,6 +465,173 @@ pub fn grade(cfg: &PveAlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
             }
         }
     }
+
+    // ── node-rootfs-full / node-load-high / node-swapping (#1141) ───────────
+    //
+    // The hypervisor itself, which this sensor did not look at while it
+    // reported every guest running on it. A node swapping, or with a full
+    // rootfs, or with a load average four times its core count, was invisible
+    // while every guest on it merely looked unhappy.
+    for n in obs.nodes {
+        let labels = [("node", n.name.clone())];
+
+        // A full `/` stops PVE writing its own state, and no storage pool's
+        // numbers contain it — `pool-usage` cannot see this.
+        if cfg.node_rootfs_ratio > 0.0
+            && let Some(ratio) = n.rootfs_ratio()
+            && ratio >= cfg.node_rootfs_ratio
+        {
+            out.push(alert(
+                obs.source,
+                RULE_NODE_ROOTFS,
+                AlertSeverity::Critical,
+                format!(
+                    "node {}: root filesystem {:.0}% full (threshold {:.0}%) — this is `/`, \
+                     not a storage pool, and a full one stops PVE writing its own state",
+                    n.name,
+                    ratio * 100.0,
+                    cfg.node_rootfs_ratio * 100.0
+                ),
+                &labels,
+            ));
+        }
+
+        // Per CPU, because a raw load average means different things on a
+        // 4-core and a 64-core node and one fleet-wide number has to mean one
+        // thing.
+        if cfg.node_load_per_cpu > 0.0
+            && let Some(per_cpu) = n.load_per_cpu()
+            && per_cpu >= cfg.node_load_per_cpu
+        {
+            out.push(alert(
+                obs.source,
+                RULE_NODE_LOAD,
+                AlertSeverity::Warning,
+                format!(
+                    "node {}: load {:.2} over {} CPU(s) = {:.2} per CPU (threshold {:.2})",
+                    n.name,
+                    n.load1.unwrap_or_default(),
+                    n.cpus.unwrap_or_default(),
+                    per_cpu,
+                    cfg.node_load_per_cpu
+                ),
+                &labels,
+            ));
+        }
+
+        // `swap_ratio` is None on a node with no swap configured, so a
+        // deliberate no-swap host never fires here.
+        if cfg.node_swap_ratio > 0.0
+            && let Some(ratio) = n.swap_ratio()
+            && ratio >= cfg.node_swap_ratio
+        {
+            out.push(alert(
+                obs.source,
+                RULE_NODE_SWAP,
+                AlertSeverity::Warning,
+                format!(
+                    "node {}: {:.0}% of swap in use (threshold {:.0}%) — a hypervisor that has \
+                     started swapping is not visible in any guest's own numbers",
+                    n.name,
+                    ratio * 100.0,
+                    cfg.node_swap_ratio * 100.0
+                ),
+                &labels,
+            ));
+        }
+    }
+
+    // ── backup-job-overdue (#1141) ──────────────────────────────────────────
+    //
+    // The assertion `backup-stale` cannot make. Staleness is measured against
+    // a fixed age, so a job that was switched OFF, or whose schedule was
+    // edited away, looks exactly like one that is merely young. A schedule
+    // says when it was due.
+    //
+    // `next_run_ms` is PVE's own evaluation of the calendar spec — systemd's,
+    // handed to us. A spec this build parsed itself would be a confident wrong
+    // answer about when a backup was due, so a job whose release does not
+    // report `next-run` is not graded at all.
+    if cfg.backup_overdue_grace_secs > 0 {
+        let grace_ms = (cfg.backup_overdue_grace_secs as i64) * 1000;
+        for j in obs.schedules {
+            // A DISABLED job is not overdue. It is switched off, which is a
+            // different thing to tell an operator, and firing on it would
+            // make every deliberately-paused job a standing alert.
+            if !j.enabled {
+                continue;
+            }
+            let Some(next) = j.next_run_ms else { continue };
+            if obs.now_ms <= next + grace_ms {
+                continue;
+            }
+            // Something ran since it was due? Then it is not overdue,
+            // whatever the clock says.
+            // `started_at` is epoch SECONDS (PVE's `starttime`); `next_run_ms`
+            // is millis. Comparing them raw would put every task in 1970 and
+            // make every enabled job permanently overdue.
+            let ran_since = obs.backup_jobs.iter().any(|run| {
+                run.last_task
+                    .as_ref()
+                    .is_some_and(|t| t.started_at * 1000 >= next)
+            });
+            if ran_since {
+                continue;
+            }
+            let late_mins = (obs.now_ms - next) / 60_000;
+            out.push(alert(
+                obs.source,
+                RULE_BACKUP_OVERDUE,
+                AlertSeverity::Critical,
+                format!(
+                    "backup job {}{}: due {} minute(s) ago and nothing has run since{}",
+                    j.id,
+                    j.comment
+                        .as_ref()
+                        .map(|c| format!(" ({c})"))
+                        .unwrap_or_default(),
+                    late_mins,
+                    j.schedule
+                        .as_ref()
+                        .map(|sch| format!(" — schedule `{sch}`"))
+                        .unwrap_or_default()
+                ),
+                &[("job", j.id.clone())],
+            ));
+        }
+    }
+
+    // ── ceph-health (#1141) ─────────────────────────────────────────────────
+    //
+    // Ceph's OWN enum. Never a verdict derived from the OSD or PG counters
+    // beside it — the same rule the BMC sensor follows about somebody else's
+    // hardware, and for the same reason: Ceph knows what its numbers mean and
+    // we do not.
+    if cfg.ceph_health
+        && let Some(c) = obs.ceph
+        && c.is_faulted()
+    {
+        out.push(alert(
+            obs.source,
+            RULE_CEPH_HEALTH,
+            if c.health == "HEALTH_ERR" {
+                AlertSeverity::Critical
+            } else {
+                AlertSeverity::Warning
+            },
+            format!(
+                "ceph: {}{}",
+                c.health,
+                if c.checks.is_empty() {
+                    String::new()
+                } else {
+                    format!(" — {}", c.checks.join(", "))
+                }
+            ),
+            &[],
+        ));
+    }
+
     out
 }
 
@@ -515,6 +712,10 @@ mod tests {
             pools: &[],
             backups: &[],
             cluster: None,
+            nodes: &[],
+            schedules: &[],
+            ceph: None,
+            now_ms: 0,
         }
     }
 
@@ -524,6 +725,10 @@ mod tests {
     ) -> Observation<'a> {
         Observation {
             cluster: Some(cluster),
+            nodes: &[],
+            schedules: &[],
+            ceph: None,
+            now_ms: 0,
             ..obs(guests)
         }
     }
@@ -974,6 +1179,54 @@ mod tests {
             quorate: Some(true),
             ..c.clone()
         };
+
+        // The #1141 surfaces, each in the state that makes its rule fire.
+        let nodes = [PveNode {
+            name: "pve".into(),
+            uptime_secs: Some(1000),
+            cpu_ratio: Some(0.9),
+            cpus: Some(4),
+            mem_bytes: Some(90),
+            mem_total_bytes: Some(100),
+            swap_bytes: Some(90),
+            swap_total_bytes: Some(100),
+            rootfs_bytes: Some(99),
+            rootfs_total_bytes: Some(100),
+            load1: Some(40.0),
+            load5: None,
+            load15: None,
+            pve_version: None,
+            kernel: None,
+            observed_at_ms: 0,
+        }];
+        // Enabled, due an hour before `now_ms`, with nothing run since.
+        let schedules = [PveBackupSchedule {
+            id: "backup-0001".into(),
+            enabled: true,
+            schedule: Some("mon..fri 03:00".into()),
+            next_run_ms: Some(1),
+            node: None,
+            storage: None,
+            comment: None,
+            guests: None,
+            all_guests: true,
+            observed_at_ms: 0,
+        }];
+        let ceph = PveCephStatus {
+            health: "HEALTH_ERR".into(),
+            checks: vec!["OSD_DOWN".into()],
+            osds_total: Some(3),
+            osds_up: Some(2),
+            osds_in: Some(3),
+            monitors_total: Some(3),
+            monitors_quorum: Some(3),
+            pgs_total: Some(128),
+            pgs_degraded: Some(4),
+            bytes_used: Some(50),
+            bytes_total: Some(100),
+            observed_at_ms: 0,
+        };
+
         let mut fired: std::collections::HashSet<String> = std::collections::HashSet::new();
         for cluster in [&c, &quorate] {
             let a = grade(
@@ -985,6 +1238,11 @@ mod tests {
                     pools: &pools,
                     backups: &b,
                     cluster: Some(cluster),
+                    nodes: &nodes,
+                    schedules: &schedules,
+                    ceph: Some(&ceph),
+                    // Well past the schedule's `next_run_ms` plus the grace.
+                    now_ms: 10_000_000,
                 },
             );
             fired.extend(a.iter().map(|x| x.rule.clone()));

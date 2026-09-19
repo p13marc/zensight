@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **pve: the hypervisor itself, the backup job *schedules*, Ceph, and the four
+  counters already in the rows** (#1141). The sensor reported every guest and
+  every pool while the node those guests run on was invisible — which is the
+  first thing anyone looks at when a guest is slow.
+
+  **The node.** `/nodes/{node}/status` was unread. A node swapping, or with a
+  full `/`, or with a load average six times its core count, showed up nowhere
+  and every guest on it merely looked unhappy. Nine gauges, a `PveNode`
+  document and three rules: `node-rootfs-full` (this is `/`, not a storage
+  pool — no pool's numbers contain it, and a full one stops PVE writing its own
+  state), `node-load-high` (graded **per CPU**, because one fleet-wide
+  threshold has to mean one thing on a 4-core and a 64-core node) and
+  `node-swapping` (silent on a node with no swap configured, which is a
+  deliberate configuration rather than 0 % used).
+
+  PVE serves `loadavg` as an array of **strings**, which `as_f64` reads as
+  `None`. The client parses the string — not belt and braces, the only thing
+  that works, and a client that did not would have published no load at all
+  while looking like it had.
+
+  **The schedules.** `/cluster/backup` gives each job's calendar spec, whether
+  it is **enabled**, and PVE's own `next-run`. Without them the sensor could say
+  "the last backup ran N seconds ago" and not "a backup that should have run at
+  03:00 did not run at all": `backup-stale` measures a fixed age, so a job
+  switched off, or whose schedule was edited away, looked exactly like one that
+  is merely young. `backup-job-overdue` fires only for an **enabled** job whose
+  `next-run` is past the grace with nothing run since.
+
+  The calendar spec is **not parsed here**. `next-run` is systemd's own
+  evaluation of it, handed over by PVE; a spec this build evaluated differently
+  would be a confident wrong answer about when a backup was due, so a release
+  that does not report `next-run` is not graded — the schedule is still
+  published, as a fact.
+
+  **Ceph.** `/cluster/ceph/status` where the cluster runs it: five gauges, a
+  document carrying the health checks Ceph is raising by name, and
+  `ceph-health` on Ceph's **own** enum — never a verdict derived from the OSD
+  or PG counters beside it, the same rule the BMC sensor follows about somebody
+  else's hardware. Nothing at all is published on a cluster with no Ceph: no
+  zeroes, no `healthy: 0`. `pgs_degraded` sums every state that is not
+  `active+clean`, which is the only reading that survives Ceph adding a state
+  name.
+
+  **The counters that were already in hand.** `netin`, `netout`, `diskread` and
+  `diskwrite` are on every `/cluster/resources` guest row and this sensor parsed
+  them away for two releases — so "which guest is saturating the uplink" was a
+  question the hypervisor could answer and ZenSight could not. Published as
+  **counters**, not gauges: monotonic since the guest booted and reset to zero
+  by a stop/start, which is what `CounterTracker` (#1152) decodes as a reset
+  rather than as a cliff.
+
+  Registry `pve.toml` to 1.3: fourteen telemetry families, three state
+  documents, three types.
+
 - **bmc: one Redfish session instead of one per request, paginated collections,
   and the drive and DIMM faults `chassis-health` could only gesture at**
   (#1140). Three things a real BMC would have found, before one is asked

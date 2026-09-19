@@ -25,7 +25,7 @@
 # there buys the #957 audit record for "who changed the rules".
 
 [registry]
-version = "1.2"
+version = "1.3"
 app = "zensight"
 convention = 1
 
@@ -90,6 +90,42 @@ type = "TelemetryPoint"
 cardinality = 512
 since = "1.0"
 description = "guest uptime (0 when stopped)"
+
+[[subject]]
+path = "guest/{vmid}/net_in_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 512
+since = "1.3"
+description = "cumulative bytes the guest has received (#1141). A COUNTER, monotonic since the guest booted and reset to zero by a stop/start — the rows carried it and this sensor dropped it, so \"which guest is saturating the uplink\" was a question the hypervisor could answer and ZenSight could not"
+
+[[subject]]
+path = "guest/{vmid}/net_out_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 512
+since = "1.3"
+description = "cumulative bytes the guest has sent (#1141); a counter, see net_in_bytes"
+
+[[subject]]
+path = "guest/{vmid}/disk_read_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 512
+since = "1.3"
+description = "cumulative bytes read from the guest's disks (#1141); a counter, see net_in_bytes"
+
+[[subject]]
+path = "guest/{vmid}/disk_write_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 512
+since = "1.3"
+description = "cumulative bytes written to the guest's disks (#1141); a counter, see net_in_bytes"
 
 [[subject]]
 path = "guest/{vmid}/running"
@@ -190,6 +226,137 @@ type = "TelemetryPoint"
 cardinality = 512
 since = "1.0"
 description = "1 when the last vzdump task exited OK, 0 otherwise"
+
+# ── Per-node telemetry (#1141) ───────────────────────────────────────────────
+#
+# The hypervisor itself, which this sensor did not see for two releases: it
+# reported guests and pools while a node swapping, or with a full rootfs, or
+# with a load average four times its core count, was invisible. Gauges only
+# where the node gave a reading — a field this build does not find is a MISSING
+# reading, not a zero, and PVE's node-status shape has moved across releases.
+
+[[subject]]
+path = "node/{node}/cpu_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.3"
+description = "node CPU utilisation, 0..1 as PVE reports it — not per-core, the same convention guest/{vmid}/cpu_ratio uses"
+
+[[subject]]
+path = "node/{node}/mem_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 64
+since = "1.3"
+description = "node memory in use"
+
+[[subject]]
+path = "node/{node}/mem_total_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 64
+since = "1.3"
+description = "node memory installed"
+
+[[subject]]
+path = "node/{node}/swap_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 64
+since = "1.3"
+description = "node swap in use — a hypervisor that has started swapping is the reading a guest's own numbers cannot show; absent on a node with no swap configured, which is a deliberate configuration rather than zero"
+
+[[subject]]
+path = "node/{node}/rootfs_used_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.3"
+description = "the node's ROOT filesystem, not a storage pool. A full / stops PVE writing its own state and is invisible in every pool's numbers"
+
+[[subject]]
+path = "node/{node}/rootfs_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+cardinality = 64
+since = "1.3"
+description = "node root filesystem in use"
+
+[[subject]]
+path = "node/{node}/load1"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.3"
+description = "1-minute load average as the node reports it"
+
+[[subject]]
+path = "node/{node}/load_per_cpu"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.3"
+description = "load1 divided by the node's CPU count — the number that means the same thing across nodes of different sizes; absent when either half is"
+
+[[subject]]
+path = "node/{node}/uptime_secs"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "s"
+cardinality = 64
+since = "1.3"
+description = "seconds since the node booted"
+
+# ── Ceph telemetry (#1141) ───────────────────────────────────────────────────
+#
+# Absent on every cluster that does not run Ceph, which is most of them: the
+# endpoint answers 501 or 404, and that is a fact about the cluster rather than
+# a failed poll.
+
+[[subject]]
+path = "ceph/healthy"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.3"
+description = "1 when Ceph's OWN health enum is HEALTH_OK, 0 otherwise — never a verdict this sensor derived from the counters beside it"
+
+[[subject]]
+path = "ceph/osds_up"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.3"
+description = "OSDs Ceph reports up"
+
+[[subject]]
+path = "ceph/osds_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.3"
+description = "OSDs in the map"
+
+[[subject]]
+path = "ceph/pgs_degraded"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.3"
+description = "placement groups not in active+clean, summed over every state that is not — the only reading that survives Ceph adding a state name"
+
+[[subject]]
+path = "ceph/used_ratio"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 1
+since = "1.3"
+description = "bytes_used / bytes_total as the pg map reports them"
 
 # ── Cluster-wide telemetry ───────────────────────────────────────────────────
 
@@ -296,6 +463,33 @@ cardinality = 32
 ttl_s = 86400
 since = "1.1"
 description = "the last WHOLE-JOB vzdump run on this node — a job configured `all 1` covers every guest and names none, so PVE records it as one task with an empty id and the per-guest results live only in the task log; grading it once beats inventing a per-guest verdict (#880)"
+
+[[subject]]
+path = "node/{node}"
+class = "state"
+type = "PveNode"
+cardinality = 64
+ttl_s = 900
+since = "1.3"
+description = "one node's own resource picture (#1141): CPU, memory, swap, root filesystem, load averages, uptime, PVE and kernel versions — the hypervisor this sensor did not see while it reported every guest running on it"
+
+[[subject]]
+path = "backup/job/{job}/schedule"
+class = "state"
+type = "PveBackupSchedule"
+cardinality = 64
+ttl_s = 900
+since = "1.3"
+description = "one scheduled vzdump job (#1141): its calendar spec verbatim, whether it is ENABLED, and PVE's own next-run. Without it the sensor could say \"the last backup ran N seconds ago\" and not \"a backup that should have run at 03:00 did not run at all\" — a job switched off looks identical to one that is merely young"
+
+[[subject]]
+path = "ceph"
+class = "state"
+type = "PveCephStatus"
+cardinality = 1
+ttl_s = 900
+since = "1.3"
+description = "Ceph's own health verdict and the checks it is raising (#1141), where the cluster runs Ceph; absent entirely where it does not"
 
 [[subject]]
 path = "cluster"

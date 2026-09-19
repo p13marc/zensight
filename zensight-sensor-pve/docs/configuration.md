@@ -63,6 +63,11 @@ read.
 | `pve.alerts.*` | see [`assertions.md`](assertions.md) | |
 | `pve.alerts.backup_job_failed` | `true` | grade a whole-job vzdump (`all 1`) once, rather than as a failure of every guest it covered (#880) |
 | `pve.alerts.backup_task_max_age_secs` | `172800` (48 h) | how old a vzdump task may be and still be evidence about the last backup. The task query is bounded by rows, not time, so without this an ancient one-off wins forever. 0 disables |
+| `pve.alerts.node_rootfs_ratio` | `0.9` | node `/` used fraction that fires (#1141). This is the **root filesystem**, not a storage pool: no pool's numbers contain it, and a full one stops PVE writing its own state. 0 disables |
+| `pve.alerts.node_load_per_cpu` | `4.0` | node 1-minute load average **per CPU** that fires (#1141). Per CPU because a raw load average means different things on a 4-core and a 64-core node. Deliberately high: a hypervisor is supposed to be busy. 0 disables |
+| `pve.alerts.node_swap_ratio` | `0.5` | node swap-used fraction that fires (#1141). Never fires on a node with no swap configured, which is a deliberate configuration rather than 0 % used. 0 disables |
+| `pve.alerts.backup_overdue_grace_secs` | `3600` | how far past an **enabled** job's `next-run` it may be before `backup-job-overdue` fires (#1141). A job due at 03:00 that starts at 03:02 is not overdue. 0 disables |
+| `pve.alerts.ceph_health` | `true` | fire on Ceph's **own** health enum (#1141), never on a verdict derived from the OSD or PG counters beside it. Silent on a cluster that does not run Ceph |
 
 ## One-shot diagnosis
 

@@ -168,6 +168,9 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
         .json::<crate::pve::PveBackupSummary>("PveBackupSummary")
         .json::<crate::pve::PveBackupJob>("PveBackupJob")
         .json::<crate::pve::PveClusterHealth>("PveClusterHealth")
+        .json::<crate::pve::PveNode>("PveNode")
+        .json::<crate::pve::PveBackupSchedule>("PveBackupSchedule")
+        .json::<crate::pve::PveCephStatus>("PveCephStatus")
         // bmc's state documents (#953) — the BMC's own verdicts, not ours.
         .json::<crate::bmc::Chassis>("BmcChassis")
         .json::<crate::bmc::PowerSupply>("BmcPowerSupply")

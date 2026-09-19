@@ -289,6 +289,14 @@ kind = "json-schema"
 [types.PveClusterHealth]
 kind = "json-schema"
 
+# The hypervisor itself, the job schedules and Ceph (#1141).
+[types.PveNode]
+kind = "json-schema"
+[types.PveBackupSchedule]
+kind = "json-schema"
+[types.PveCephStatus]
+kind = "json-schema"
+
 # container's state document (#819).
 [types.ContainerInfo]
 kind = "json-schema"

@@ -63,7 +63,11 @@ async fn resources(State(_): State<Fixture>) -> axum::Json<Value> {
         {"type": "qemu", "vmid": 140, "name": "vm-apps", "node": "pve",
          "status": "running", "uptime": 86400, "cpu": 0.05,
          "mem": 1073741824u64, "maxmem": 2147483648u64,
-         "disk": 0, "maxdisk": 34359738368u64},
+         "disk": 0, "maxdisk": 34359738368u64,
+         // These four are in every real row and were parsed away for two
+         // releases (#1141).
+         "netin": 51200u64, "netout": 12800u64,
+         "diskread": 204800u64, "diskwrite": 409600u64},
         {"type": "lxc", "vmid": 201, "name": "ct-registry", "node": "pve",
          "status": "running", "uptime": 3600},
         {"type": "qemu", "vmid": 9000, "name": "tpl-debian", "node": "pve",
@@ -178,6 +182,86 @@ async fn nodes(State(_): State<Fixture>) -> axum::Json<Value> {
     axum::Json(json!({"data": [{"node": "pve", "status": "online"}]}))
 }
 
+/// `/nodes/{node}/status` (#1141), with the shapes PVE really serves: a
+/// `loadavg` array of **strings**, memory and rootfs as nested objects, and
+/// the CPU count behind `cpuinfo`.
+///
+/// The node is deliberately unhealthy — a nearly full `/`, load well past four
+/// per CPU, and swap in use — because the three rules this endpoint exists for
+/// are what make it worth reading.
+async fn node_status(State(f): State<Fixture>) -> axum::Json<Value> {
+    if f.fixed.load(Ordering::Relaxed) {
+        return axum::Json(json!({"data": {
+            "uptime": 864000,
+            "cpu": 0.12,
+            "cpuinfo": {"cpus": 8},
+            "memory": {"total": 68719476736u64, "used": 20000000000u64},
+            "swap": {"total": 8589934592u64, "used": 0},
+            "rootfs": {"total": 100000000000u64, "used": 20000000000u64},
+            "loadavg": ["1.20", "1.10", "0.90"],
+            "pveversion": "pve-manager/8.2.4",
+            "current-kernel": {"release": "6.8.12-1-pve"},
+        }}));
+    }
+    axum::Json(json!({"data": {
+        "uptime": 864000,
+        "cpu": 0.97,
+        "cpuinfo": {"cpus": 8},
+        "memory": {"total": 68719476736u64, "used": 67000000000u64},
+        // Swapping: the reading a guest's own numbers cannot show.
+        "swap": {"total": 8589934592u64, "used": 8000000000u64},
+        // A nearly full `/`. No storage pool's numbers contain this.
+        "rootfs": {"total": 100000000000u64, "used": 97000000000u64},
+        // Strings, which `as_f64` reads as None — parsing them is the only
+        // thing that works here, not belt and braces.
+        "loadavg": ["48.50", "44.20", "40.10"],
+        "pveversion": "pve-manager/8.2.4",
+        "current-kernel": {"release": "6.8.12-1-pve"},
+    }}))
+}
+
+/// `/cluster/backup` (#1141): one enabled job, due in the past, plus a
+/// **disabled** one that must never be called overdue.
+async fn backup_jobs(State(_): State<Fixture>) -> axum::Json<Value> {
+    axum::Json(json!({"data": [
+        {"id": "backup-0001", "enabled": 1, "schedule": "mon..fri 03:00",
+         "next-run": 1000, "storage": "backups", "all": 1,
+         "comment": "nightly"},
+        // Switched off. Its last run is ancient and that is not a fault —
+        // it is a job an operator turned off, which is a different thing to
+        // say, and the reason `enabled` is carried at all.
+        {"id": "backup-0002", "enabled": 0, "schedule": "sat 02:00",
+         "next-run": 1000, "storage": "backups", "vmid": "140,201"},
+    ]}))
+}
+
+/// `/cluster/ceph/status` (#1141). The fixture serves Ceph's real nesting —
+/// `health.status`, `health.checks` as an OBJECT keyed by check name, the
+/// osdmap double-nested the way older releases serve it, and `pgs_by_state`.
+async fn ceph_status(State(f): State<Fixture>) -> axum::Json<Value> {
+    if f.fixed.load(Ordering::Relaxed) {
+        return axum::Json(json!({"data": {
+            "health": {"status": "HEALTH_OK", "checks": {}},
+            "osdmap": {"osdmap": {"num_osds": 6, "num_up_osds": 6, "num_in_osds": 6}},
+            "monmap": {"mons": [{}, {}, {}]},
+            "quorum": [0, 1, 2],
+            "pgmap": {"num_pgs": 129, "bytes_used": 500, "bytes_total": 1000,
+                      "pgs_by_state": [{"state_name": "active+clean", "count": 129}]},
+        }}));
+    }
+    axum::Json(json!({"data": {
+        "health": {"status": "HEALTH_WARN", "checks": {"OSD_DOWN": {}, "PG_DEGRADED": {}}},
+        "osdmap": {"osdmap": {"num_osds": 6, "num_up_osds": 5, "num_in_osds": 6}},
+        "monmap": {"mons": [{}, {}, {}]},
+        "quorum": [0, 1, 2],
+        "pgmap": {"num_pgs": 129, "bytes_used": 900, "bytes_total": 1000,
+                  "pgs_by_state": [
+                      {"state_name": "active+clean", "count": 120},
+                      {"state_name": "active+undersized+degraded", "count": 9},
+                  ]},
+    }}))
+}
+
 /// A standalone node: `/cluster/status` answers with no `cluster` row, so
 /// `quorate` is unknown rather than false.
 async fn cluster_status(State(_): State<Fixture>) -> axum::Json<Value> {
@@ -207,6 +291,9 @@ async fn spawn_api(fixture: Fixture) -> SocketAddr {
             get(storage_content),
         )
         .route("/api2/json/nodes/{node}/tasks", get(tasks))
+        .route("/api2/json/nodes/{node}/status", get(node_status))
+        .route("/api2/json/cluster/backup", get(backup_jobs))
+        .route("/api2/json/cluster/ceph/status", get(ceph_status))
         .with_state(fixture);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -684,4 +771,292 @@ async fn the_hypervisor_contract_end_to_end() {
         "the over-commitment, the shrunk backup and the failed whole-job run \
          must keep firing"
     );
+}
+
+// ── #1141: the hypervisor, the schedules, Ceph, and the dropped counters ─────
+
+/// **The sensor sees the hypervisor.**
+///
+/// It reported every guest and every pool while the node those guests run on
+/// was invisible — which is the first thing anyone looks at when a guest is
+/// slow. A node swapping, or with a full `/`, or with a load average six times
+/// its core count, showed up nowhere; every guest on it merely looked unhappy.
+///
+/// The fixture serves the shapes PVE really serves, and the one that matters
+/// is `loadavg`: an array of **strings**. `as_f64` reads those as `None`, so
+/// parsing the string is not belt and braces here — it is the only thing that
+/// works, and a client that did not would publish no load at all.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_node_itself_is_read_and_graded() {
+    let fixture = Fixture {
+        fixed: Arc::new(AtomicBool::new(false)),
+    };
+    let addr = spawn_api(fixture.clone()).await;
+    let c = client(addr);
+
+    let node = c
+        .node_status("pve")
+        .await
+        .expect("node status reads")
+        .expect("the node answered");
+
+    assert_eq!(node.name, "pve");
+    assert_eq!(node.cpus, Some(8));
+    assert_eq!(
+        node.load1,
+        Some(48.5),
+        "loadavg arrives as STRINGS and must still be a number"
+    );
+    assert_eq!(node.load5, Some(44.2));
+    assert_eq!(node.load_per_cpu(), Some(48.5 / 8.0));
+    assert_eq!(node.pve_version.as_deref(), Some("pve-manager/8.2.4"));
+    assert_eq!(node.kernel.as_deref(), Some("6.8.12-1-pve"));
+    assert_eq!(node.rootfs_ratio(), Some(0.97));
+    assert_eq!(node.swap_ratio().map(|r| (r * 100.0).round()), Some(93.0));
+
+    let nodes = [node];
+    let firing = zensight_sensor_pve::alerts::grade(
+        &PveAlertsConfig {
+            for_secs: 0,
+            ..Default::default()
+        },
+        &zensight_sensor_pve::alerts::Observation {
+            source: "pve",
+            guests: &[],
+            pools: &[],
+            backups: &[],
+            backup_jobs: &[],
+            cluster: None,
+            nodes: &nodes,
+            schedules: &[],
+            ceph: None,
+            now_ms: 0,
+        },
+    );
+    let mut rules: Vec<&str> = firing.iter().map(|a| a.rule.as_str()).collect();
+    rules.sort_unstable();
+    assert_eq!(
+        rules,
+        vec!["node-load-high", "node-rootfs-full", "node-swapping"],
+        "{firing:?}"
+    );
+    // The root-filesystem one is the point: no storage pool's numbers contain
+    // `/`, so `pool-usage` could never have said this.
+    let rootfs = firing
+        .iter()
+        .find(|a| a.rule == "node-rootfs-full")
+        .unwrap();
+    assert!(rootfs.summary.contains("97%"), "{}", rootfs.summary);
+    assert!(
+        rootfs.labels.get("node").is_some_and(|v| v == "pve"),
+        "{:?}",
+        rootfs.labels
+    );
+
+    // And a healthy node fires none of them.
+    fixture.fixed.store(true, Ordering::Relaxed);
+    let healthy = [c.node_status("pve").await.unwrap().unwrap()];
+    let quiet = zensight_sensor_pve::alerts::grade(
+        &PveAlertsConfig {
+            for_secs: 0,
+            ..Default::default()
+        },
+        &zensight_sensor_pve::alerts::Observation {
+            source: "pve",
+            guests: &[],
+            pools: &[],
+            backups: &[],
+            backup_jobs: &[],
+            cluster: None,
+            nodes: &healthy,
+            schedules: &[],
+            ceph: None,
+            now_ms: 0,
+        },
+    );
+    assert!(quiet.is_empty(), "{quiet:?}");
+}
+
+/// **"Due at 03:00 and did not run" is a different claim from "old".**
+///
+/// `backup-stale` measures a fixed age, so a job that was switched **off**, or
+/// whose schedule was edited away, looks exactly like one that is merely
+/// young. The schedule says when it was due.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_disabled_backup_job_is_never_called_overdue() {
+    let fixture = Fixture {
+        fixed: Arc::new(AtomicBool::new(false)),
+    };
+    let addr = spawn_api(fixture).await;
+    let jobs = client(addr).backup_jobs().await.expect("backup jobs read");
+
+    assert_eq!(jobs.len(), 2);
+    let on = jobs.iter().find(|j| j.id == "backup-0001").unwrap();
+    assert!(on.enabled);
+    assert!(on.all_guests, "`all: 1` takes every guest");
+    assert_eq!(on.schedule.as_deref(), Some("mon..fri 03:00"));
+    assert_eq!(
+        on.next_run_ms,
+        Some(1_000_000),
+        "next-run is seconds on the wire"
+    );
+
+    let off = jobs.iter().find(|j| j.id == "backup-0002").unwrap();
+    assert!(!off.enabled, "`enabled: 0` is the off switch");
+    assert_eq!(off.guests, Some(2), "two vmids named");
+
+    let cfg = PveAlertsConfig {
+        for_secs: 0,
+        ..Default::default()
+    };
+    let obs = |now_ms: i64| zensight_sensor_pve::alerts::Observation {
+        source: "pve",
+        guests: &[],
+        pools: &[],
+        backups: &[],
+        backup_jobs: &[],
+        cluster: None,
+        nodes: &[],
+        schedules: &jobs,
+        ceph: None,
+        now_ms,
+    };
+
+    // Long past both jobs' next-run, with nothing having run.
+    let firing = zensight_sensor_pve::alerts::grade(&cfg, &obs(9_999_999_999));
+    let overdue: Vec<&Alert> = firing
+        .iter()
+        .filter(|a| a.rule == "backup-job-overdue")
+        .collect();
+    assert_eq!(
+        overdue.len(),
+        1,
+        "only the ENABLED job is overdue — a job an operator switched off is \
+         not a fault: {firing:?}"
+    );
+    assert!(
+        overdue[0].summary.contains("backup-0001"),
+        "{}",
+        overdue[0].summary
+    );
+    assert!(
+        overdue[0].summary.contains("nightly"),
+        "the operator's own name for it: {}",
+        overdue[0].summary
+    );
+    assert!(
+        overdue[0].summary.contains("mon..fri 03:00"),
+        "and the schedule it missed: {}",
+        overdue[0].summary
+    );
+
+    // Inside the grace, nothing fires.
+    let inside = zensight_sensor_pve::alerts::grade(&cfg, &obs(1_000_000 + 60_000));
+    assert!(
+        !inside.iter().any(|a| a.rule == "backup-job-overdue"),
+        "a job due at 03:00 that starts at 03:02 is not overdue: {inside:?}"
+    );
+}
+
+/// Ceph's **own** enum, never our reading of the counters beside it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn ceph_health_is_cephs_verdict_and_absent_where_there_is_no_ceph() {
+    let fixture = Fixture {
+        fixed: Arc::new(AtomicBool::new(false)),
+    };
+    let addr = spawn_api(fixture.clone()).await;
+    let c = client(addr);
+
+    let ceph = c
+        .ceph_status()
+        .await
+        .expect("ceph status reads")
+        .expect("this fixture runs ceph");
+    assert_eq!(ceph.health, "HEALTH_WARN");
+    let mut checks = ceph.checks.clone();
+    checks.sort();
+    assert_eq!(
+        checks,
+        vec!["OSD_DOWN", "PG_DEGRADED"],
+        "the names an operator acts on"
+    );
+    assert_eq!(ceph.osds_up, Some(5));
+    assert_eq!(ceph.osds_total, Some(6));
+    assert_eq!(
+        ceph.pgs_degraded,
+        Some(9),
+        "summed over every state that is not active+clean — the only reading \
+         that survives Ceph adding a state name"
+    );
+    assert!(ceph.is_faulted());
+
+    let cfg = PveAlertsConfig {
+        for_secs: 0,
+        ..Default::default()
+    };
+    let firing = zensight_sensor_pve::alerts::grade(
+        &cfg,
+        &zensight_sensor_pve::alerts::Observation {
+            source: "pve",
+            guests: &[],
+            pools: &[],
+            backups: &[],
+            backup_jobs: &[],
+            cluster: None,
+            nodes: &[],
+            schedules: &[],
+            ceph: Some(&ceph),
+            now_ms: 0,
+        },
+    );
+    let a = firing.iter().find(|a| a.rule == "ceph-health").unwrap();
+    assert_eq!(a.severity, zensight_common::AlertSeverity::Warning);
+    assert!(a.summary.contains("HEALTH_WARN"), "{}", a.summary);
+    assert!(a.summary.contains("OSD_DOWN"), "{}", a.summary);
+
+    // HEALTH_OK is not a fault, even with a PG count that is not round.
+    fixture.fixed.store(true, Ordering::Relaxed);
+    let ok = c.ceph_status().await.unwrap().unwrap();
+    assert!(!ok.is_faulted());
+    let quiet = zensight_sensor_pve::alerts::grade(
+        &cfg,
+        &zensight_sensor_pve::alerts::Observation {
+            source: "pve",
+            guests: &[],
+            pools: &[],
+            backups: &[],
+            backup_jobs: &[],
+            cluster: None,
+            nodes: &[],
+            schedules: &[],
+            ceph: Some(&ok),
+            now_ms: 0,
+        },
+    );
+    assert!(!quiet.iter().any(|a| a.rule == "ceph-health"), "{quiet:?}");
+}
+
+/// The four counters the `/cluster/resources` row already carried.
+///
+/// They were parsed away for two releases: the rows have them and this sensor
+/// dropped them on the floor, so "which guest is saturating the uplink" was a
+/// question the hypervisor could answer and ZenSight could not.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_guest_counters_in_the_row_are_not_dropped() {
+    let fixture = Fixture {
+        fixed: Arc::new(AtomicBool::new(false)),
+    };
+    let addr = spawn_api(fixture).await;
+    let (runtimes, _) = client(addr).resources().await.expect("resources read");
+
+    let vm = runtimes.iter().find(|g| g.vmid == 140).unwrap();
+    assert_eq!(vm.netin, Some(51200));
+    assert_eq!(vm.netout, Some(12800));
+    assert_eq!(vm.diskread, Some(204800));
+    assert_eq!(vm.diskwrite, Some(409600));
+
+    // A row without them stays absent rather than becoming zero — a container
+    // whose row carries no counters has not transferred nothing.
+    let ct = runtimes.iter().find(|g| g.vmid == 201).unwrap();
+    assert_eq!(ct.netin, None, "a field the row omits is missing, not zero");
 }
