@@ -19,7 +19,7 @@ for a worked file; a test loads it, so it cannot rot.
 
 | Field | Type | Notes |
 |---|---|---|
-| `name` | string | The key chunk and the alert label. Two endpoints sharing one is refused: they would silently overwrite each other's series. |
+| `name` | string | Half of the key chunk and of the alert label — the other half is the Redfish chassis id (#1130), because one service fronts several chassis. Two endpoints sharing a name is refused: they would silently overwrite each other's series. |
 | `address` | string | `host` or `host:port`. Not a URL — the scheme is the transport's. |
 | `transport` | enum | `redfish` (default) or `ipmi`. |
 | `username` / `password` | string | The password goes through the `secret` indirection (`${ENV}` / `file:`) and is resolved **before** the runner starts, so a missing secret fails at start rather than as a 401 every minute. |

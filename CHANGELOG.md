@@ -397,6 +397,67 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first. The historian bug above is fixed too, but a harness that can be held
   open forever by the thing it is monitoring is a defect of the harness.
 
+### Fixed
+
+- **bmc: every chassis of an enclosure wrote the endpoint's keys, and only
+  the first was graded** (#1130). **BREAKING for the `bmc` keyspace**: the
+  `{chassis}` chunk is `{endpoint}-{Redfish chassis id}` — `rack-a-1-1`, not
+  `rack-a-1`. Dashboards and recording rules that name a bmc series follow.
+
+  `publish` wrote `Chunk::slug(&endpoint.name)` into every key, and
+  `sweep.chassis.id` was never consulted — though the registry's own header
+  says *"the chassis rides in the key path and in the labels"* and
+  `zensight-common/src/bmc.rs` calls `Chassis.id` *"the chunk in the key"*. On
+  a blade enclosure or a four-node Twin, where one Redfish service fronts
+  several chassis, every one of them published
+  `telemetry/bmc/rack-a-1/psu/0/input_watts` and
+  `state/bmc/chassis/rack-a-1/psu/0`: last writer wins, alternating each
+  sweep. The per-chassis evidence scoping #1110 established was undone the
+  same way — one document, overwritten per chassis.
+
+  Grading was worse than incomplete. `assert_endpoint` took `sweeps.first()`,
+  and the per-rule reconcile is scoped to the label — so a `still` list
+  computed from chassis 1 did not merely miss chassis 2's failed supply, it
+  **resolved** it, every sweep. And because `alert_key` hashes the
+  discriminating labels and `chassis` was the endpoint's name, two bays `0` of
+  one service shared an alert key even where grading reached them.
+
+  Now: each chassis is published, graded and reconciled in its own namespace;
+  `known_present` (the `psu-absent` memory) is per chassis, so one chassis's
+  history no longer speaks for another's empty bay; a chassis that **leaves**
+  the `Chassis` collection has its rules reconciled to empty, while one that
+  is still listed but unsweepable keeps its state, because "we could not read
+  it" is not "it recovered". `reachable` and `bmc-unreachable` stay the
+  endpoint's — a BMC that did not answer returned no chassis list to name them
+  with. Summaries read `rack-a-1 chassis 2: PSU 1 health is Critical`.
+
+  One chunk rather than two levels, so no registry family moved and nothing
+  retires; the `{chassis}` cardinality budgets go 64 → 256.
+
+  It survived two releases because `tests/e2e.rs` listed **one** member in a
+  `Chassis` collection whose other members it was already routing, and every
+  test called `client.sweep("1")` directly instead of going through `Poller` —
+  the same fixture-shaped-to-the-client pattern #1131 called out one file over.
+  The new enclosure test drives the real poller against three chassis and
+  fails on the parent commit.
+
+- **bmc: no thermal telemetry at all on the modern Redfish surface** (#1131).
+  `ThermalMetrics` is a **singleton** — no `Members`, the readings on the body
+  as `TemperatureReadingsCelsius` — and the client read it as a collection. It
+  found nothing, every time, so a sensor whose whole purpose is "a physical
+  fault the host cannot see" published no temperature on any BMC serving
+  `ThermalSubsystem`. The legacy `Chassis/{id}/Thermal` path was correct, so
+  **newer firmware reported less than older firmware** — the inversion that
+  kept it hidden.
+
+  It survived a passing test suite because `tests/e2e.rs`'s fixture served
+  `ThermalMetrics` as a collection, with per-index member routes: a shape
+  Redfish does not have. The fixture had been written to match the client
+  rather than the protocol, so the assertion passed against a fiction. The
+  fixture now serves the real singleton, and with it the old client yields 0
+  readings where 2 are expected — the fix is load-bearing, verified by
+  reverting it.
+
 ### Removed
 
 - **Two orphans** (#1100). `zensight-key-semantic/` held two pre-zenkey RFC
@@ -456,6 +517,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fires `["cluster-not-quorate", "guest-not-running"]` where it must fire only
   the first, and the offline-node fixture grades a guest on the node that did
   not answer.
+
+- **probe: `follow_redirects` was documented, wire-carried and read nowhere**
+  (#1134). reqwest's redirect policy lives on the **client**; this flag lives
+  on the **target**. The poller built one shared client with
+  `Policy::limited(10)`, so every target followed — and a target written
+  `{follow_redirects: false, expect_status: [200]}` against an endpoint that
+  starts answering `302 → /login` followed it, got 200 from the login page and
+  reported **up**. The check written to catch exactly that reported green.
+
+  The client is built with `Policy::none()` now and `check::http` walks the
+  chain itself, which also fixes the two things that could not be fixed while
+  the policy lived on the client:
+
+  - `redirects` is the **chain**, in order, which is what the README has
+    always promised. It was "the final URL if it differs from the configured
+    string", so `https://example.com` reported a redirect to
+    `https://example.com/` every poll — a URL parser normalising, read as a
+    server redirecting.
+  - **Every hop** is host-checked, not only the last. A chain that leaves the
+    configured host and comes back has still left it.
+
+  Three siblings the issue bundled. The off-host comparison is
+  case-insensitive, so `Example.com` no longer reports a redirect against its
+  own answer. `Target::host()`'s `Http` arm trims IPv6 brackets and splits the
+  port safely — `rsplit_once(':')` cut `[::1]` at a colon *inside* the
+  address, so `https://[::1]:8443/` was a permanent
+  `probe-redirect-off-host`. And DNS `expect_addrs` is **any**, as both the
+  README and `docs/reference.md` say; it required *all*, which made a
+  round-robin name with two A records a permanent critical, since a resolver
+  hands back one.
+
+  Five of the six new tests fail on the parent commit, and the sixth is the
+  reason `http_client` is now a shared `pub fn`: the bug was one line in that
+  builder, so a test that constructed its own client would have proved nothing
+  about the sensor.
 
 - **The eBPF workflow denies warnings, pins its compiler, and runs on a tag**
   (#1094). Three ways the one job that guards an opt-in feature was weaker than
