@@ -477,6 +477,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **exporter-prometheus: a failed remote-write push lost its samples for
+  good** (#1143). `build_write_request_since` read the per-series watermark
+  and wrote it back **in the same closure**, while *building* the request —
+  before a byte had been sent. A push that then failed (connection refused, a
+  503 from an overloaded Mimir, an auth blip) had already marked every series
+  in it delivered, so the next tick skipped each one whose point timestamp had
+  not moved since. For a series slower than the push interval — sysinfo at
+  60 s against the 30 s default — that datapoint was gone permanently, while
+  `run`'s own doc promised "push failures are logged and retried on the next
+  tick". The tick retried. The samples did not.
+
+  Building is side-effect-free now: it returns a `PendingPush` carrying the
+  watermarks it *would* set, and `push_once` commits them after a 2xx and at
+  no other moment. Pruning the map to the collector's live series stays at
+  build time, because that is a fact about the collector rather than about
+  this push.
+
+  And a **bounded retry backlog**, because the watermark fix alone only
+  replays a series whose value has not moved: the collector keeps one value
+  per series, so a datapoint superseded during an outage exists nowhere else.
+  Up to `MAX_BACKLOG_SERIES` (20 000 — a few MB, about an hour of 30-second
+  pushes for a 1 000-series fleet) are held, oldest dropped first, and sent
+  ahead of the fresh ones so each series' samples stay in ascending timestamp
+  order. The merged request is deduplicated on `(labels, timestamp)`: when the
+  value has not moved, the collector's re-offer and the backlog's copy are the
+  same sample, and sending both is the duplicate #759 exists to avoid.
+
+  Both acceptance tests fail on the parent commit. A sink that 503s once and
+  then accepts receives **nothing at all** on the second push ("exactly one
+  delivery: left 0, right 1"), and a value that moved during the outage
+  arrives as `[0.9]` where `[0.5, 0.9]` is owed.
+
 - **netflow: the rollup map was unbounded** (#1139). NetFlow is UDP with no
   handshake and the exporter name defaults to the datagram's source address,
   so `Rollups::per_exporter` grew by one **permanent** aggregate per address
