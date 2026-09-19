@@ -104,6 +104,35 @@ Extra `headers` (e.g. `Authorization`, `X-Scope-OrgID`) are attached to each pus
   histogram-shaped value type and a real trace id, neither of which the bus
   carries).
 
+### A push is delivered or it is retried (#1143)
+
+Two things make "retried on the next tick" true rather than merely written
+down.
+
+**The per-series watermark moves on a 2xx and at no other moment.** It used to
+move while the request was being *built*, so a push that then failed —
+connection refused, a 503 from an overloaded Mimir, an auth blip — had already
+marked every series in it delivered. The next tick skipped each one whose point
+timestamp had not moved since, and for a series slower than the push interval
+(sysinfo at 60 s against the 30 s default) that datapoint was gone for good.
+Building a request is now side-effect-free: it *returns* the watermarks it
+would set, and `push_once` commits them after the response.
+
+**A bounded backlog holds what a failed push was carrying.** The watermark fix
+alone replays a series whose value has not moved, because the next snapshot
+still offers the same point. It cannot replay one that *has* moved: the
+collector keeps only the latest value per series, so the older datapoint exists
+nowhere else. Up to `MAX_BACKLOG_SERIES` (20 000, a few MB — about an hour of
+30-second pushes for a 1 000-series fleet) are held, oldest dropped first, and
+sent ahead of the fresh ones so each series' samples stay in ascending
+timestamp order. A backlog that grew without limit would turn a receiver outage
+into an exporter OOM, which is the failure mode this crate exists to notice in
+*other* processes.
+
+The merged request is deduplicated on `(labels, timestamp)`: when the value has
+not moved, the collector's re-offer and the backlog's copy are the same sample,
+and sending both is the duplicate that #759 exists to avoid.
+
 ## Alert export
 
 With `export_alerts` on (default), each **firing** alert from
