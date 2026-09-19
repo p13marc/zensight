@@ -18,6 +18,9 @@ against documents.
 | `fan-failed` | a present fan's `Health` is Warning or Critical | critical |
 | `thermal-critical` | the sensor's `Health` is faulted **or** its reading is at/above the BMC's own `UpperThresholdCritical` | critical (warning for a Warning health under threshold) |
 | `chassis-health` | the chassis rollup is faulted | the BMC's own |
+| `drive-failed` | a **present** drive's `Health` is faulted, **or** its `FailurePredicted` bit is set (#1140) | the BMC's own; a prediction on an otherwise-OK drive is a warning, because the drive is still serving |
+| `memory-failed` | a **present** DIMM's `Health` is faulted (#1140) | the BMC's own |
+| `redundancy-lost` | a `PowerSubsystem`/`ThermalSubsystem` **group** reports degraded or failed (#1140) | warning / critical |
 
 ## What deliberately does not fire
 
@@ -43,11 +46,39 @@ already paid for.)
 
 ## Why `chassis-health` exists
 
-A drive backplane, a riser, a battery, a CMOS fault — the BMC has verdicts on
-things this sensor does not enumerate. Without the rollup rule, a BMC saying
-"this machine is Critical" for a reason we do not model would be silently
-dropped, which is exactly the blind spot the sensor exists to close. Its
-message points at the BMC's own event log, because that is where the detail is.
+A riser, a battery, a CMOS fault — the BMC has verdicts on things this sensor
+does not enumerate. Without the rollup rule, a BMC saying "this machine is
+Critical" for a reason we do not model would be silently dropped, which is
+exactly the blind spot the sensor exists to close. Its message points at the
+BMC's own event log, because that is where the detail is.
+
+**Two of the things it used to gesture at are now named** (#1140). A drive or a
+DIMM the BMC had already marked rolled up into `Chassis.Status.Health` and
+nowhere else, so the operator was told to go and read an event log about a fact
+this sensor could have put in the alert. `drive-failed` and `memory-failed`
+read `Systems/{id}/Storage/{ctrl}/Drives` and `Systems/{id}/Memory` — scoped to
+the systems **this chassis links**, exactly as the identity claim is and for
+the same reason (#1110): one Redfish service fronts several machines on a blade
+enclosure, and walking `/redfish/v1/Systems` wholesale would put every node's
+DIMMs on every chassis. `chassis-health` stays, because the set of things a BMC
+has an opinion about is not ours to close.
+
+## Why `redundancy-lost` is not `psu-redundancy-lost`
+
+`psu-redundancy-lost` reads the `Redundancy` array on a **member** — a supply's
+copy of its own group's status. `redundancy-lost` reads the group, off
+`PowerSubsystem.Redundancy` and `ThermalSubsystem.Redundancy` (#1140).
+
+They are not the same reading, and the difference is the failure. A supply that
+is itself healthy commonly carries no `Redundancy` array at all — the fixture
+in `tests/e2e.rs` is a real shape, and its surviving supply says nothing about
+the group. So on a chassis whose failed supply has been *pulled*, the
+per-member rule has no input left and resolves, announcing that redundancy is
+fine at the moment there is none. The group knows: `MinNumNeeded: 2` with one
+member in the set.
+
+Both rules stay. The member's copy is the earlier signal on firmware that fills
+it in, and the group is the one that survives the member going away.
 
 ## Reconciliation
 

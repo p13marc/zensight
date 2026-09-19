@@ -34,7 +34,7 @@
 # how that decision is being taken for PDU outlets.
 
 [registry]
-version = "1.1"
+version = "1.2"
 app = "zensight"
 convention = 1
 
@@ -120,6 +120,15 @@ since = "1.0"
 description = "the BMC's own upper-warning threshold"
 
 [[subject]]
+path = "{chassis}/drive/{drive}/life_left_percent"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "%"
+cardinality = 1024
+since = "1.2"
+description = "an SSD's remaining endurance as the drive itself reports it (#1140, `PredictedMediaLifeLeftPercent`); absent on every spinning disk and on firmware that does not pass it through, which is not zero endurance"
+
+[[subject]]
 path = "{chassis}/reachable"
 class = "telemetry"
 type = "TelemetryPoint"
@@ -187,6 +196,33 @@ type = "ErrorReport"
 ttl_s = 300
 since = "1.0"
 description = "rolling error window (framework)"
+
+[[subject]]
+path = "chassis/{chassis}/drive/{drive}"
+class = "state"
+type = "BmcDrive"
+cardinality = 1024
+ttl_s = 900
+since = "1.2"
+description = "one physical drive (#1140): presence, the BMC's health and state verdicts, model/serial/media type, capacity, SSD endurance left and the SMART failure-predicted bit — the fault `chassis-health` used to gesture at without naming"
+
+[[subject]]
+path = "chassis/{chassis}/memory/{dimm}"
+class = "state"
+type = "BmcMemoryModule"
+cardinality = 1024
+ttl_s = 900
+since = "1.2"
+description = "one memory module (#1140): presence, the BMC's health and state verdicts, capacity, device type, speed — a DIMM marked Warning for correctable-error rate is visible as itself rather than as a chassis rollup"
+
+[[subject]]
+path = "chassis/{chassis}/redundancy/{group}"
+class = "state"
+type = "BmcRedundancyGroup"
+cardinality = 64
+ttl_s = 900
+since = "1.2"
+description = "one power or thermal redundancy GROUP as the chassis reports it (#1140): its own Status, MinNumNeeded and member count. Read from `PowerSubsystem.Redundancy`/`ThermalSubsystem.Redundancy` rather than inferred from a member's copy — a group below MinNumNeeded while every surviving member still reports Full is the case the per-member read could not see"
 
 [[subject]]
 path = "sensor"

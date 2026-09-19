@@ -264,6 +264,44 @@ impl Poller {
             }
         }
 
+        // Storage and memory (#1140). Until now a drive or a DIMM the BMC had
+        // already marked Warning rolled up into `Chassis.Status.Health` and
+        // nowhere else, so `chassis-health` fired saying "the BMC reports a
+        // fault" and named nothing an operator could act on.
+        for drive in &sweep.drives {
+            let id = zenkey::Chunk::slug(&drive.id).as_str().to_string();
+            if let Some(pct) = drive.life_left_percent {
+                self.publish_point(
+                    &chassis,
+                    &format!("{chassis}/drive/{id}/life_left_percent"),
+                    pct,
+                    &[("drive", drive.id.clone())],
+                )
+                .await;
+            }
+            if let Some(key) = self.state_key(&["chassis", &chassis, "drive", &id]) {
+                self.states.publish_serializable(&key, drive).await.ok();
+            }
+        }
+
+        for dimm in &sweep.memory {
+            let id = zenkey::Chunk::slug(&dimm.id).as_str().to_string();
+            if let Some(key) = self.state_key(&["chassis", &chassis, "memory", &id]) {
+                self.states.publish_serializable(&key, dimm).await.ok();
+            }
+        }
+
+        // The redundancy GROUP's own verdict (#1140), beside the per-member
+        // copy the supplies and fans already carry.
+        for group in &sweep.redundancy {
+            let id = zenkey::Chunk::slug(format!("{}-{}", group.subsystem, group.id))
+                .as_str()
+                .to_string();
+            if let Some(key) = self.state_key(&["chassis", &chassis, "redundancy", &id]) {
+                self.states.publish_serializable(&key, group).await.ok();
+            }
+        }
+
         if let Some(key) = self.state_key(&["chassis", &chassis]) {
             self.states
                 .publish_serializable(&key, &sweep.chassis)
@@ -383,6 +421,9 @@ impl Poller {
             supplies: &[],
             fans: &[],
             thermal: &[],
+            drives: &[],
+            memory: &[],
+            redundancy: &[],
             known_present: &[],
             consecutive_failures: failures,
         };
@@ -426,6 +467,9 @@ impl Poller {
                 supplies: &sweep.supplies,
                 fans: &sweep.fans,
                 thermal: &sweep.thermal,
+                drives: &sweep.drives,
+                memory: &sweep.memory,
+                redundancy: &sweep.redundancy,
                 known_present: &known,
                 consecutive_failures: failures,
             };

@@ -22,6 +22,7 @@ fn every_registered_family_has_an_emitter() {
         "1/thermal/cpu1/celsius",
         "1/thermal/cpu1/upper_critical_c",
         "1/thermal/cpu1/upper_warning_c",
+        "1/drive/0/life_left_percent",
         "rack-a-1/reachable",
     ]
     .iter()
@@ -88,6 +89,20 @@ fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
 
 /// …and neither does the code. The registry is what `introspect` hands the
 /// fleet, but a `Chassis.Reset` could be issued without ever appearing there.
+///
+/// **One exception, added with its fence** (#1140): authenticating costs a
+/// `POST /redfish/v1/SessionService/Sessions` and a `DELETE` of the session it
+/// returns. That is a write to the BMC's *session table* and to nothing else —
+/// no hardware state, no power, no configuration — and it exists precisely
+/// because the alternative was worse: basic auth on every request made several
+/// firmwares mint a session per request and never reap one, filling a table
+/// that on some iDRAC builds holds eight entries for everything, the
+/// operator's browser included.
+///
+/// So the ban stays absolute on everything that touches hardware, and the two
+/// verbs are allowed only against the session service. The assertions below
+/// check the path as well as the verb, so a `.post(` aimed anywhere else still
+/// fails the build.
 #[test]
 fn the_sensor_issues_no_redfish_action() {
     let src = concat!(
@@ -95,13 +110,7 @@ fn the_sensor_issues_no_redfish_action() {
         include_str!("../src/poller.rs"),
         include_str!("../src/main.rs"),
     );
-    for forbidden in [
-        "Actions/",
-        "Chassis.Reset",
-        "ComputerSystem.Reset",
-        ".post(",
-        ".patch(",
-    ] {
+    for forbidden in ["Actions/", "Chassis.Reset", "ComputerSystem.Reset", ".put("] {
         assert!(
             !src.contains(forbidden),
             "the sensor source contains {forbidden:?} — this sensor issues GETs and nothing \
@@ -109,4 +118,31 @@ fn the_sensor_issues_no_redfish_action() {
              would take)"
         );
     }
+    assert!(
+        !src.contains(".patch("),
+        "PATCH changes a Redfish resource. There is no resource this sensor may change"
+    );
+
+    // Exactly one POST, and it is the session mint.
+    assert_eq!(
+        src.matches(".post(").count(),
+        1,
+        "the only POST this sensor may issue is the session mint (#1140)"
+    );
+    let post_at = src.find(".post(").expect("checked above");
+    assert!(
+        src[post_at..post_at + 200].contains("SessionService/Sessions"),
+        "the one POST must target the session service and nothing else"
+    );
+
+    // …and exactly one DELETE, which gives that session back.
+    assert_eq!(
+        src.matches(".delete(").count(),
+        1,
+        "the only DELETE this sensor may issue is the session release (#1140)"
+    );
+    assert!(
+        src.contains("session.location"),
+        "and it must delete the session's OWN Location, never a path it composed"
+    );
 }

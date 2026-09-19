@@ -320,6 +320,14 @@ kind = "json-schema"
 kind = "json-schema"
 [types.BmcThermalSensor]
 kind = "json-schema"
+# Storage, memory and the redundancy groups (#1140) — the faults
+# `chassis-health` used to gesture at without naming.
+[types.BmcDrive]
+kind = "json-schema"
+[types.BmcMemoryModule]
+kind = "json-schema"
+[types.BmcRedundancyGroup]
+kind = "json-schema"
 
 # probe's state document (#820).
 [types.ProbeResult]

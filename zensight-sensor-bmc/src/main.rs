@@ -67,6 +67,10 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Cloned before the map is moved into the poller: `close()` needs the same
+    // clients, after the runner has stopped using them.
+    let shutdown_clients = clients.clone();
+
     if clients.is_empty() {
         // A no-op, not an error: this is what a config shipped to a fleet
         // where only some hosts manage a BMC looks like.
@@ -168,7 +172,7 @@ async fn main() -> Result<()> {
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    runner
+    let outcome = runner
         .run_with_metadata(Some(serde_json::json!({
             "endpoints": bmc.endpoints.iter().filter(|e| e.enabled).map(|e| &e.name).collect::<Vec<_>>(),
             "poll_interval_secs": bmc.interval_secs,
@@ -176,5 +180,20 @@ async fn main() -> Result<()> {
             "action_surface": false,
         })))
         .await
-        .map_err(|e| anyhow::anyhow!("{e}"))
+        .map_err(|e| anyhow::anyhow!("{e}"));
+
+    // Give every Redfish session back before exiting (#1140). A session this
+    // process forgets is one the firmware keeps until *its* timeout, and the
+    // session table is small — on some iDRAC builds eight entries for
+    // everything, the operator's browser included. Restarting this sensor
+    // eight times must not lock a human out of their own BMC.
+    //
+    // After the runner returns, so a shutdown does not race a sweep that is
+    // still using the token, and best-effort: a BMC that will not take its
+    // session back must not turn a clean exit into a failed one.
+    for client in shutdown_clients.values() {
+        client.close().await;
+    }
+
+    outcome
 }

@@ -204,6 +204,115 @@ impl ThermalSensor {
     }
 }
 
+/// One physical drive behind `Systems/{id}/Storage/{ctrl}/Drives` (#1140).
+///
+/// The failure this makes visible: a drive the BMC has already marked
+/// `Warning` — the SMART predictive-failure one — rolls up into
+/// `Chassis.Status.Health` and nothing else. So `chassis-health` fired, said
+/// "the BMC reports a fault", and named nothing an operator could act on.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Drive {
+    /// The BMC's own id, and the chunk in the key.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The storage controller this drive hangs off, so two bays numbered `0`
+    /// on two controllers are told apart in the document as well as the key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller: Option<String>,
+    /// Whether the bay holds a drive at all. **False means every reading below
+    /// is absent**, not zero.
+    pub present: bool,
+    pub health: Health,
+    pub state: State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    /// `SSD` / `HDD`, as the BMC spells `MediaType`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    /// `SAS` / `SATA` / `NVMe`, as the BMC spells `Protocol`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_bytes: Option<u64>,
+    /// `PredictedMediaLifeLeftPercent` — an SSD's remaining endurance as the
+    /// drive itself reports it. Absent on every spinning disk and on firmware
+    /// that does not pass it through, which is not zero endurance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub life_left_percent: Option<f64>,
+    /// `FailurePredicted`, the SMART bit. `None` where the BMC does not say —
+    /// which is a different fact from "no failure predicted".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_predicted: Option<bool>,
+}
+
+/// One memory module behind `Systems/{id}/Memory` (#1140).
+///
+/// A DIMM the BMC has marked `Warning` for correctable-error rate, or
+/// `Critical` after an uncorrectable one, is the other half of what
+/// `chassis-health` used to gesture at without naming.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryModule {
+    /// The BMC's own id (`DIMM_A1`, `Proc1DIMM1`, …), and the chunk in the key.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Whether the slot is populated. **False means every reading below is
+    /// absent**, not zero — an empty slot is not a 0 GiB DIMM.
+    pub present: bool,
+    pub health: Health,
+    pub state: State,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_mib: Option<u64>,
+    /// `DDR4` / `DDR5`, as the BMC spells `MemoryDeviceType`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manufacturer: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial: Option<String>,
+    /// `OperatingSpeedMhz`, where the BMC reports one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speed_mhz: Option<u64>,
+}
+
+/// One redundancy group as the chassis reports it, rather than as a field
+/// repeated on each member (#1140).
+///
+/// `PowerSubsystem` and `ThermalSubsystem` both carry a `Redundancy` array
+/// whose entries name a *set* — "the two supplies", "the six fans" — with a
+/// `MinNumNeeded`, a `MaxNumSupported` and one `Status` for the group. This
+/// sensor only ever read the per-member copy, so "redundancy lost" was
+/// inferred from a member's opinion of its own group rather than read from the
+/// group. A group that has dropped below `MinNumNeeded` while every remaining
+/// member still reports `Full` is exactly the case that hid.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct RedundancyGroup {
+    /// The group's id, and the chunk in the key.
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `power` or `thermal` — which subsystem the group belongs to. Two
+    /// subsystems can number their groups from zero.
+    pub subsystem: String,
+    pub health: Health,
+    pub state: State,
+    /// The group's own verdict, when it gives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redundancy: Option<Redundancy>,
+    /// How many members must be healthy for the group to be redundant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_needed: Option<u32>,
+    /// How many members the group can hold.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_supported: Option<u32>,
+    /// How many members the BMC listed in the group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub members: Option<u32>,
+}
+
 /// The chassis rollup: what the BMC says about the machine as a whole.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct Chassis {

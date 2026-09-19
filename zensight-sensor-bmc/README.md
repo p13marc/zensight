@@ -74,12 +74,24 @@ a chassis this sensor has never seen.
   a stale `0.0` in the document, which some does. A `0 W` reads as a supply
   drawing nothing, which is a different and wrong statement.
 - **Every verdict is the BMC's.** `psu-failed`, `fan-failed`,
-  `thermal-critical`, `psu-redundancy-lost` and `chassis-health` all read
-  Redfish `Health` / `State` / `Redundancy`. The BMC knows the rating of the
+  `thermal-critical`, `psu-redundancy-lost`, `drive-failed`, `memory-failed`,
+  `redundancy-lost` and `chassis-health` all read Redfish `Health` / `State` /
+  `Redundancy`. The BMC knows the rating of the
   hardware it is soldered to; we do not. Its own thresholds are published
   beside each reading so a consumer can make the comparison the vendor
   intended. Numeric thresholds of your own are `thresholds` in the config, or
   `@rpc/bmc/thresholds/set` on a running sensor (#931).
+- **One Redfish session per process, not one per request** (#1140). Several
+  firmwares mint a session for every basic-auth request and never reap it, so a
+  sensor that sent basic auth on each of a sweep's dozens of requests filled the
+  BMC's session table — on some iDRAC builds eight entries for everything, the
+  operator's browser included. This client mints one session, reuses it across
+  sweeps, re-mints once on a 401, gives it back on shutdown, and falls back to
+  basic auth on firmware that serves no session service. A read-only monitor
+  taking the management interface down is the one failure it must not have.
+- **Collections are read to the end** (#1140). Redfish paginates with
+  `Members@odata.nextLink`; reading one page lost the tail silently, as a
+  shorter list, on any chassis with more members than the firmware's page size.
 - **`Unknown` is not a fault.** A BMC that answers without a health field has
   told us nothing, and a sensor that reads nothing as "broken" pages on
   missing data.

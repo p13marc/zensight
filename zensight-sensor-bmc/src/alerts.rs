@@ -12,7 +12,10 @@
 
 use std::collections::HashMap;
 
-use zensight_common::bmc::{Chassis, Fan, PowerSupply, Redundancy, State, ThermalSensor};
+use zensight_common::bmc::{
+    Chassis, Drive, Fan, MemoryModule, PowerSupply, Redundancy, RedundancyGroup, State,
+    ThermalSensor,
+};
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
 
 use crate::config::AlertsConfig;
@@ -24,6 +27,14 @@ pub const RULE_PSU_REDUNDANCY: &str = "psu-redundancy-lost";
 pub const RULE_FAN_FAILED: &str = "fan-failed";
 pub const RULE_THERMAL_CRITICAL: &str = "thermal-critical";
 pub const RULE_CHASSIS_HEALTH: &str = "chassis-health";
+/// A physical drive the BMC has marked faulted, or whose SMART bit predicts
+/// failure (#1140).
+pub const RULE_DRIVE_FAILED: &str = "drive-failed";
+/// A memory module the BMC has marked faulted (#1140).
+pub const RULE_MEMORY_FAILED: &str = "memory-failed";
+/// A power or thermal redundancy group that is no longer redundant, read from
+/// the **group** rather than from a member's copy (#1140).
+pub const RULE_REDUNDANCY_LOST: &str = "redundancy-lost";
 
 /// Every rule this build can raise.
 ///
@@ -40,6 +51,9 @@ pub const ALL_RULES: &[&str] = &[
     RULE_FAN_FAILED,
     RULE_THERMAL_CRITICAL,
     RULE_CHASSIS_HEALTH,
+    RULE_DRIVE_FAILED,
+    RULE_MEMORY_FAILED,
+    RULE_REDUNDANCY_LOST,
 ];
 
 /// One chassis's sweep, as the rules see it.
@@ -58,6 +72,13 @@ pub struct Observation<'a> {
     pub supplies: &'a [PowerSupply],
     pub fans: &'a [Fan],
     pub thermal: &'a [ThermalSensor],
+    /// Physical drives behind the systems this chassis links (#1140).
+    pub drives: &'a [Drive],
+    /// Memory modules behind the systems this chassis links (#1140).
+    pub memory: &'a [MemoryModule],
+    /// Power and thermal redundancy groups as the chassis reports them
+    /// (#1140), not as a member reports its own group.
+    pub redundancy: &'a [RedundancyGroup],
     /// Bays this endpoint has reported present at some point in this process's
     /// life. A bay that was never populated is not a bay someone emptied.
     pub known_present: &'a [String],
@@ -309,6 +330,119 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
         ));
     }
 
+    // --- drive-failed -------------------------------------------------------
+    //
+    // The fault `chassis-health` above used to gesture at. A drive the BMC has
+    // already marked Warning — the SMART predictive-failure one — rolled up
+    // into `Chassis.Status.Health` and nowhere else, so the operator was told
+    // "check its own event log" about a fact this sensor could have named.
+    for drive in obs.drives.iter().filter(|d| d.present) {
+        let name = drive
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("drive {}", drive.id));
+        let predicted = drive.failure_predicted == Some(true);
+        if !drive.health.is_faulted() && !predicted {
+            continue;
+        }
+        let labels = [("drive", drive.id.clone()), ("drive_name", name.clone())];
+        // The BMC's own severity, never a threshold this sensor invented —
+        // except that a predicted failure on an otherwise-OK drive is a
+        // warning, because the drive is still serving.
+        let severity = if drive.health == zensight_common::bmc::Health::Critical {
+            AlertSeverity::Critical
+        } else {
+            AlertSeverity::Warning
+        };
+        let why = if drive.health.is_faulted() && predicted {
+            format!("{} and predicts its own failure", drive.health.as_str())
+        } else if predicted {
+            "OK, but predicts its own failure (SMART)".to_string()
+        } else {
+            drive.health.as_str().to_string()
+        };
+        out.push(alert(
+            obs,
+            RULE_DRIVE_FAILED,
+            severity,
+            format!(
+                "{}: {name}{} is {why}",
+                obs.site(),
+                drive
+                    .controller
+                    .as_ref()
+                    .map(|c| format!(" on {c}"))
+                    .unwrap_or_default(),
+            ),
+            &labels,
+        ));
+    }
+
+    // --- memory-failed ------------------------------------------------------
+    for dimm in obs.memory.iter().filter(|m| m.present) {
+        if !dimm.health.is_faulted() {
+            continue;
+        }
+        let name = dimm
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("DIMM {}", dimm.id));
+        out.push(alert(
+            obs,
+            RULE_MEMORY_FAILED,
+            if dimm.health == zensight_common::bmc::Health::Critical {
+                AlertSeverity::Critical
+            } else {
+                AlertSeverity::Warning
+            },
+            format!(
+                "{}: {name} is {} — a DIMM the BMC has marked, not a rate this sensor computed",
+                obs.site(),
+                dimm.health.as_str()
+            ),
+            &[("dimm", dimm.id.clone()), ("dimm_name", name.clone())],
+        ));
+    }
+
+    // --- redundancy-lost ----------------------------------------------------
+    //
+    // The GROUP's verdict. `psu-redundancy-lost` above reads a *member's* copy
+    // of its group's status, which a supply that is itself fine reports as
+    // Full — so a group below `MinNumNeeded` with every survivor healthy was
+    // invisible. This reads the group.
+    for group in obs.redundancy {
+        let lost = matches!(
+            group.redundancy,
+            Some(zensight_common::bmc::Redundancy::Degraded)
+                | Some(zensight_common::bmc::Redundancy::Failed)
+        );
+        if !lost {
+            continue;
+        }
+        let name = group
+            .name
+            .clone()
+            .unwrap_or_else(|| format!("{} group {}", group.subsystem, group.id));
+        let counts = match (group.members, group.min_needed) {
+            (Some(have), Some(need)) => format!(" ({have} member(s), {need} needed)"),
+            _ => String::new(),
+        };
+        out.push(alert(
+            obs,
+            RULE_REDUNDANCY_LOST,
+            if group.redundancy == Some(zensight_common::bmc::Redundancy::Failed) {
+                AlertSeverity::Critical
+            } else {
+                AlertSeverity::Warning
+            },
+            format!("{}: {name} is no longer redundant{counts}", obs.site()),
+            &[
+                ("group", group.id.clone()),
+                ("subsystem", group.subsystem.clone()),
+            ],
+        ));
+    }
+
     out
 }
 
@@ -370,6 +504,9 @@ mod tests {
             supplies,
             fans,
             thermal,
+            drives: &[],
+            memory: &[],
+            redundancy: &[],
             known_present: known,
             consecutive_failures: failures,
         }
@@ -705,12 +842,55 @@ mod tests {
             upper_critical_c: Some(90.0),
             upper_warning_c: None,
         }];
+        // The #1140 surfaces, each in the state that makes its rule fire.
+        let drives = [Drive {
+            id: "0".into(),
+            name: None,
+            controller: Some("ctrl0".into()),
+            present: true,
+            health: Health::Critical,
+            state: State::Enabled,
+            model: None,
+            serial: None,
+            media_type: None,
+            protocol: None,
+            capacity_bytes: None,
+            life_left_percent: None,
+            failure_predicted: Some(true),
+        }];
+        let memory = [MemoryModule {
+            id: "DIMM_A1".into(),
+            name: None,
+            present: true,
+            health: Health::Critical,
+            state: State::Enabled,
+            capacity_mib: Some(32768),
+            device_type: None,
+            manufacturer: None,
+            serial: None,
+            speed_mhz: None,
+        }];
+        let groups = [RedundancyGroup {
+            id: "0".into(),
+            name: None,
+            subsystem: "power".into(),
+            health: Health::Critical,
+            state: State::Enabled,
+            redundancy: Some(Redundancy::Failed),
+            min_needed: Some(2),
+            max_supported: Some(2),
+            members: Some(1),
+        }];
         let known = ["1".to_string()];
         let cfg = AlertsConfig {
             psu_absent: true,
             ..AlertsConfig::default()
         };
-        let out = grade(&cfg, &obs(Some(&c), &supplies, &fans, &thermal, &known, 0));
+        let mut o = obs(Some(&c), &supplies, &fans, &thermal, &known, 0);
+        o.drives = &drives;
+        o.memory = &memory;
+        o.redundancy = &groups;
+        let out = grade(&cfg, &o);
 
         let mut fired: Vec<&str> = out.iter().map(|a| a.rule.as_str()).collect();
         fired.sort_unstable();
