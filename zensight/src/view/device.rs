@@ -110,7 +110,8 @@ pub struct DeviceDetailState {
     /// Text-input buffer for the custom relative window in minutes (#36).
     pub chart_custom_input: String,
     /// Text-input buffers for the absolute `from`/`to` range picker (#36),
-    /// `YYYY-MM-DD HH:MM` (UTC). Applied together via [`Self::apply_chart_range`].
+    /// `YYYY-MM-DD HH:MM`, local (#1123). Applied together via
+    /// [`Self::apply_chart_range`].
     pub chart_from_input: String,
     pub chart_to_input: String,
     /// Favorited metric names for this device (#27). Projected from the app-level
@@ -203,7 +204,7 @@ impl DeviceDetailState {
     }
 
     /// Apply the absolute `from`/`to` range inputs (#36). Parses both as
-    /// `YYYY-MM-DD HH:MM` UTC; on success pins the chart's visible window and
+    /// `YYYY-MM-DD HH:MM` local (#1123); on success pins the chart's visible window and
     /// returns `Some((from_ms, to_ms))` so the caller can range-query the store.
     /// Returns `None` (and pins nothing) when either field is empty/unparseable
     /// or `from >= to`.
@@ -1248,7 +1249,10 @@ fn render_chart_section<'a>(
     .align_y(Alignment::Center);
 
     // Absolute from/to range picker (#36): load an exact past window from the
-    // store, e.g. "2026-06-26 14:05" → "2026-06-26 14:12" (UTC).
+    // store, e.g. "2026-06-26 14:05" → "2026-06-26 14:12", in the viewer's
+    // LOCAL zone since #1123 — everything an operator reads a timestamp from
+    // is local, and typing a UTC instant into one field on a page of local
+    // ones is a conversion nobody should do in their head.
     let range_active = state.chart.absolute_range().is_some();
     let from_input = text_input("YYYY-MM-DD HH:MM", &state.chart_from_input)
         .on_input(Message::SetChartRangeFrom)
@@ -1268,7 +1272,7 @@ fn render_chart_section<'a>(
             iced::widget::button::secondary
         });
     let mut range_row = row![
-        text("Range (UTC):").size(11),
+        text("Range (local):").size(11),
         from_input,
         text("→").size(11),
         to_input,

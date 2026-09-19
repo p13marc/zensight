@@ -1635,15 +1635,35 @@ fn current_timestamp() -> i64 {
         .unwrap_or(0)
 }
 
-/// Parse a wall-clock timestamp for the absolute range picker (#36), interpreted
-/// as **UTC**. Accepts `YYYY-MM-DD HH:MM` and `YYYY-MM-DD HH:MM:SS`. Returns the
-/// epoch-millisecond value, or `None` if the input doesn't parse. Pure + testable.
+/// Parse a wall-clock timestamp for the absolute range picker (#36),
+/// interpreted in the viewer's **local** zone (#1123).
+///
+/// Accepts `YYYY-MM-DD HH:MM` and `YYYY-MM-DD HH:MM:SS`. Returns the
+/// epoch-millisecond value, or `None` if the input doesn't parse.
+///
+/// It was UTC, and the label beside it said so — which was honest and still
+/// wrong, because everything an operator reads a timestamp *from* is local:
+/// the unit that restarted, their own shell's `date`, the ticket they are
+/// filing. Typing a UTC instant into one field on a page of local ones is a
+/// conversion nobody should be doing in their head.
+///
+/// An ambiguous local time — the hour a DST fall-back repeats — resolves to
+/// the **earlier** of the two. A range picker asking which 02:30 you meant is a
+/// worse answer than picking one and being off by an hour once a year.
 pub fn parse_datetime_to_ms(input: &str) -> Option<i64> {
+    use chrono::TimeZone;
     let s = input.trim();
     let naive = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M"))
         .ok()?;
-    Some(naive.and_utc().timestamp_millis())
+    match chrono::Local.from_local_datetime(&naive) {
+        chrono::offset::LocalResult::Single(dt) => Some(dt.timestamp_millis()),
+        // DST fall-back: two instants wear this wall clock. Take the earlier.
+        chrono::offset::LocalResult::Ambiguous(earlier, _) => Some(earlier.timestamp_millis()),
+        // DST spring-forward: this wall clock never happened. There is no
+        // instant to return, and inventing one would be a silent hour's error.
+        chrono::offset::LocalResult::None => None,
+    }
 }
 
 // ───────────────────────── Chart primitives (#245) ─────────────────────────
@@ -1980,6 +2000,51 @@ impl<Message> canvas::Program<Message, Theme, Renderer> for StackedAreaWidget {
 
 #[cfg(test)]
 mod tests {
+
+    /// The range picker reads **local** time (#1123).
+    ///
+    /// It was UTC, and its label said so — honest, and still wrong: everything
+    /// an operator reads a timestamp *from* is local (the unit that restarted,
+    /// their own shell's `date`, the ticket they are filing), so typing a UTC
+    /// instant into one field on a page of local ones is a conversion nobody
+    /// should be doing in their head.
+    ///
+    /// Asserted as a round trip rather than against a literal, so the test
+    /// means the same thing in every zone.
+    #[test]
+    fn the_range_picker_reads_local_time() {
+        use chrono::TimeZone;
+        let ms = parse_datetime_to_ms("2026-06-26 14:05").expect("parses");
+
+        // Rendered back through the shared formatter, it is the same wall
+        // clock the operator typed.
+        let shown = crate::view::formatting::format_wall_clock(ms);
+        assert!(
+            shown.starts_with("2026-06-26 14:05:00"),
+            "typed 14:05, reads {shown}"
+        );
+
+        // And it is *not* the UTC reading unless this machine is on UTC.
+        let utc = chrono::Utc
+            .with_ymd_and_hms(2026, 6, 26, 14, 5, 0)
+            .unwrap()
+            .timestamp_millis();
+        let local_offset = chrono::Local
+            .timestamp_opt(ms / 1000, 0)
+            .unwrap()
+            .offset()
+            .local_minus_utc() as i64;
+        assert_eq!(
+            ms,
+            utc - local_offset * 1000,
+            "the local reading differs from the UTC one by exactly the offset"
+        );
+
+        // Seconds are optional, and both spellings agree.
+        assert_eq!(parse_datetime_to_ms("2026-06-26 14:05:00"), Some(ms));
+        assert_eq!(parse_datetime_to_ms("not a time"), None);
+    }
+
     use super::*;
     use iced_test::simulator;
 
