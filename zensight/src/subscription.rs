@@ -373,9 +373,12 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                         seeded.push((origin, alert));
                     }
                 }
-                if !seeded.is_empty() {
-                    yield Message::AlertsSeed(seeded);
-                }
+                // Yielded even when EMPTY (#1116). An empty snapshot is the
+                // answer "nothing is firing", and suppressing it is exactly
+                // how an alert that resolved during a blip survives a
+                // reconnect: its tombstone went to a subscriber that no longer
+                // existed, and nothing here ever said otherwise.
+                yield Message::AlertsSeed(seeded);
             }
 
             // Late-joiner entity seed (#306): fetch the correlator's current
@@ -408,6 +411,13 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
             // unacknowledged until the catalog next re-emits — which the
             // change gate makes deliberately rare. An operator who joins a
             // running incident must see that someone is already on it.
+            // Collected into ONE snapshot per class rather than yielded one at
+            // a time (#1116). A stream of `*Received` is additive, so a
+            // document retired while the GUI was disconnected stayed in the
+            // projection for the life of the process — its tombstone went to a
+            // subscriber that no longer existed, and the seed that followed
+            // could only add.
+            let mut catalog = crate::message::CatalogSnapshot::default();
             for (key, kind) in [
                 (zensight_common::keyexpr::all_acks_wildcard(), "ack"),
                 (zensight_common::keyexpr::all_silences_wildcard(), "silence"),
@@ -427,14 +437,14 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                                 if let Ok(a) = decode_auto::<zensight_common::ack::AlertAck>(
                                     &payload,
                                 ) {
-                                    yield Message::AckReceived(Box::new(a));
+                                    catalog.acks.push(a);
                                 }
                             }
                             "silence" => {
                                 if let Ok(x) = decode_auto::<zensight_common::silence::Silence>(
                                     &payload,
                                 ) {
-                                    yield Message::SilenceReceived(Box::new(x));
+                                    catalog.silences.push(x);
                                 }
                             }
                             _ => {
@@ -442,13 +452,17 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                                     zensight_common::incident::Incident,
                                 >(&payload)
                                 {
-                                    yield Message::IncidentReceived(Box::new(i));
+                                    catalog.incidents.push(i);
                                 }
                             }
                         }
                     }
                 }
             }
+            // Always, even when every class is empty (#1116): "nothing is
+            // acknowledged, silenced or under investigation" is an answer, and
+            // it is the one a reconnect after a quiet period needs.
+            yield Message::CatalogSeed(Box::new(catalog));
 
             // Late-joiner edge seed (#919). Without it the map is blank until
             // something in the fleet's topology *changes* — and the catalog's

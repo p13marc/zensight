@@ -319,6 +319,71 @@ impl AlertsState {
         zensight_common::alert::AlertRef::parse(&format!("{origin}.{}.{hash}", alert.protocol)).ok()
     }
 
+    /// Replace the **firing** set from a late-joiner seed (#1116).
+    ///
+    /// It used to be additive, and that is the whole bug: an alert that
+    /// resolved while the GUI was disconnected had its `Resolved` sample and
+    /// tombstone delivered to a subscriber that no longer existed, and the
+    /// seed on reconnect returned only what is *still* firing. The resolved
+    /// one therefore stayed in `external` for the life of the process —
+    /// counted by the badge, drawn on the topology overlay, grouped into
+    /// incidents, and un-acknowledgeable.
+    ///
+    /// A seed is a **snapshot of the class**, so an empty one is the answer
+    /// "nothing is firing" and must replace just as loudly as a full one.
+    ///
+    /// Safe against the live subscriber, which is declared *before* the seed
+    /// GET is issued: a sample that arrives while the GET is in flight is
+    /// delivered after this message and re-adds itself.
+    ///
+    /// `focused_external` deliberately survives (#651): a pivot that lands on
+    /// an empty list is worse than one that says "no longer firing".
+    pub fn seed_external(
+        &mut self,
+        alerts: impl IntoIterator<Item = (Option<String>, SensorAlert)>,
+    ) {
+        self.external.clear();
+        self.external_origins.clear();
+        for (origin, alert) in alerts {
+            self.ingest_external_from(origin, alert);
+        }
+    }
+
+    /// Replace the incident projection from the bus (#1116), for the same
+    /// reason [`seed_external`](Self::seed_external) does.
+    pub fn set_incidents(
+        &mut self,
+        incidents: impl IntoIterator<Item = zensight_common::incident::Incident>,
+    ) {
+        self.catalog_incidents.clear();
+        for i in incidents {
+            self.ingest_incident(i);
+        }
+    }
+
+    /// Keep only the alerts published by `origin` (#1116) — the narrowing a
+    /// focus change makes true.
+    pub fn retain_origin(&mut self, origin: &str) {
+        self.external_origins.retain(|key, o| {
+            let keep = o == origin;
+            if !keep {
+                self.external.remove(key);
+            }
+            keep
+        });
+        // An alert whose origin was never recorded cannot be attributed, and a
+        // focused view must not carry one: it is by definition not known to be
+        // this host's.
+        let known: std::collections::HashSet<String> =
+            self.external_origins.keys().cloned().collect();
+        self.external.retain(|k, _| known.contains(k));
+    }
+
+    /// Mutable access to the origin index, for the focus-scope drop (#1116).
+    pub fn external_origins_mut(&mut self) -> &mut HashMap<String, String> {
+        &mut self.external_origins
+    }
+
     /// Replace the ack projection from the bus (#925).
     pub fn set_acks(
         &mut self,

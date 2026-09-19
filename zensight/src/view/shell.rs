@@ -221,6 +221,8 @@ fn top_bar<'a>(
     alert_count: usize,
     last_update_ms: Option<i64>,
     now_ms: i64,
+    // When this session last RE-connected (#1116), or `None`.
+    reconnected_at: Option<i64>,
 ) -> Element<'a, Message> {
     let spacer = container(text("")).width(Length::Fill);
 
@@ -246,6 +248,7 @@ fn top_bar<'a>(
         connected,
         last_update_ms,
         now_ms,
+        reconnected_at,
     ));
     // Keyboard-shortcuts help (#28); also bound to "?".
     right = right.push(
@@ -289,6 +292,8 @@ pub fn app_shell<'a>(
     // historian capped the last reply for it (#910).
     as_of_ms: Option<i64>,
     scrub_truncated: bool,
+    // When this session last RE-connected (#1116), or `None`.
+    reconnected_at: Option<i64>,
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let mut stack = column![top_bar(
@@ -297,7 +302,8 @@ pub fn app_shell<'a>(
         connection,
         alert_count,
         last_update_ms,
-        now_ms
+        now_ms,
+        reconnected_at,
     )];
     if let Some(host) = focused_host {
         stack = stack.push(focus_banner(host));

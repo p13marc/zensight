@@ -133,6 +133,18 @@ pub enum Message {
     /// toasting, since these aren't newly-fired).
     AlertsSeed(Vec<(Option<String>, Alert)>),
 
+    /// The catalog's ack / silence / incident sets, as **one snapshot** each
+    /// (#1116).
+    ///
+    /// These used to arrive as a stream of `AckReceived`/`SilenceReceived`/
+    /// `IncidentReceived`, one per reply — additive, so a document retired
+    /// while the GUI was disconnected stayed in the projection for the life of
+    /// the process. Its tombstone went to a subscriber that no longer existed,
+    /// and the seed that followed the reconnect could only *add*.
+    ///
+    /// A seed is a statement about a whole class, so it replaces one.
+    CatalogSeed(Box<CatalogSnapshot>),
+
     /// Connect-time snapshot of the correlator's [`HostEntity`] docs, fetched
     /// from the entity seed (`zensight/v1/@catalog/state/entity/*`) (#306).
     /// Absent correlator ⇒ no
@@ -1553,6 +1565,16 @@ pub enum AttributionTarget {
     Security,
     /// The topology edge panel (#393).
     Topology,
+}
+
+/// One reconnect's view of the catalog's three operator-authored classes
+/// (#1116). Boxed into [`Message::CatalogSeed`] because a message enum's size
+/// is every variant's.
+#[derive(Debug, Clone, Default)]
+pub struct CatalogSnapshot {
+    pub acks: Vec<zensight_common::ack::AlertAck>,
+    pub silences: Vec<zensight_common::silence::Silence>,
+    pub incidents: Vec<zensight_common::incident::Incident>,
 }
 
 /// Unique identifier for a device: **who published it**, what protocol, and
