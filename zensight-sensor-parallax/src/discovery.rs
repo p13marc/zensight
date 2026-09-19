@@ -57,6 +57,17 @@ const RTSP_SERVICE: &str = "_rtsp._tcp.local.";
 /// cap, and for the same reason — a bound the operator did not have to think of.
 pub const MAX_DISCOVERED: usize = 256;
 
+/// Hard cap on every string this module takes from a responder — name,
+/// address, URL, and each attribute key and value.
+///
+/// [`MAX_DISCOVERED`] bounds how *many* responders a round keeps; nothing
+/// bounded how *large* one of them could make itself (#1149). A single device
+/// answering with a megabyte of ONVIF scope inflated the LWW state document
+/// every round, and the GUI renders that document and the historian stores it.
+/// 256 is longer than any real camera name, URL or scope and short enough that
+/// the whole cap is `MAX_DISCOVERED` × a handful of these.
+pub const MAX_FIELD_LEN: usize = 256;
+
 /// Discovery configuration (#410). The block's presence is the opt-in.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscoveryConfig {
@@ -172,25 +183,27 @@ pub async fn browse_mdns(
         let attributes: BTreeMap<String, String> = service
             .txt_properties
             .iter()
-            .map(|p| (p.key().to_string(), p.val_str().to_string()))
+            .map(|p| (bounded(p.key()), bounded(p.val_str())))
             .collect();
 
         // RFC 6763 §6.5 gives `path` as the conventional TXT key for a URL
         // path. Most cameras do not publish one, which is why `url` is
         // optional and the snippet below carries a visible placeholder rather
         // than a guess that would fail at connect time.
+        // `attributes` is already bounded, so `path` is; the join is bounded
+        // again because `address` adds to it.
         let url = attributes.get("path").map(|p| {
-            format!(
+            bounded(&format!(
                 "rtsp://{address}{}",
                 if p.starts_with('/') {
                     p.clone()
                 } else {
                     format!("/{p}")
                 }
-            )
+            ))
         });
 
-        let name = instance_name(&service.fullname);
+        let name = bounded(&instance_name(&service.fullname));
         if url.as_ref().is_some_and(|u| configured.contains(u)) {
             continue;
         }
@@ -309,31 +322,34 @@ async fn probe_ws_discovery_at(
         let Some(service) = matched.xaddrs.first() else {
             continue;
         };
-        let address = authority_of(service).unwrap_or_else(|| from.to_string());
+        let address = authority_of(service)
+            .map(|a| bounded(&a))
+            .unwrap_or_else(|| from.to_string());
         if configured.contains(&address) || configured.contains(service) {
             continue;
         }
 
         let mut attributes: BTreeMap<String, String> = BTreeMap::new();
-        attributes.insert("service".to_string(), service.clone());
+        attributes.insert("service".to_string(), bounded(service));
         if !matched.scopes.is_empty() {
-            attributes.insert("scopes".to_string(), matched.scopes.join(" "));
+            attributes.insert("scopes".to_string(), bounded(&matched.scopes.join(" ")));
         }
         if !matched.types.is_empty() {
-            attributes.insert("types".to_string(), matched.types.clone());
+            attributes.insert("types".to_string(), bounded(&matched.types));
         }
         // ONVIF puts the human-facing bits in scopes as onvif://www.onvif.org/
         // name/<name> and /hardware/<model>. Lifted into their own keys because
         // a name is what an operator recognises; the raw scopes stay beside
         // them rather than being replaced by this crate's reading of them.
         if let Some(name) = scope_value(&matched.scopes, "name") {
-            attributes.insert("name".to_string(), name.clone());
+            attributes.insert("name".to_string(), bounded(&name));
         }
         if let Some(hw) = scope_value(&matched.scopes, "hardware") {
-            attributes.insert("hardware".to_string(), hw);
+            attributes.insert("hardware".to_string(), bounded(&hw));
         }
 
         let name = scope_value(&matched.scopes, "name")
+            .map(|n| bounded(&n))
             .unwrap_or_else(|| address.split(':').next().unwrap_or(&address).to_string());
         // No URL, ever, from this probe: XAddrs is the DEVICE service, and the
         // stream URI needs an ONVIF Media GetStreamUri call. Proposing the
@@ -493,17 +509,55 @@ fn instance_name(fullname: &str) -> String {
         .to_string()
 }
 
+/// Everything a responder tells us passes through here before it is stored,
+/// rendered or pasted (#1149).
+///
+/// Control characters are **dropped**, not escaped: they carry no information a
+/// camera name needs, and a terminal or a label that renders one is a different
+/// problem in every consumer. The value is then truncated to
+/// [`MAX_FIELD_LEN`] at a char boundary and marked with `…`, so a value cut
+/// short reads as cut short rather than as what the device advertised.
+///
+/// Quotes and backslashes survive — [`suggest`] escapes them where it matters,
+/// and stripping them here would silently rewrite a legitimate path.
+fn bounded(s: &str) -> String {
+    let cleaned: String = s.chars().filter(|c| !c.is_control()).collect();
+    if cleaned.chars().count() <= MAX_FIELD_LEN {
+        return cleaned;
+    }
+    let cut = cleaned
+        .char_indices()
+        .nth(MAX_FIELD_LEN)
+        .map_or(cleaned.len(), |(i, _)| i);
+    format!("{}…", &cleaned[..cut])
+}
+
 /// The copy-pasteable `parallax.rtsp[]` entry.
 ///
 /// With no URL the placeholder is deliberately obvious — `<path>` will not
 /// connect, and an operator pasting it unedited gets an error naming the stream
 /// rather than a silently wrong URL that looks configured.
+///
+/// **The values are serialised, not interpolated** (#1149). `url` is built from
+/// the responder's own TXT `path`, and a device advertising
+/// `path=/live",  name: "override` used to produce a snippet that is not the
+/// object it appears to be — an operator pasting it into `configs/parallax.json5`
+/// got a stream this sensor never proposed. `serde_json` writes JSON string
+/// literals, which JSON5 accepts verbatim; the keys stay unquoted so the entry
+/// still looks like the rest of the file.
 fn suggest(name: &str, address: &str, url: Option<&str>) -> String {
     let stream = stream_name(name, address);
-    match url {
-        Some(url) => format!("{{ name: \"{stream}\", url: \"{url}\" }}"),
-        None => format!("{{ name: \"{stream}\", url: \"rtsp://{address}/<path>\" }}"),
-    }
+    let url = match url {
+        Some(url) => url.to_string(),
+        None => format!("rtsp://{address}/<path>"),
+    };
+    // `to_string` on a `String` cannot fail — no non-string keys, no NaN, no
+    // borrowed-data serializer. The fallback is a placeholder that will not
+    // connect rather than an unescaped interpolation, because an entry nobody
+    // can paste is better than one that pastes as something else.
+    let quote =
+        |v: &str| serde_json::to_string(v).unwrap_or_else(|_| "\"<unprintable>\"".to_string());
+    format!("{{ name: {}, url: {} }}", quote(&stream), quote(&url))
 }
 
 /// A stream name a config would accept: the advertised instance name reduced to
@@ -592,6 +646,84 @@ mod tests {
             "{ name: \"cam1\", url: \"rtsp://10.0.0.7:554/stream1\" }"
         );
         assert!(!s.contains("<path>"));
+    }
+
+    /// Parse a suggestion back as the JSON5 it claims to be.
+    fn parse_suggestion(s: &str) -> BTreeMap<String, String> {
+        json5::from_str(s).unwrap_or_else(|e| panic!("suggestion is not JSON5: {e}\n{s}"))
+    }
+
+    #[test]
+    fn a_hostile_txt_path_cannot_inject_a_second_key() {
+        // The whole point of the snippet is that an operator pastes it into
+        // `configs/parallax.json5` without reading it closely. A responder that
+        // can close the string and open a key of its own is configuring the
+        // operator's sensor for them (#1149).
+        let hostile = r#"rtsp://10.0.0.7:554/live",  name: "override"#;
+        let s = suggest("cam1", "10.0.0.7:554", Some(hostile));
+        let parsed = parse_suggestion(&s);
+        assert_eq!(
+            parsed.keys().collect::<Vec<_>>(),
+            vec!["name", "url"],
+            "exactly the two keys this sensor proposes: {s}"
+        );
+        assert_eq!(parsed["name"], "cam1", "{s}");
+        assert_eq!(parsed["url"], hostile, "the path survives, escaped: {s}");
+    }
+
+    #[test]
+    fn a_hostile_name_cannot_inject_either() {
+        // `stream_name` already reduces the name to `[a-z0-9-_]`, so this is
+        // belt and braces — but the belt is one function call away from being
+        // changed, and the snippet must hold on its own.
+        let s = suggest(r#"cam", url: "rtsp://attacker/"#, "10.0.0.7:554", None);
+        let parsed = parse_suggestion(&s);
+        assert_eq!(
+            parsed.keys().collect::<Vec<_>>(),
+            vec!["name", "url"],
+            "{s}"
+        );
+        assert!(parsed["url"].starts_with("rtsp://10.0.0.7:554/"), "{s}");
+    }
+
+    #[test]
+    fn a_newline_in_a_path_does_not_break_the_line() {
+        // A snippet is shown line by line; a raw newline turns one proposal
+        // into what reads as two.
+        let s = suggest("cam1", "10.0.0.7:554", Some("rtsp://h/a\nb"));
+        assert_eq!(s.lines().count(), 1, "{s}");
+        assert_eq!(parse_suggestion(&s)["url"], "rtsp://h/a\nb");
+    }
+
+    #[test]
+    fn a_responder_cannot_inflate_the_document_with_one_field() {
+        // MAX_DISCOVERED caps how many responders a round keeps. Nothing
+        // capped how large one could make itself, and this document is LWW
+        // state the GUI renders and the historian stores.
+        let huge = "a".repeat(100_000);
+        let out = bounded(&huge);
+        assert_eq!(
+            out.chars().count(),
+            MAX_FIELD_LEN + 1,
+            "truncated, plus the ellipsis that says so"
+        );
+        assert!(out.ends_with('…'), "a cut value reads as cut: {out:.40}…");
+    }
+
+    #[test]
+    fn control_characters_are_dropped_not_carried() {
+        // Escaping would make them safe to paste and still leave a terminal
+        // rendering them. They carry nothing a camera name needs.
+        assert_eq!(bounded("Front\u{1b}[31m Door\u{7}"), "Front[31m Door");
+        assert_eq!(bounded("a\r\nb"), "ab");
+    }
+
+    #[test]
+    fn bounded_cuts_on_a_char_boundary() {
+        // `&s[..n]` on a multi-byte char panics, and a camera name in
+        // Japanese is not an exotic input.
+        let out = bounded(&"é".repeat(MAX_FIELD_LEN + 10));
+        assert_eq!(out.chars().count(), MAX_FIELD_LEN + 1);
     }
 
     // ── WS-Discovery parsing (#410) ──────────────────────────────────────

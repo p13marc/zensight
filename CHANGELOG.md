@@ -335,6 +335,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **parallax: a hostile responder could write the snippet the operator is told
+  to paste** (#1149). `suggest()` built the copy-pasteable `rtsp[]` entry with
+  `format!("{ name: \"{stream}\", url: \"{url}\" }")`. The name was reduced to
+  the catalogue's charset first, but `url` came from the responder's own mDNS
+  TXT `path`, unescaped — so a camera advertising
+  `path=/live",  name: "override` produced a snippet that **is not the object it
+  appears to be**. That snippet exists to be pasted into
+  `configs/parallax.json5` without being read closely, which is the whole
+  vulnerability: the device configures the operator's sensor for them.
+
+  The values are serialised with `serde_json` now rather than interpolated —
+  JSON string literals, which JSON5 takes verbatim — and the keys stay unquoted
+  so the entry still looks like the rest of the file. Quotes and backslashes
+  are escaped rather than stripped: a legitimate path is not silently rewritten.
+
+  Beside it, **every string either probe takes from the network is bounded**
+  (`MAX_FIELD_LEN`, 256) and stripped of control characters. `MAX_DISCOVERED`
+  capped how *many* responders a round kept and nothing capped how *large* one
+  could make itself — WS-Discovery's `name` is a raw scope value — so one device
+  answering with a megabyte of ONVIF scope inflated an LWW state document that
+  the GUI renders and the historian stores. Control characters are dropped
+  rather than escaped, because escaping makes them safe to paste and still
+  leaves whatever renders them rendering them.
+
+  Five of the six new tests fail on the parent commit. The sixth,
+  `a_hostile_name_cannot_inject_either`, passes there — `stream_name` already
+  sanitised the name — and is kept because the snippet must hold on its own,
+  one function call away from that.
+
 - **A consumer that falls behind blocked the Zenoh thread, so its whole
   session — `@rpc` and shutdown included — stopped answering** (#1211). With
   two sensors publishing and a box under load, the historian answered

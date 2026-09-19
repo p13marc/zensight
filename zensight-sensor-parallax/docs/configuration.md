@@ -164,6 +164,27 @@ WS-Discovery conversation on the segment. Multicast TTL is 1, because
 WS-Discovery is link-local by design and a probe that escapes the segment is a
 probe on somebody else's network.
 
+**Everything in the report comes from an untrusted responder** (#1149). Nothing
+on either probe authenticates the device on the other end, so every string the
+round keeps — name, address, URL, and each attribute key and value — is passed
+through one sanitiser before it is stored, rendered or pasted:
+
+- **control characters are dropped**, not escaped. Escaping makes them safe to
+  paste and still leaves a terminal or a label rendering them, and they carry
+  nothing a camera name needs;
+- the value is **truncated to 256 characters** and marked with `…`. The
+  256-responder cap bounds how *many* devices a round keeps; this bounds how
+  large one of them can make itself. A device answering with a megabyte of ONVIF
+  scope otherwise inflated the LWW document every round.
+
+The snippet's values are **serialised, not interpolated**. `url` is built from
+the responder's own TXT `path`, so a device advertising
+`path=/live",  name: "override` used to produce a snippet that is not the object
+it appears to be — and the snippet exists precisely to be pasted into
+`configs/parallax.json5` without being read closely. Quotes and backslashes are
+escaped rather than stripped, so a legitimate path is not silently rewritten;
+the keys stay unquoted, so the entry still looks like the rest of the file.
+
 **Operational note.** Both probes are multicast on a network you may not own,
 and they are traffic an IDS can flag — the same caution the SNMP subnet sweep
 carries. Keep them to networks you operate. Rounds are capped at 256 responders: this document
