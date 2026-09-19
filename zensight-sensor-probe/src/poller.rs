@@ -73,6 +73,26 @@ pub struct Poller {
     relations: zensight_sensor_core::relation::RelationSet,
 }
 
+/// The one HTTP client every check shares.
+///
+/// **No automatic redirects** (#1134). reqwest's redirect policy is per-CLIENT
+/// and `follow_redirects` is per-TARGET, so a shared client that followed
+/// could not honour a target that said not to — and for a release it did not:
+/// the field was documented, wire-carried and read nowhere. `check::http`
+/// follows by hand, which is also the only way to record the chain the README
+/// promises rather than just where it ended up.
+///
+/// Public so the tests use the same builder the sensor does. The bug lived in
+/// this one line, so a test that built its own client would prove nothing
+/// about the sensor.
+pub fn http_client(timeout: Duration) -> reqwest::Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .user_agent(concat!("zensight-sensor-probe/", env!("CARGO_PKG_VERSION")))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+}
+
 impl Poller {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -86,13 +106,7 @@ impl Poller {
     ) -> anyhow::Result<Self> {
         let vantage = cfg.resolved_vantage();
         let source = cfg.resolved_source();
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(cfg.timeout_secs))
-            .user_agent(concat!("zensight-sensor-probe/", env!("CARGO_PKG_VERSION")))
-            // Redirect policy is per-target; the client allows the maximum and
-            // the checker decides whether where it ended up is acceptable.
-            .redirect(reqwest::redirect::Policy::limited(10))
-            .build()?;
+        let client = http_client(Duration::from_secs(cfg.timeout_secs))?;
         Ok(Self {
             limit: Arc::new(tokio::sync::Semaphore::new(cfg.max_concurrent.max(1))),
             cfg,

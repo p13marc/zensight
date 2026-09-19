@@ -27,11 +27,12 @@ looking broken — and is what CI runs.
 | `target` | all | a URL, `host:port`, a name, or an absolute path — checked against the kind at startup |
 | `expect_status` | http | empty = any 2xx |
 | `expect_body` | http | a literal substring, looked for in the first 256 KiB of the body. Without it the body is not read at all — a plain up/down check on an endpoint serving a large response must not buffer it inside a `MemoryMax=64M` unit |
-| `allow_offhost_redirect` | http | **false** by default |
+| `follow_redirects` | http | true by default; **false** means the 3xx itself is the answer, so `expect_status: [200]` on an endpoint that starts sending you to a login page reports down. Read by nothing until #1134 |
+| `allow_offhost_redirect` | http | **false** by default. Every hop is checked, not only the last — a chain that leaves the host and comes back has still left it |
 | `server_name` | tls, certfile | SNI, and the name matched against SANs |
 | `inspect_untrusted` | tls | true by default — report a bad certificate instead of erroring |
 | `resolver` | dns | `ip[:port]`; default is the system resolver, and either way it is **named in the result** |
-| `expect_addrs` | dns | addresses the answer must contain |
+| `expect_addrs` | dns | the answer must contain **at least one** of them. It required *all* until #1134, which made a round-robin name with two A records a permanent critical: the resolver hands back one |
 | `enabled` | all | skip without deleting |
 
 ## The bounds are checked, not hoped for
