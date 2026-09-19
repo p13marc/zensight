@@ -412,12 +412,20 @@ impl PveClient {
     }
 
     /// HA resources. Empty on an install without HA — not a fault.
+    ///
+    /// `/cluster/ha/status/current` is not a list of resources: it is a
+    /// **status feed**, and its rows carry a `type` that says what each one is
+    /// — `quorum`, `lrm`, `master`, `service`. Taking them wholesale (#1132)
+    /// turned "quorum OK" and each node's local resource manager into HA
+    /// *resources*, so the cluster document listed three or four phantom
+    /// services per node that no `ha-manager` command would ever name.
     pub async fn ha_status(&self) -> Result<Vec<PveHaResource>> {
         Ok(self
             .get_array("/cluster/ha/status/current")
             .await?
             .unwrap_or_default()
             .iter()
+            .filter(|r| text(r, "type").as_deref() == Some("service"))
             .filter_map(|r| {
                 Some(PveHaResource {
                     id: text(r, "id")?,

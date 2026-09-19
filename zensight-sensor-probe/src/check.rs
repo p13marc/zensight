@@ -193,12 +193,38 @@ async fn burst(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
     let spacing = Duration::from_millis(t.burst_spacing_ms());
     let transport = t.burst_transport().to_string();
 
+    // RESOLVED ONCE, BEFORE ANY PACKET (#1135).
+    //
+    // Two things were wrong with resolving inside the probe. The icmp path
+    // parsed an `IpAddr` and returned `false` on anything else — and `false`
+    // from one probe is a **lost packet**. `validate()` only requires
+    // `host:port` for tcp, so an icmp burst target is a bare host by design:
+    // `{kind: "burst", transport: "icmp", target: "gw.example.net"}` published
+    // `loss_pct: 100` every interval and a critical `probe-down` over a
+    // perfectly healthy link.
+    //
+    // And a burst is meant to measure ONE path. Re-resolving per packet, which
+    // is what `TcpStream::connect(&t.target)` does, lets a round-robin name
+    // spread a burst over several hosts and calls the result one target's
+    // latency distribution.
+    //
+    // A name that does not resolve now fails the CHECK, with a sentence that
+    // says so, and no packets are counted as lost.
+    let dest = match resolve_burst(t, &transport, timeout).await {
+        Ok(d) => d,
+        Err(e) => {
+            let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+            r.error = Some(e);
+            return r;
+        }
+    };
+
     let mut samples: Vec<Option<f64>> = Vec::with_capacity(count as usize);
     for i in 0..count {
         if i > 0 {
             tokio::time::sleep(spacing).await;
         }
-        samples.push(one_burst_probe(t, &transport, timeout).await);
+        samples.push(one_burst_probe(&dest, timeout).await);
     }
 
     let reduced = zensight_common::probe::BurstResult::reduce(&samples, &transport);
@@ -218,20 +244,82 @@ async fn burst(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
     r
 }
 
-/// One probe of a burst: its RTT in milliseconds, or `None` if it did not
-/// answer.
-async fn one_burst_probe(t: &Target, transport: &str, timeout: Duration) -> Option<f64> {
-    let at = Instant::now();
+/// Where a burst's packets go, resolved once (#1135).
+///
+/// The tcp arm keeps the **whole answer, in order**, because that is what
+/// `TcpStream::connect(host)` does and a burst that lost it would fail on a
+/// dual-stack name whose first address is unreachable — `localhost` on a host
+/// serving v4 only, which is most CI. Each probe walks the same list in the
+/// same order, so it is still one path; what it is not any more is a fresh
+/// lookup per packet.
+#[derive(Debug, Clone)]
+enum BurstDest {
+    Icmp(std::net::IpAddr),
+    Tcp(Vec<std::net::SocketAddr>),
+}
+
+/// Resolve a burst target to one destination, for the whole burst.
+///
+/// The error is the **check's**, not a packet's: "did not resolve" is a
+/// different fact from "nothing answered", and reporting the first as the
+/// second is what made a healthy link read as 100 % loss.
+async fn resolve_burst(
+    t: &Target,
+    transport: &str,
+    timeout: Duration,
+) -> Result<BurstDest, String> {
+    let lookup = |hostport: String| async move {
+        match tokio::time::timeout(timeout, tokio::net::lookup_host(hostport)).await {
+            Ok(Ok(it)) => {
+                let all: Vec<std::net::SocketAddr> = it.collect();
+                if all.is_empty() {
+                    Err("did not resolve".to_string())
+                } else {
+                    Ok(all)
+                }
+            }
+            Ok(Err(e)) => Err(e.to_string()),
+            Err(_) => Err(format!("name lookup did not answer within {timeout:?}")),
+        }
+    };
     match transport {
-        "icmp" => burst_icmp(t, timeout).await.then(|| ms(at)),
+        "icmp" => {
+            if let Ok(ip) = t.target.parse::<std::net::IpAddr>() {
+                return Ok(BurstDest::Icmp(ip));
+            }
+            // Port 0: `lookup_host` wants one and ICMP has none. The first
+            // answer, as the plain `icmp` check takes.
+            lookup(format!("{}:0", t.target))
+                .await
+                .map(|all| BurstDest::Icmp(all[0].ip()))
+                .map_err(|e| format!("{}: {e}", t.target))
+        }
         // Default and only other option. `tcp` connect RTT: works in a default
         // build with no capability, which is what makes this measurable
         // everywhere including CI.
-        _ => matches!(
-            tokio::time::timeout(timeout, tokio::net::TcpStream::connect(&t.target)).await,
-            Ok(Ok(_))
-        )
-        .then(|| ms(at)),
+        _ => lookup(t.target.clone())
+            .await
+            .map(BurstDest::Tcp)
+            .map_err(|e| format!("{}: {e}", t.target)),
+    }
+}
+
+/// One probe of a burst: its RTT in milliseconds, or `None` if it did not
+/// answer.
+async fn one_burst_probe(dest: &BurstDest, timeout: Duration) -> Option<f64> {
+    let at = Instant::now();
+    match dest {
+        BurstDest::Icmp(ip) => burst_icmp(*ip, timeout).await.then(|| ms(at)),
+        BurstDest::Tcp(addrs) => {
+            for sa in addrs {
+                if let Ok(Ok(_)) =
+                    tokio::time::timeout(timeout, tokio::net::TcpStream::connect(sa)).await
+                {
+                    return Some(ms(at));
+                }
+            }
+            None
+        }
     }
 }
 
@@ -240,13 +328,7 @@ fn ms(at: Instant) -> f64 {
 }
 
 #[cfg(feature = "icmp")]
-async fn burst_icmp(t: &Target, timeout: Duration) -> bool {
-    let Ok(addr) = t.target.parse::<std::net::IpAddr>() else {
-        // Resolution failure is not packet loss, but from one probe's point of
-        // view it is indistinguishable, and the check-level error already says
-        // nothing answered.
-        return false;
-    };
+async fn burst_icmp(addr: std::net::IpAddr, timeout: Duration) -> bool {
     let Ok(client) = surge_ping::Client::new(&surge_ping::Config::default()) else {
         return false;
     };
@@ -261,7 +343,7 @@ async fn burst_icmp(t: &Target, timeout: Duration) -> bool {
 }
 
 #[cfg(not(feature = "icmp"))]
-async fn burst_icmp(_t: &Target, _timeout: Duration) -> bool {
+async fn burst_icmp(_addr: std::net::IpAddr, _timeout: Duration) -> bool {
     // Unreachable in practice: startup refuses an icmp burst in a build
     // without the feature, for the same reason it refuses a plain icmp target.
     false
@@ -286,6 +368,12 @@ fn rand_id() -> u16 {
 /// problem to surface, not a body to keep reading.
 const MAX_BODY_BYTES: usize = 256 * 1024;
 
+/// How many redirects a target with `follow_redirects` on will follow.
+///
+/// What the shared client used to be built with, kept so behaviour does not
+/// move for the common case; a target that says not to follow gets zero.
+const MAX_REDIRECTS: usize = 10;
+
 async fn http(
     t: &Target,
     vantage: &str,
@@ -299,36 +387,102 @@ async fn http(
         r.error = Some(format!("{:?} is not an HTTP method", t.method));
         return r;
     };
-    // Per request, not per client: the shared client carries the GLOBAL
-    // timeout, and a target's own `timeout_secs` — documented, validated
-    // against its interval, and computed by the poller — reached every kind
-    // but this one for a while.
-    let mut req = client.request(method, &t.target).timeout(timeout);
-    for (k, v) in &t.headers {
-        req = req.header(k, v);
-    }
-
-    let resp = match req.send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            let timed_out = e.is_timeout();
-            let mut r = result(
-                t,
-                vantage,
-                if timed_out {
-                    ProbeOutcome::Timeout
-                } else {
-                    ProbeOutcome::Failed
-                },
-                started,
-            );
-            // The client's own words. A reconstruction would lose exactly the
-            // detail that mattered on 2026-08-20.
-            r.error = Some(e.to_string());
-            return r;
+    // FOLLOWED BY HAND (#1134). reqwest's redirect policy is per-CLIENT and
+    // `follow_redirects` is per-TARGET, so the shared client is built with
+    // `Policy::none()` and the hops happen here. Three things fall out of
+    // that, all of which were wrong before:
+    //
+    //   - a target that says `follow_redirects: false` is not followed. It
+    //     was, always, so `{follow_redirects: false, expect_status: [200]}`
+    //     against an endpoint that started answering `302 -> /login` followed
+    //     it, got 200 from the login page and reported **up** — the check
+    //     written to catch exactly that reported green;
+    //   - the recorded `redirects` is the CHAIN, which is what the README
+    //     promises. It was "the final URL, if it differs from the target
+    //     string", so `https://example.com` reported a redirect to
+    //     `https://example.com/` every poll — reqwest's normalisation, read
+    //     as a redirect;
+    //   - every hop is host-checked, not only the last. A chain that leaves
+    //     the configured host and comes back has still left it.
+    //
+    // No request body exists on a `Target`, so a hop is a fresh request with
+    // the same headers; 303 becomes a GET, as the spec requires.
+    let max_hops = if t.follow_redirects { MAX_REDIRECTS } else { 0 };
+    let mut url = t.target.clone();
+    let mut method = method;
+    let mut redirects: Vec<String> = Vec::new();
+    let mut hops = 0usize;
+    let (resp, ttfb) = loop {
+        // Per request, not per client: the shared client carries the GLOBAL
+        // timeout, and a target's own `timeout_secs` — documented, validated
+        // against its interval, and computed by the poller — reached every
+        // kind but this one for a while.
+        let mut req = client.request(method.clone(), &url).timeout(timeout);
+        for (k, v) in &t.headers {
+            req = req.header(k, v);
         }
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let timed_out = e.is_timeout();
+                let mut r = result(
+                    t,
+                    vantage,
+                    if timed_out {
+                        ProbeOutcome::Timeout
+                    } else {
+                        ProbeOutcome::Failed
+                    },
+                    started,
+                );
+                // The client's own words. A reconstruction would lose exactly
+                // the detail that mattered on 2026-08-20.
+                r.error = Some(e.to_string());
+                // The hops taken before it failed are the useful half of a
+                // failed chain.
+                r.http = Some(HttpResult {
+                    redirects,
+                    ..Default::default()
+                });
+                return r;
+            }
+        };
+        let ttfb = started.elapsed().as_secs_f64() * 1000.0;
+        let code = resp.status().as_u16();
+        let is_redirect = resp.status().is_redirection();
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+
+        // A 3xx with no `Location` is not a redirect to anywhere — it is the
+        // response, and `expect_status` gets to judge it.
+        let Some(location) = location.filter(|_| is_redirect) else {
+            break (resp, ttfb);
+        };
+        if hops >= max_hops {
+            // Out of hops, or not following at all. The 3xx IS the answer,
+            // which is the whole point of `follow_redirects: false`.
+            break (resp, ttfb);
+        }
+        let Ok(next) = resp.url().join(&location) else {
+            let mut r = result(t, vantage, ProbeOutcome::Failed, started);
+            r.error = Some(format!("redirect to an unparseable location {location:?}"));
+            r.http = Some(HttpResult {
+                redirects,
+                ..Default::default()
+            });
+            return r;
+        };
+        // 303 means "GET the other thing", whatever this request was.
+        if code == 303 {
+            method = reqwest::Method::GET;
+        }
+        url = next.to_string();
+        redirects.push(url.clone());
+        hops += 1;
     };
-    let ttfb = started.elapsed().as_secs_f64() * 1000.0;
     let status = resp.status().as_u16();
     let final_url = resp.url().to_string();
 
@@ -358,14 +512,20 @@ async fn http(
     };
 
     // A redirect chain that leaves the configured host means the probe is
-    // checking something other than what it was asked about.
-    let mut redirects = Vec::new();
-    if final_url != t.target {
-        redirects.push(final_url.clone());
-    }
-    let off_host = match (t.host(), reqwest::Url::parse(&final_url).ok()) {
-        (Some(want), Some(url)) => url.host_str().is_some_and(|h| h != want),
-        _ => false,
+    // checking something other than what it was asked about. Every hop, not
+    // only the last: a chain that goes out and comes back has still left.
+    //
+    // Compared lowercase — `Target::host` is lowercase and `host_str` is too
+    // — because DNS names are case-insensitive and `https://Example.com/`
+    // reported a permanent off-host redirect against its own answer (#1134).
+    let off_host = match t.host() {
+        Some(want) => redirects.iter().any(|hop| {
+            reqwest::Url::parse(hop)
+                .ok()
+                .and_then(|u| u.host_str().map(|h| h.to_ascii_lowercase()))
+                .is_some_and(|h| h != want)
+        }),
+        None => false,
     };
 
     let ok =
@@ -537,8 +697,12 @@ async fn dns(t: &Target, vantage: &str, timeout: Duration) -> ProbeResult {
     match tokio::time::timeout(timeout, resolver.lookup_ip(t.target.as_str())).await {
         Ok(Ok(answer)) => {
             let answers: Vec<String> = answer.iter().map(|ip| ip.to_string()).collect();
+            // ANY, as both the README and docs/reference.md say (#1134). It
+            // was `all`, so a round-robin name with two A records could never
+            // satisfy a config naming both — the resolver hands back one — and
+            // the target was a permanent critical.
             let expected_matched = (!t.expect_addrs.is_empty())
-                .then(|| t.expect_addrs.iter().all(|e| answers.contains(e)));
+                .then(|| t.expect_addrs.iter().any(|e| answers.contains(e)));
             let ok = !answers.is_empty() && expected_matched.unwrap_or(true);
             let mut r = result(
                 t,
@@ -788,6 +952,55 @@ mod tests {
         assert!(
             r.error.unwrap().contains("NOT evidence about the target"),
             "a check that did not run must not read as a target being down"
+        );
+    }
+
+    /// **#1135, and the half CI can actually run.** An ICMP burst target is a
+    /// bare host by design — `validate()` only requires `host:port` for tcp —
+    /// and the burst path parsed an `IpAddr` and returned `false` for anything
+    /// else. `false` from one probe is a LOST PACKET, so
+    /// `{kind: "burst", transport: "icmp", target: "gw.example.net"}`
+    /// published `loss_pct: 100` every interval and a critical `probe-down`
+    /// over a healthy link.
+    ///
+    /// The ping itself needs `CAP_NET_RAW` and the `icmp` feature; the
+    /// RESOLUTION is the bug, and it needs neither.
+    #[tokio::test]
+    async fn an_icmp_burst_resolves_its_name() {
+        let mut t = target(ProbeKind::Burst, "localhost");
+        t.transport = Some("icmp".into());
+        match resolve_burst(&t, "icmp", Duration::from_secs(2)).await {
+            Ok(BurstDest::Icmp(ip)) => assert!(
+                ip.is_loopback(),
+                "`localhost` must resolve to a loopback address, got {ip}"
+            ),
+            other => panic!("an icmp burst against a name must resolve: {other:?}"),
+        }
+    }
+
+    /// An address still works, and skips the resolver entirely.
+    #[tokio::test]
+    async fn an_icmp_burst_against_an_address_needs_no_resolver() {
+        let mut t = target(ProbeKind::Burst, "127.0.0.1");
+        t.transport = Some("icmp".into());
+        match resolve_burst(&t, "icmp", Duration::from_secs(2)).await {
+            Ok(BurstDest::Icmp(ip)) => assert_eq!(ip.to_string(), "127.0.0.1"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A name that does not resolve is the CHECK's failure, with a sentence
+    /// that names it — not a packet's.
+    #[tokio::test]
+    async fn an_unresolvable_icmp_burst_is_a_check_error() {
+        let mut t = target(ProbeKind::Burst, "no-such-host.invalid");
+        t.transport = Some("icmp".into());
+        let err = resolve_burst(&t, "icmp", Duration::from_secs(2))
+            .await
+            .expect_err("must not resolve");
+        assert!(
+            err.contains("no-such-host.invalid"),
+            "the error must name the target: {err:?}"
         );
     }
 }

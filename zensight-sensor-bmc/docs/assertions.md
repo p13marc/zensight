@@ -56,6 +56,25 @@ firing until restart. Reconciliation is **scoped to the chassis**
 (`reconcile_labeled(rule, "chassis", …)`): one process polls several endpoints,
 and one chassis's recovery must not resolve another's fault.
 
+That sentence was true of the intent and false of the code until #1130. The
+label was the **endpoint's** name, and one Redfish service fronts several
+chassis on a blade enclosure or a four-node Twin — so a `still` list computed
+from `sweeps.first()` reconciled the whole endpoint, and a failed supply in
+chassis 2 was not merely missed but actively **resolved**, every sweep. The
+label is the key chunk now, `{endpoint}-{chassis id}`, and each chassis is
+graded and reconciled in its own namespace.
+
+Two rules sit outside that scoping, on purpose:
+
+- **`bmc-unreachable` is the endpoint's.** A BMC that did not answer returned
+  no chassis list, so there is nothing else to name it with, and inventing a
+  chassis chunk would claim a chassis this sensor has never seen. It is the
+  one rule reconciled under the endpoint's own chunk, and the only one.
+- **A chassis that stops being listed** has its rules reconciled to empty, so
+  a pulled blade does not fire forever. A chassis that is still *listed* but
+  whose sweep failed does **not** — "we could not read it" is not "it
+  recovered", the same rule as the unreachable-BMC hold above.
+
 `ALL_RULES` is also what the reporter adopts on restart (#882), so a rule this
 build can no longer raise retires its inherited alerts instead of leaving them
 firing forever.
@@ -65,3 +84,13 @@ firing forever.
 Every alert's `source` is the **reporting host**, with the chassis as a label
 (#883). Filing an alert under the chassis would put it on no host's card in the
 GUI, which groups by `(protocol, source)`. An e2e test asserts it.
+
+The `chassis` label is the **key chunk**, `{endpoint}-{Redfish chassis id}`,
+and not the endpoint's name. `alert_key` hashes the discriminating labels, so
+with the endpoint there two chassis of one service that both have a bay `0` —
+the normal case, since every chassis numbers its bays from zero — produced the
+**same** alert key and took turns overwriting each other (#1130).
+
+The summary names the same place in prose: `rack-a-1 chassis 2: PSU 1 health
+is Critical`. The chunk is for machines, the sentence is for the person reading
+the page.
