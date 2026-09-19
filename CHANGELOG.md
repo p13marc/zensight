@@ -233,6 +233,78 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   move the old note predicted, and the 45 line has no patched release for either
   advisory.
 
+- **rustls `0.23.44` → `0.23.45`** (RUSTSEC-2026-0285). TLS 1.3 handshake
+  messages accepted across encryption-level boundaries. A lockfile bump only —
+  no manifest requirement moves, and rustls reaches this tree through zenoh's
+  TLS/QUIC links, `reqwest`, and every sensor that speaks TLS. The advisory was
+  published after this branch was cut, so the same `deny` job that had been
+  green on it went red without a line of the tree changing; it rides here
+  because it blocks every open branch.
+
+
+### Fixed
+
+- **A consumer that falls behind blocked the Zenoh thread, so its whole
+  session — `@rpc` and shutdown included — stopped answering** (#1211). With
+  two sensors publishing and a box under load, the historian answered
+  `Timeout` on `range`, `series`, `stats` and — the tell — `introspect` and
+  `describe`, which read no state at all. A sibling sensor's `@rpc` answered
+  instantly through the same hub, so it was that session and not the routing;
+  the process sat at **0.2% CPU** with every thread parked, `app-0` idle in
+  `epoll_wait` and the `rx-*` threads on a futex; publishers logged
+  `Unable to push non droppable network message` at it; and it ignored
+  SIGTERM, because the watcher that turns the signal into a shutdown is
+  another task on the stalled session.
+
+  `zensight-common`'s `declare_telemetry_subscriber` took zenoh's default
+  handler, and zenoh's own documentation says what that costs: *"pushing on a
+  `FifoChannel` that is full will block until a slot is available. E.g., a slow
+  subscriber could block the underlying Zenoh thread because it is not emptying
+  the `FifoChannel` fast enough."* The thread it blocks is the **session's**.
+
+  It is a `RingChannel` of 8 192 now — 32× zenoh's default of 256, and
+  preallocated, so not larger. A ring drops the oldest sample rather than
+  blocking the sender, which for telemetry is the right degradation and close
+  to free: a sample is restated on the next interval, and the historian has a
+  whole shedding ladder for exactly this pressure. Losing the oldest sample of
+  a burst is a smaller failure than losing the bus. The events and
+  alert-transition subscribers keep the FIFO — an event is a rare, deliberate
+  statement nothing restates, and its volume cannot fill a channel the way
+  telemetry can. Both exporters take the same helper and had the same exposure.
+
+  Four CI runs (788, 791, 792, 807) and, once the cause was known, on demand
+  locally. It does not reproduce on an idle box, which is why it read as a
+  flake for ten days.
+
+- **historian: the three subscriber loops yield** (#1211). They drained their
+  channel in a `tokio::select!` with no yield point, and zenoh's channel
+  handlers are flume channels — outside tokio's cooperative budget, and
+  `select!` adds none of its own, it returns the moment a branch is ready. So
+  while a backlog existed the task owned its worker. This is not what wedged
+  the session above, but it is why a backlog drained as slowly as it possibly
+  could, which is what let one build up.
+
+- **store: `pending_sample_count()` is a counter, not a walk** (#1211). The
+  historian asks it on every ingested point, inside the store mutex every query
+  handler also takes, to decide whether `batch_size` is due. Summing
+  `pending.len()` over the series map made it O(series) — against `record`'s
+  own "O(1), safe to call inline on the UI thread" — and spent that inside the
+  lock, on the path already under pressure. Maintained in the two places
+  `series.pending` is touched, with a test that the counter and a full walk
+  agree across record / reorder / drop / flush.
+
+- **verify scripts: a child that ignores SIGTERM costs seconds, not a CI lane**
+  (#1211). `scripts/{demo-verify,demo-incident-verify,conformance-verify,
+  record-fixtures}.sh` all ended their EXIT trap with `kill` then an unbounded
+  `wait`. A wedged historian held `demo-smoke` open until the **45-minute**
+  runner timeout — four times in a row on a two-lane runner (run 807:
+  `failure 45m10s`), each time for a failure that had happened at the
+  four-minute mark and already printed its diagnosis. A shared `stop_children`
+  in
+  `scripts/lib/verify.sh` now does TERM, a bounded grace
+  (`STOP_GRACE_SECS`, default 5), then KILL, and says which pid ignored the
+  first. The historian bug above is fixed too, but a harness that can be held
+  open forever by the thing it is monitoring is a defect of the harness.
 
 ### Fixed
 
