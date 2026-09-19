@@ -141,7 +141,15 @@ pass "one origin: $origin"
 # roster: a producer holding an `alive` token that does not answer is a finding,
 # not a race (RFC 04 §5). That is exactly the telemetry-but-no-@rpc failure.
 say "every live producer answers on its @rpc plane"
-doctor=$(zenctl doctor 2>/dev/null) || true
+# `|| true` on a command substitution used to make this fail OPEN (#1096): a
+# zenctl that was missing, crashed or timed out produced an empty string, the
+# grep below missed, and the check printed "all producers callable" having
+# asked nothing. An absent tool is an unknown answer, not a good one.
+if ! doctor=$(zenctl doctor 2>&1); then
+  die "zenctl doctor did not run, so nothing checked whether producers are callable:
+$doctor"
+fi
+[ -n "$doctor" ] || die "zenctl doctor produced no output — nothing was checked"
 echo "$doctor"
 echo "$doctor" | grep -q "did not answer introspect" \
   && die "a producer holds an alive token but serves no @rpc — alive ⇒ callable (RFC 04 §5).
