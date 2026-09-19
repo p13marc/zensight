@@ -3,11 +3,13 @@
 //! These sections aggregate metrics across all devices of each protocol type,
 //! providing at-a-glance insights before diving into individual devices.
 
+pub mod containers;
 pub mod gnmi;
 pub mod modbus;
 pub mod netflow;
 pub mod netlink;
 pub mod netring;
+pub mod pve;
 pub mod snmp;
 pub mod sysinfo;
 pub mod syslog;
@@ -155,7 +157,7 @@ pub fn overview_section<'a>(
             // #818: one device per guest, plus the hypervisor itself. The
             // generic table already renders exactly that; a bespoke view is a
             // follow-up, not a blocker for the sensor existing.
-            Protocol::Pve => generic_overview(&protocol_devices, "guests"),
+            Protocol::Pve => pve::pve_overview(&protocol_devices),
             // #953: one device per managed chassis. The generic table renders
             // the watts, the RPM and the temperatures; a chassis-shaped tab
             // (a bay diagram, redundancy groups) is a follow-up, not a
@@ -164,7 +166,7 @@ pub fn overview_section<'a>(
             // #819: one device per container. The generic table renders the
             // gauges; a container-shaped tab (image digests, health, restart
             // history) is a follow-up, not a blocker.
-            Protocol::Container => generic_overview(&protocol_devices, "containers"),
+            Protocol::Container => containers::container_overview(&protocol_devices),
             // #820: one device per configured target.
             Protocol::Probe => generic_overview(&protocol_devices, "probe targets"),
             // #898: the historian is one device per running instance, and what
@@ -205,27 +207,57 @@ pub fn overview_section<'a>(
         .into()
 }
 
+/// The order the tabs prefer to appear in — an **ordering hint, not a gate**.
+///
+/// #1128: this used to be the whole list, and `render_protocol_tabs` iterated
+/// it. It was frozen at the nine protocols that existed when it was written, so
+/// every protocol added since — systemd, parallax, hostspec, pve, bmc,
+/// container, probe, historian — could never get a tab, and its arm in
+/// [`render_protocol_overview`] was **unreachable code**. `generic_overview(…,
+/// "guests")` had sat there for the pve sensor's whole life, compiling, tested
+/// by nothing, rendered never.
+///
+/// The fix is structural rather than "add the missing eight": tabs are now
+/// built from the protocols actually present, and this array only says which
+/// come first. A protocol nobody added here still gets a tab — after the listed
+/// ones, in name order — so the next sensor cannot be silently invisible.
+const TAB_ORDER: [Protocol; 9] = [
+    Protocol::Sysinfo,
+    Protocol::Snmp,
+    Protocol::Logs,
+    Protocol::Netflow,
+    Protocol::Modbus,
+    Protocol::Gnmi,
+    Protocol::Netlink,
+    Protocol::Netring,
+    Protocol::Opcua,
+];
+
+/// The protocols to show tabs for: everything with at least one device,
+/// [`TAB_ORDER`] first and the rest after it in name order.
+fn tab_protocols(counts: &HashMap<Protocol, usize>) -> Vec<Protocol> {
+    let mut present: Vec<Protocol> = counts
+        .iter()
+        .filter(|&(_, &n)| n > 0)
+        .map(|(&p, _)| p)
+        .collect();
+    present.sort_by_key(|p| {
+        (
+            TAB_ORDER.iter().position(|q| q == p).unwrap_or(usize::MAX),
+            protocol_short_name(*p),
+        )
+    });
+    present
+}
+
 /// Render the protocol tabs.
 fn render_protocol_tabs<'a>(
     state: &'a OverviewState,
     counts: &HashMap<Protocol, usize>,
 ) -> Element<'a, Message> {
-    let protocols = [
-        Protocol::Sysinfo,
-        Protocol::Snmp,
-        Protocol::Logs,
-        Protocol::Netflow,
-        Protocol::Modbus,
-        Protocol::Gnmi,
-        Protocol::Netlink,
-        Protocol::Netring,
-        Protocol::Opcua,
-    ];
-
-    let tabs: Vec<Element<'a, Message>> = protocols
-        .iter()
-        .filter(|proto| counts.get(proto).copied().unwrap_or(0) > 0)
-        .map(|&proto| {
+    let tabs: Vec<Element<'a, Message>> = tab_protocols(counts)
+        .into_iter()
+        .map(|proto| {
             let count = counts.get(&proto).copied().unwrap_or(0);
             let is_selected = state.selected_protocol == Some(proto);
 
@@ -361,5 +393,56 @@ mod tests {
 
         state.toggle_expanded();
         assert!(state.expanded);
+    }
+    /// #1128: the tab list was a frozen array of nine, and
+    /// `render_protocol_overview` had a match arm for every protocol — so
+    /// eight of those arms were **unreachable code**. `Protocol::Pve =>
+    /// generic_overview(…, "guests")` compiled, was never rendered, and nobody
+    /// noticed for the pve sensor's whole life.
+    ///
+    /// This is the property that makes that unrepeatable: a tab appears for
+    /// any protocol with devices, whether or not anyone remembered to list it.
+    #[test]
+    fn a_protocol_nobody_listed_still_gets_a_tab() {
+        let mut counts = HashMap::new();
+        counts.insert(Protocol::Sysinfo, 3);
+        counts.insert(Protocol::Pve, 2);
+        counts.insert(Protocol::Container, 7);
+        counts.insert(Protocol::Bmc, 1);
+
+        let tabs = tab_protocols(&counts);
+        for p in [Protocol::Pve, Protocol::Container, Protocol::Bmc] {
+            assert!(
+                tabs.contains(&p),
+                "{p:?} has devices and is not in TAB_ORDER — it must still get a tab"
+            );
+        }
+        assert_eq!(tabs.len(), 4);
+    }
+
+    /// The listed ones keep their curated order, and come first.
+    #[test]
+    fn tab_order_is_honoured_and_unlisted_protocols_follow_it() {
+        let mut counts = HashMap::new();
+        counts.insert(Protocol::Netring, 1);
+        counts.insert(Protocol::Sysinfo, 1);
+        counts.insert(Protocol::Pve, 1);
+        counts.insert(Protocol::Bmc, 1);
+
+        let tabs = tab_protocols(&counts);
+        assert_eq!(tabs[0], Protocol::Sysinfo, "TAB_ORDER[0] leads");
+        assert_eq!(tabs[1], Protocol::Netring, "then the later listed one");
+        // The unlisted two follow, in name order — deterministic, so the tab
+        // strip does not reshuffle itself between polls.
+        assert_eq!(&tabs[2..], &[Protocol::Bmc, Protocol::Pve]);
+    }
+
+    /// A protocol with no devices gets no tab, listed or not.
+    #[test]
+    fn a_protocol_with_no_devices_gets_no_tab() {
+        let mut counts = HashMap::new();
+        counts.insert(Protocol::Sysinfo, 1);
+        counts.insert(Protocol::Snmp, 0);
+        assert_eq!(tab_protocols(&counts), vec![Protocol::Sysinfo]);
     }
 }
