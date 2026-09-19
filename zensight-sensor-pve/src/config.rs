@@ -297,13 +297,8 @@ impl PveConfig {
     /// the PVE node name stays where it belongs, as the `node` label on every
     /// series. `host` remains the last resort so this can never return empty.
     pub fn resolved_source(&self) -> String {
-        self.source.clone().unwrap_or_else(|| {
-            hostname::get()
-                .ok()
-                .and_then(|h| h.into_string().ok())
-                .filter(|h| !h.is_empty())
-                .unwrap_or_else(|| self.host.clone())
-        })
+        // One spelling for the whole tree (#1156).
+        zensight_sensor_core::resolved_source(self.source.as_deref())
     }
 
     pub fn base_url(&self) -> String {

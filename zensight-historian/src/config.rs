@@ -186,10 +186,8 @@ impl HistorianSensorConfig {
     /// not a proxy — it observes no device but the host it runs on, and the
     /// series it holds carry their own origins.
     pub fn resolved_source(&self) -> String {
-        hostname::get()
-            .ok()
-            .and_then(|h| h.into_string().ok())
-            .unwrap_or_else(|| "unknown".to_string())
+        // One spelling for the whole tree (#1156).
+        zensight_sensor_core::resolved_source(None)
     }
 }
 

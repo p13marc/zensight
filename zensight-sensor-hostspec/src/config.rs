@@ -63,12 +63,8 @@ pub struct HostspecConfig {
 
 impl HostspecSensorConfig {
     pub fn source(&self) -> String {
-        self.hostspec
-            .source
-            .clone()
-            .filter(|s| !s.is_empty())
-            .or_else(|| hostname::get().ok().and_then(|h| h.into_string().ok()))
-            .unwrap_or_else(|| "unknown".to_string())
+        // One spelling for the whole tree (#1156).
+        zensight_sensor_core::resolved_source(self.hostspec.source.as_deref())
     }
 }
 

@@ -4,6 +4,29 @@ Everything a protocol sensor needs except the protocol itself. A sensor's `main`
 loads config, builds a `SensorRunner`, spawns protocol workers that publish
 `TelemetryPoint`s, and calls `run()`.
 
+## `source` — one spelling for the whole tree (#1156)
+
+`zensight_sensor_core::resolved_source(configured: Option<&str>)` is the only
+way a producer decides what to publish as its `source`. It takes the operator's
+value when there is one, and this host's name otherwise.
+
+It replaced **sixteen copies that disagreed five ways** — see the rustdoc on the
+function for the table. Two of the disagreements were correctness: a configured
+`source: ""` was honoured by fourteen of them, and ten mapped every non-UTF-8
+hostname to `"unknown"`, which merges distinct hosts into one identity.
+
+The rules, in one place:
+
+1. A configured value that is neither empty nor the literal `"auto"` wins,
+   verbatim.
+2. Otherwise this host's name, **lossily decoded** — a mangled name that is
+   still this host's beats a tidy name shared with a stranger.
+3. `"unknown"` only when there is nothing to say at all: no configured source
+   and no readable hostname.
+
+A config that spells "unset" as `"auto"` (netlink, netring, parallax, sysinfo)
+and one that spells it `None` (the rest) both reach the same place.
+
 ## SensorRunner
 
 `runner.rs` — owns the sensor lifecycle:
