@@ -471,6 +471,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **pve: a corosync blip paged for every guest in the cluster** (#1132).
+  **BREAKING for the `pve` keyspace**: a non-shared pool's `{store}` chunk is
+  `{node}-{name}` unconditionally, so a single-node deployment's
+  `storage/local-lvm` becomes `storage/pve-local-lvm`.
+
+  `/cluster/resources` on a node that has lost quorum **still answers**, and
+  reports the guests on the far side of the partition as `status: "unknown"` —
+  which `is_running()` reads as "not running". A ninety-second blip therefore
+  fired a **critical** `guest-not-running` for every VM in the cluster,
+  alongside `cluster-not-quorate`, and none of them had stopped. Quorum was
+  already fetched, already parsed and already in scope at the defect; only
+  `RULE_QUORUM` ever read it.
+
+  Every guest rule is held now when the cluster is not quorate, and a guest on
+  a node the cluster lists as `online: false` is held on its own — guests on
+  nodes that answered are graded as usual in the same sweep. **Holding is two
+  halves**: `grade` declining to fire is not enough, because the poller
+  reconciles every rule every sweep and a fleet-wide reconcile reads "did not
+  fire" as "recovered". The three guest rules reconcile **per node** now, over
+  the nodes the sweep could speak for. `guest/{vmid}/running` is not published
+  at all for a held guest, because a `0` there is this sensor turning "we
+  cannot see it" into "it stopped". A `/cluster/status` read that *failed* is
+  graded as non-quorate rather than as standalone: folding the two together
+  would turn the guard off exactly when the cluster API is the thing that is
+  unwell. This is SNMP's `device_answered` and BMC's `chassis.is_none()`, one
+  API over.
+
+  Two siblings the issue bundled, both on the same sweep:
+
+  - **The storage key stops depending on who answered.** A non-shared pool got
+    the node in its chunk only if *this sweep* saw the name twice — so when
+    node B dropped out, node A's `local-lvm` moved from
+    `storage/pve1-local-lvm` to `storage/local-lvm`, its series restarted
+    under a new name, and the old state document became an LWW ghost nothing
+    would overwrite again. The disambiguator is `shared`, a property of the
+    pool.
+  - **`/cluster/ha/status/current` is a status feed, not a resource list.**
+    Its rows carry a `type`, and taking them wholesale put `quorum`, `lrm` and
+    `master` in the cluster document as HA *services* — three or four phantoms
+    per node that no `ha-manager` command would name. Only `type: "service"`
+    rows are HA resources.
+
+  Both acceptance tests fail on the parent commit: the non-quorate fixture
+  fires `["cluster-not-quorate", "guest-not-running"]` where it must fire only
+  the first, and the offline-node fixture grades a guest on the node that did
+  not answer.
+
 - **probe: `follow_redirects` was documented, wire-carried and read nowhere**
   (#1134). reqwest's redirect policy lives on the **client**; this flag lives
   on the **target**. The poller built one shared client with

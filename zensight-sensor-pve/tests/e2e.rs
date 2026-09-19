@@ -582,9 +582,21 @@ async fn the_hypervisor_contract_end_to_end() {
     };
     assert_eq!(by_subject("guest/140/running").labels["vmid"], "140");
     assert_eq!(by_subject("guest/140/running").labels["name"], "vm-apps");
+    // `pve-local-lvm`, not `local-lvm`: the pool is `shared: 0`, and a
+    // non-shared pool carries its node in the chunk unconditionally (#1132).
+    // It used to depend on whether THIS SWEEP saw the name twice, so the key
+    // of a surviving node's `local-lvm` moved the moment another node dropped
+    // out of the cluster — and its old state document became an LWW ghost.
     assert_eq!(
-        by_subject("storage/local-lvm/used_ratio").labels["storage"],
+        by_subject("storage/pve-local-lvm/used_ratio").labels["storage"],
         "local-lvm"
+    );
+    assert!(
+        !points
+            .iter()
+            .any(|(k, _)| k.starts_with("storage/local-lvm/")),
+        "a non-shared pool must not publish under the bare name, whatever \
+         else this sweep happened to see"
     );
     assert_eq!(
         by_subject("backup/140/size_change_pct").labels["vmid"],
@@ -602,7 +614,7 @@ async fn the_hypervisor_contract_end_to_end() {
         "the container reported no cpu; a 0 would read as idle"
     );
     assert!(
-        seen.get("storage/local-lvm/overcommit_ratio")
+        seen.get("storage/pve-local-lvm/overcommit_ratio")
             .is_some_and(|r| *r > 1.0),
         "{seen:#?}"
     );
