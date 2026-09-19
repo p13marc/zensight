@@ -582,6 +582,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui: three orderings that disagreed with themselves** (#1120). One is the
+  fleet view's, and the other two are the class where a row moves under the
+  cursor.
+
+  **`Skew` sorted below two rows that said nothing.** `severity()` read
+  `Drift 0, Unreadable 1, NoAnswer 2, Skew 3` — while the doc comment two lines
+  above it, and `views.md`, both state that the unestablished poles sort
+  *between* the findings and the clean rows, "they are not verdicts, so they
+  must not outrank one". `Skew` **is** a verdict: the host was asked, it
+  answered, and its registry version disagrees with this build's.
+
+  The cost lands exactly where it hurts: a mid-rollout fleet is when `Skew` is
+  the thing to look at and also when unreachable hosts are common, so the rows
+  an operator needed were pushed off the first screen by rows with no content.
+  The order is `Drift, Skew, Unreadable, NoAnswer, NotAsked, InSync`, and the
+  new test pins the whole table — `rows_sort_worst_first` compared only
+  `Unreadable` against `InSync`, the one pair that was already right.
+
+  **The alert feed's order was not total.** Three copies of a two-term
+  `(severity, timestamp)` key over a `HashMap`, whose iteration order is not
+  the insertion order and differs between processes — so two alerts agreeing on
+  both terms swapped places between renders and a click landed on the row that
+  had just moved. `catalog_incidents` has tiebroken on `id` since it was
+  written. There is now **one named comparator**, `external_order`, used by all
+  three, because three copies of a sort key is how they came to disagree.
+
+  The test asserts **totality** rather than a rendered order, and the reason is
+  worth stating: a rendered order cannot catch this within one process. A
+  `HashMap`'s layout is decided by its contents and its seed, so two maps with
+  the same contents iterate the same way and a stable sort over them agrees
+  whether or not the comparator is total. It is across *runs* that the bug
+  shows, and a total comparator is what makes that impossible by construction.
+
+  **Two historians a millisecond apart left a doubled marker.** `dedup_by`
+  collapses only *adjacent* equal elements, and `dedup_markers` sorted by `ts`
+  before de-duplicating by `uid` — so the two copies of one transition landed
+  either side of a third marker and both survived. Which is precisely the case
+  the function exists for: two historians agree on the uid by construction
+  (#908) and may disagree on the millisecond each recorded it. It collapses on
+  uid order now, then sorts for display.
+
+  All three new tests fail on the parent.
+
 - **gui: an alert that resolved during a blip stayed firing forever, and focus
   mode froze the other forty-nine hosts** (#1116). `AlertsSeed` and the
   catalog's ack / silence / incident seeds only **added**; only `EntitySeed`

@@ -169,12 +169,22 @@ impl FleetStatus {
     /// rows, and that position is the whole ordering argument: they are not
     /// verdicts, so they must not outrank one — and they are not passing
     /// checks, so they must not sink below one either.
+    /// `Skew` is a **finding**, not an unestablished pole (#1120). The host
+    /// was asked, it answered, and its registry version disagrees with this
+    /// build's — that is a verdict, and it used to sort *below* `Unreadable`
+    /// and `NoAnswer`, which are the two rows that said nothing at all.
+    ///
+    /// The practical cost: a mid-rollout fleet is exactly when `Skew` matters,
+    /// and exactly when unreachable hosts are common — so the rows an operator
+    /// needed were pushed off the first screen by rows with no content. The
+    /// paragraph above has stated the right order since the view was written;
+    /// only the table disagreed.
     fn severity(self) -> u8 {
         match self {
             Self::Drift => 0,
-            Self::Unreadable => 1,
-            Self::NoAnswer => 2,
-            Self::Skew => 3,
+            Self::Skew => 1,
+            Self::Unreadable => 2,
+            Self::NoAnswer => 3,
             Self::NotAsked => 4,
             Self::InSync => 5,
         }
@@ -943,6 +953,54 @@ mod tests {
         assert_eq!(rows[0].status, FleetStatus::Unreadable);
         assert_eq!(rows[0].version, "unreadable");
         assert_eq!(rows[1].status, FleetStatus::InSync);
+    }
+
+    /// **A finding outranks an unestablished pole** (#1120).
+    ///
+    /// The doc comment on `severity()` has said so since the view was written:
+    /// the unestablished poles sort *between* the findings and the clean rows,
+    /// because "they are not verdicts, so they must not outrank one". The
+    /// table disagreed — `Skew` was 3, below `Unreadable` at 1 and `NoAnswer`
+    /// at 2.
+    ///
+    /// The cost is worst exactly when it matters: a mid-rollout fleet is when
+    /// `Skew` is the thing to look at, and also when unreachable hosts are
+    /// common, so the rows an operator needed were pushed off the first screen
+    /// by rows with no content at all.
+    ///
+    /// `rows_sort_worst_first` above compares only `Unreadable` against
+    /// `InSync` — the one pair that was already right.
+    #[test]
+    fn a_finding_outranks_a_row_that_said_nothing() {
+        let mut order = [
+            FleetStatus::InSync,
+            FleetStatus::NotAsked,
+            FleetStatus::NoAnswer,
+            FleetStatus::Unreadable,
+            FleetStatus::Skew,
+            FleetStatus::Drift,
+        ];
+        order.sort_by_key(|s| s.severity());
+        assert_eq!(
+            order,
+            [
+                // Findings: asked, answered, and the answer disagrees.
+                FleetStatus::Drift,
+                FleetStatus::Skew,
+                // Unestablished poles: asked, and nothing usable came back.
+                FleetStatus::Unreadable,
+                FleetStatus::NoAnswer,
+                FleetStatus::NotAsked,
+                // Clean.
+                FleetStatus::InSync,
+            ],
+            "the order the doc comment states"
+        );
+        assert!(
+            FleetStatus::Skew.severity() < FleetStatus::NoAnswer.severity(),
+            "the pair from the issue: an answered version disagreement must \
+             outrank a host that answered nothing"
+        );
     }
 
     /// One host's disagreement must stay one host's: diffing per origin is what
