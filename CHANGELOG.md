@@ -590,6 +590,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **gui: one host an hour ahead pinned the freshness indicator at "Live"** —
+  including after every sensor on the fleet had died (#1117).
+  `last_telemetry_ms` is a monotone **max** over publishers' clocks, and
+  `Freshness::compute` does `now_ms.saturating_sub(ts)`. On a point stamped in
+  the future that subtraction is negative, `saturating_sub` floors it at zero,
+  and zero is inside every window.
+
+  A VM resumed from a snapshot, or a box whose NTP never started, is enough —
+  and the probe sensor's `ntp_offset_ms` exists precisely because those are
+  common.
+
+  The same clock fed `DeviceState.last_update`, so it also decided
+  `update_health` and `evict_stale_devices`: a skewed host's devices were
+  permanently healthy and **never evicted**, because the age that decides
+  eviction never arrived.
+
+  `DeviceState` keeps two clocks now. `last_update` is what the **sensor** said
+  and is displayed as "as of"; `last_seen` is when **we** decoded it, and it is
+  what staleness, health and eviction key on. The global indicator splits the
+  same way.
+
+  **Skew is its own indicator, not a modifier of the verdict.** A skewed clock
+  is not staleness — the data is arriving fine — and reporting it as staleness
+  would say the wrong thing about a fleet that is working. What it does mean is
+  that that host's "as of" cannot be compared with any other's, so the bar says
+  "clock skew on N hosts" beside the verdict. Sixty seconds either way:
+  generous enough that ordinary network and scheduling delay never trips it,
+  tight enough that the cases it exists for always do.
+
+  The disagreement is **recorded, not corrected** (`clock_skew_ms`). Silently
+  rewriting a sensor's own timestamp would hide the thing worth knowing.
+
+  The issue's acceptance criterion is
+  `a_point_stamped_in_the_future_does_not_pin_the_verdict`, and it asserts the
+  premise too: a future *sensor* timestamp still saturates, which is exactly
+  why the verdict must not be computed from one.
+
 - **gui: three orderings that disagreed with themselves** (#1120). One is the
   fleet view's, and the other two are the class where a row moves under the
   cursor.

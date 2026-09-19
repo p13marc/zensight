@@ -54,8 +54,31 @@ use crate::view::overview::{OverviewState, overview_section};
 pub struct DeviceState {
     /// Device identifier.
     pub id: DeviceId,
-    /// Last update timestamp (Unix epoch ms).
+    /// The newest **sensor** timestamp seen for this device (Unix epoch ms).
+    ///
+    /// The publisher's clock, and therefore not this process's: it is what the
+    /// device claims about when the reading was taken, shown as "as of". It is
+    /// **not** what staleness is measured against — see
+    /// [`last_seen`](Self::last_seen).
     pub last_update: i64,
+    /// When **this GUI** last decoded a point for this device (Unix epoch ms,
+    /// our clock).
+    ///
+    /// Staleness, health and eviction key on this (#1117). They used to key on
+    /// `last_update`, and `now - last_update` on a host an hour ahead is
+    /// negative: `saturating_sub` floors it at 0, which reads as *fresher than
+    /// possible*. A VM resumed from a snapshot, or a box without NTP — which
+    /// is exactly what the probe sensor's `ntp_offset_ms` exists to find —
+    /// therefore stayed permanently healthy and was **never evicted**, because
+    /// the moment that decides both never arrives.
+    pub last_seen: i64,
+    /// `last_update - last_seen`: how far this device's clock is from ours
+    /// (#1117).
+    ///
+    /// Positive means it is ahead. Recorded rather than corrected: the
+    /// disagreement is a fact about the fleet, and silently rewriting a
+    /// sensor's own timestamp would hide the thing worth knowing.
+    pub clock_skew_ms: i64,
     /// Number of metrics received.
     pub metric_count: usize,
     /// Most recent metric values (metric name -> full telemetry point).
@@ -78,6 +101,8 @@ impl DeviceState {
         Self {
             id,
             last_update: 0,
+            last_seen: 0,
+            clock_skew_ms: 0,
             metric_count: 0,
             metrics: HashMap::new(),
             is_healthy: true,
@@ -88,8 +113,10 @@ impl DeviceState {
     }
 
     /// Update health status based on last update time.
+    /// Staleness is measured from when **we** last heard, not from what the
+    /// sensor said about its own clock (#1117).
     pub fn update_health(&mut self, now: i64, stale_threshold_ms: i64) {
-        self.is_healthy = (now - self.last_update) < stale_threshold_ms;
+        self.is_healthy = (now - self.last_seen) < stale_threshold_ms;
     }
 
     /// Update device status from sensor liveness data.
@@ -160,6 +187,15 @@ pub const SERIES_IDLE_TTL_MS: i64 = 2 * 60 * 60 * 1000;
 /// deployment that is merely large never meets it; one that does has something
 /// wrong upstream, and the refusal counter is how it says so.
 pub const MAX_HOT_SERIES: usize = 40_000;
+
+/// How far a device's clock may sit from this GUI's before it is called skewed
+/// (#1117).
+///
+/// Sixty seconds, in **either** direction. Generous enough that ordinary
+/// network and scheduling delay never trips it, tight enough that the cases
+/// this exists for — a VM resumed from a snapshot, a box whose NTP never
+/// started — always do. Those are minutes-to-hours out, not seconds.
+pub const CLOCK_SKEW_BOUND_MS: i64 = 60_000;
 
 /// Connection state for Zenoh session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -381,7 +417,7 @@ impl DashboardState {
     pub fn evict_stale_devices(&mut self, now: i64, max_age_ms: i64) -> usize {
         let before = self.devices.len();
         self.devices
-            .retain(|_, d| now.saturating_sub(d.last_update) <= max_age_ms);
+            .retain(|_, d| now.saturating_sub(d.last_seen) <= max_age_ms);
         before - self.devices.len()
     }
 
@@ -396,7 +432,7 @@ impl DashboardState {
         let gone: Vec<DeviceId> = self
             .devices
             .iter()
-            .filter(|(_, d)| now.saturating_sub(d.last_update) > max_age_ms)
+            .filter(|(_, d)| now.saturating_sub(d.last_seen) > max_age_ms)
             .map(|(k, _)| k.clone())
             .collect();
         for k in &gone {
@@ -414,6 +450,21 @@ impl DashboardState {
             status
         };
         self.current_page = 0;
+    }
+
+    /// How many devices' clocks disagree with ours by more than
+    /// [`CLOCK_SKEW_BOUND_MS`] (#1117).
+    ///
+    /// Its own indicator, rather than something folded into the freshness
+    /// verdict. A skewed clock is not staleness — the data is arriving fine —
+    /// and reporting it as staleness would say the wrong thing about a fleet
+    /// that is working. What an operator needs to know is that some host's
+    /// "as of" cannot be compared with any other's.
+    pub fn clock_skew_count(&self) -> usize {
+        self.devices
+            .values()
+            .filter(|d| d.clock_skew_ms.abs() > CLOCK_SKEW_BOUND_MS)
+            .count()
     }
 
     /// Count **hosts** by worst-facet status, for the fleet summary bar (#34/#128).
@@ -1618,13 +1669,58 @@ mod tests {
         assert_eq!(state.status_counts(&EntityStore::default()), (0, 0, 1, 0));
     }
 
+    /// A device whose clock is an hour ahead is **evicted on schedule**
+    /// (#1117).
+    ///
+    /// Eviction keyed on the sensor's timestamp, and `now - last_update` on a
+    /// future-stamped device saturates to 0 — so the age that decides never
+    /// arrived and the device was kept for the life of the process, drawn as
+    /// permanently healthy.
+    #[test]
+    fn a_future_stamped_device_is_still_evicted_and_still_goes_stale() {
+        let mut state = DashboardState::default();
+        let id = DeviceId {
+            protocol: zensight_common::Protocol::Sysinfo,
+            origin: "h-aabbccddeeff".into(),
+            source: "skewed01".into(),
+        };
+        let mut d = DeviceState::new(id.clone());
+        // Heard from at t=1_000; the sensor claims an hour later.
+        d.last_seen = 1_000;
+        d.last_update = 1_000 + 3_600_000;
+        d.clock_skew_ms = 3_600_000;
+        d.is_healthy = true;
+        state.devices.insert(id.clone(), d);
+
+        // Stale, because WE have not heard from it.
+        state
+            .devices
+            .get_mut(&id)
+            .unwrap()
+            .update_health(60_000, 30_000);
+        assert!(
+            !state.devices[&id].is_healthy,
+            "a host an hour ahead is not permanently healthy"
+        );
+
+        // And skewed, which is its own statement rather than a modifier of
+        // staleness.
+        assert_eq!(state.clock_skew_count(), 1);
+
+        // And evicted on schedule.
+        assert_eq!(state.evict_stale_devices(60_000, 55_000), 1);
+        assert!(state.devices.is_empty());
+    }
+
     #[test]
     fn test_evict_stale_devices() {
         let mut state = DashboardState::default();
         let mut fresh = device_with_status("fresh", DeviceStatus::Online);
-        fresh.last_update = 10_000;
+        // `last_seen`, not `last_update` (#1117): eviction is measured from
+        // when WE heard, not from what the sensor said about its own clock.
+        fresh.last_seen = 10_000;
         let mut old = device_with_status("old", DeviceStatus::Offline);
-        old.last_update = 1_000;
+        old.last_seen = 1_000;
         state.devices.insert(fresh.id.clone(), fresh);
         state.devices.insert(old.id.clone(), old);
 

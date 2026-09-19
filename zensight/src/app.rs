@@ -375,6 +375,9 @@ pub struct ZenSight {
     /// the global Live/Stale/Paused freshness indicator (#23). `None` until the
     /// first point arrives.
     last_telemetry_ms: Option<i64>,
+    /// Our own clock when a point was last decoded (#1117) — what the
+    /// Live/Stale verdict is computed from. See the comment at the assignment.
+    last_receive_ms: Option<i64>,
     /// Global cross-device metric search panel state (#27).
     global_search: crate::view::search::GlobalSearchState,
     /// Command palette overlay state (#28).
@@ -614,6 +617,7 @@ impl ZenSight {
             flushes_since_prune: 0,
             // Demo mode pre-loads mock points; treat the feed as fresh on boot.
             last_telemetry_ms: if demo_mode { Some(now_ms()) } else { None },
+            last_receive_ms: if demo_mode { Some(now_ms()) } else { None },
             global_search: crate::view::search::GlobalSearchState::default(),
             command_palette: crate::view::palette::CommandPaletteState::default(),
             help_open: false,
@@ -2658,6 +2662,7 @@ impl ZenSight {
                 // The feed is paused now; drop the freshness anchor so the
                 // indicator reads "Paused", not a stale "as of" from before.
                 self.last_telemetry_ms = None;
+                self.last_receive_ms = None;
             }
 
             Message::SensorOnline(protocol, source) => {
@@ -9100,6 +9105,8 @@ impl ZenSight {
             },
             self.scrub_truncated,
             self.dashboard.reconnected_at,
+            self.last_receive_ms,
+            self.dashboard.clock_skew_count(),
             main_view,
         );
 
@@ -9531,11 +9538,22 @@ impl ZenSight {
             && (point.metric.ends_with("/ip_ingress_bps")
                 || point.metric.ends_with("/ip_egress_bps"));
 
-        // Track the newest point for the global freshness verdict (#23).
+        // Two clocks for the global indicator, too (#1117).
+        //
+        // `last_telemetry_ms` is the newest thing a SENSOR said, and it is what
+        // the "as of" clock shows. It is a monotone max over publishers'
+        // clocks, so one host an hour ahead pins it — which is exactly why it
+        // must not decide the verdict.
+        //
+        // `last_receive_ms` is our own clock at decode, and it is what
+        // Live/Stale is computed from. Before this, `now - last_telemetry_ms`
+        // on a future-stamped point saturated to 0 and read as **Live**,
+        // including after every sensor on the fleet had died.
         self.last_telemetry_ms = Some(
             self.last_telemetry_ms
                 .map_or(point.timestamp, |prev| prev.max(point.timestamp)),
         );
+        self.last_receive_ms = Some(now_ms());
 
         // Syslog/journald lines feed the rolling buffer behind the Logs view.
         // Unlike per-metric device state (which keeps only the latest point per
@@ -9579,7 +9597,13 @@ impl ZenSight {
             .entry(device_id.clone())
             .or_insert_with(|| DeviceState::new(device_id.clone()));
 
+        // Two clocks, deliberately (#1117). `last_update` is what the sensor
+        // said; `last_seen` is when we heard it, and it is what staleness,
+        // health and eviction key on.
+        let received_ms = now_ms();
         device_state.last_update = point.timestamp;
+        device_state.last_seen = received_ms;
+        device_state.clock_skew_ms = point.timestamp - received_ms;
         device_state.is_healthy = true;
         // Per-line log events (#104) use unique `events/<uid>` metrics — keeping
         // the latest point per metric would grow the device map without bound (one

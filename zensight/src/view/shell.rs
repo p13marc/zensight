@@ -220,9 +220,14 @@ fn top_bar<'a>(
     connection: ConnectionState,
     alert_count: usize,
     last_update_ms: Option<i64>,
+    // Our own clock at the last decode (#1117) — what Live/Stale is computed
+    // from, where `last_update_ms` is the sensor's and is only ever displayed.
+    last_receive_ms: Option<i64>,
     now_ms: i64,
     // When this session last RE-connected (#1116), or `None`.
     reconnected_at: Option<i64>,
+    // Devices whose clock disagrees with ours (#1117).
+    skewed_hosts: usize,
 ) -> Element<'a, Message> {
     let spacer = container(text("")).width(Length::Fill);
 
@@ -247,8 +252,10 @@ fn top_bar<'a>(
     right = right.push(crate::view::freshness::freshness_indicator(
         connected,
         last_update_ms,
+        last_receive_ms,
         now_ms,
         reconnected_at,
+        skewed_hosts,
     ));
     // Keyboard-shortcuts help (#28); also bound to "?".
     right = right.push(
@@ -294,6 +301,10 @@ pub fn app_shell<'a>(
     scrub_truncated: bool,
     // When this session last RE-connected (#1116), or `None`.
     reconnected_at: Option<i64>,
+    // Our own clock at the last decode, and how many devices' clocks disagree
+    // with it (#1117).
+    last_receive_ms: Option<i64>,
+    skewed_hosts: usize,
     content: Element<'a, Message>,
 ) -> Element<'a, Message> {
     let mut stack = column![top_bar(
@@ -302,8 +313,10 @@ pub fn app_shell<'a>(
         connection,
         alert_count,
         last_update_ms,
+        last_receive_ms,
         now_ms,
         reconnected_at,
+        skewed_hosts,
     )];
     if let Some(host) = focused_host {
         stack = stack.push(focus_banner(host));

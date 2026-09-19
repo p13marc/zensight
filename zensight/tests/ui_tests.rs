@@ -282,12 +282,18 @@ fn shell_ui() -> iced_test::Simulator<'static, Message> {
         None,
         false,
         None,
+        None,
+        0,
         content,
     ))
 }
 
 /// The shell top bar shows the global freshness verdict. Connected with a
-/// recent point reads "Live"; disconnected reads "Paused".
+/// recently **received** point reads "Live"; disconnected reads "Paused".
+///
+/// The receipt clock is what decides it since #1117 — the sensor's own
+/// timestamp is displayed as "as of" and nothing more, because a host an hour
+/// ahead used to pin this at "Live" for the whole fleet.
 #[test]
 fn test_shell_shows_freshness_live() {
     let content = iced::widget::text("content").into();
@@ -297,14 +303,48 @@ fn test_shell_shows_freshness_live() {
         ConnectionState::Connected,
         0,
         Some(10_000),
-        12_000, // 2s after last point => Live
+        12_000, // 2s after we received => Live
         None,
         None,
         false,
         None,
+        Some(10_000), // received at 10_000, by OUR clock
+        0,
         content,
     ));
     assert!(ui.find("Live").is_ok());
+}
+
+/// **A sensor an hour ahead does not read "Live"** (#1117).
+///
+/// Same bar, same moment, same connected session — the only difference is that
+/// the point arrived long ago and its publisher's clock says otherwise. Before
+/// #1117 the verdict was computed from that publisher's clock, `now - ts` was
+/// negative, `saturating_sub` floored it at zero, and the bar read "Live".
+#[test]
+fn test_shell_freshness_ignores_a_future_sensor_clock() {
+    let now = 1_700_000_000_000;
+    let content = iced::widget::text("content").into();
+    let mut ui = simulator(zensight::view::shell::app_shell(
+        CurrentView::Dashboard,
+        None,
+        ConnectionState::Connected,
+        0,
+        Some(now + 3_600_000), // the sensor claims an hour from now
+        now,
+        None,
+        None,
+        false,
+        None,
+        Some(now - 60_000), // but we last heard a minute ago
+        2,                  // and two hosts' clocks disagree with ours
+        content,
+    ));
+    assert!(ui.find("Stale").is_ok(), "silence is silence");
+    assert!(
+        ui.find("· clock skew on 2 hosts").is_ok(),
+        "and the skew is its own statement, not a modifier of the verdict"
+    );
 }
 
 #[test]
@@ -321,6 +361,8 @@ fn test_shell_shows_freshness_paused() {
         None,
         false,
         None,
+        None,
+        0,
         content,
     ));
     assert!(ui.find("Paused").is_ok());
@@ -470,6 +512,8 @@ fn test_focus_mode_offers_a_way_out() {
         None,
         false,
         None,
+        None,
+        0,
         content,
     ));
     assert!(shell.find("Focused on server01").is_ok());
@@ -4245,6 +4289,8 @@ fn test_nav_opens_logs() {
         None,
         false,
         None,
+        None,
+        0,
         inner.into(),
     ));
     let _ = ui.click("Logs");
@@ -4269,6 +4315,8 @@ fn test_nav_opens_incidents() {
         None,
         false,
         None,
+        None,
+        0,
         inner.into(),
     ));
     let _ = ui.click("Incidents");
@@ -4293,6 +4341,8 @@ fn test_nav_opens_inventory() {
         None,
         false,
         None,
+        None,
+        0,
         inner.into(),
     ));
     let _ = ui.click("Inventory");
@@ -7771,6 +7821,8 @@ fn test_time_cursor_strip_announces_the_mode_and_returns_to_live() {
         Some(now - 2 * 3_600_000), // two hours back
         false,
         None,
+        None,
+        0,
         content,
     ));
     assert!(
@@ -7807,6 +7859,8 @@ fn test_no_time_cursor_strip_when_live() {
         None,
         false,
         None,
+        None,
+        0,
         content,
     ));
     assert!(
@@ -7832,6 +7886,8 @@ fn test_a_truncated_scrub_window_says_so() {
         Some(now - 3_600_000),
         true,
         None,
+        None,
+        0,
         content,
     ));
     assert!(

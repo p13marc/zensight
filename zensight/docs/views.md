@@ -87,6 +87,41 @@ it were current is the failure this whole crate is arranged against. The
 re-declared subscription re-seeds immediately, so the host in scope fills in at
 once.
 
+## The freshness verdict is ours, the "as of" is theirs (#1117)
+
+The top bar carries two clocks and they must not be confused.
+
+| | whose clock | what it decides |
+|---|---|---|
+| **as of HH:MM:SS** | the **sensor's** — a monotone max over publishers | nothing; it is displayed |
+| **Live / Stale** | **ours**, at decode | the verdict, and device health and eviction |
+
+The verdict used to be computed from the sensor's timestamp, and the arithmetic
+is why that could not work: `now - ts` on a point stamped *in the future* is
+negative, and `saturating_sub` floors it at zero — which is inside every
+window. So **one** host an hour ahead pinned the indicator at "Live", and it
+stayed pinned after every sensor on the fleet had died. A VM resumed from a
+snapshot, or a box whose NTP never started, is enough; the probe sensor's
+`ntp_offset_ms` exists precisely because those are common.
+
+The same clock fed `DeviceState.last_update`, so a skewed host's devices were
+permanently healthy and **never evicted** — the age that decides eviction never
+arrived. `DeviceState` keeps both now: `last_update` is what the sensor said and
+is shown as "as of"; `last_seen` is when we heard it and is what staleness,
+health and eviction key on.
+
+**Skew is its own indicator, not a modifier of the verdict.** A skewed clock is
+not staleness — the data is arriving fine — and reporting it as staleness would
+say the wrong thing about a fleet that is working. What it does mean is that
+that host's "as of" cannot be compared with any other's, so the bar says "clock
+skew on N hosts" beside the verdict. The bound is sixty seconds in either
+direction: generous enough that ordinary network and scheduling delay never
+trips it, tight enough that the cases it exists for — minutes to hours out —
+always do.
+
+The disagreement is **recorded, not corrected** (`DeviceState.clock_skew_ms`).
+Silently rewriting a sensor's own timestamp would hide the thing worth knowing.
+
 ## Reconnect reconciles (#1116)
 
 A seed is a **snapshot of a class**, so it replaces one.

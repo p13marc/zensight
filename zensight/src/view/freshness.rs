@@ -40,11 +40,22 @@ impl Freshness {
     /// - Not connected ⇒ `Paused` (honest: we are not receiving anything).
     /// - Connected, never received anything ⇒ `Stale` (nothing to be live about).
     /// - Connected, last point within the live window ⇒ `Live`, else `Stale`.
-    pub fn compute(connected: bool, last_update_ms: Option<i64>, now_ms: i64) -> Self {
+    ///
+    /// `last_receive_ms` is **this process's** clock at decode, never a
+    /// sensor's timestamp (#1117).
+    ///
+    /// `saturating_sub` is what made the distinction load-bearing: on a point
+    /// stamped in the future the subtraction floors at 0, which reads as
+    /// *fresher than possible* — so a single host an hour ahead pinned the
+    /// indicator at **Live**, including after every sensor on the fleet had
+    /// died. A VM resumed from a snapshot or a box without NTP is enough, and
+    /// the probe sensor's `ntp_offset_ms` exists precisely because those are
+    /// common.
+    pub fn compute(connected: bool, last_receive_ms: Option<i64>, now_ms: i64) -> Self {
         if !connected {
             return Freshness::Paused;
         }
-        match last_update_ms {
+        match last_receive_ms {
             Some(ts) if now_ms.saturating_sub(ts) <= LIVE_WINDOW_MS => Freshness::Live,
             _ => Freshness::Stale,
         }
@@ -112,13 +123,19 @@ pub fn age_string(age_ms: i64) -> String {
 /// that is always on says nothing.
 const RECONNECT_NOTICE_MS: i64 = 2 * 60 * 1000;
 
+#[allow(clippy::too_many_arguments)]
 pub fn freshness_indicator<'a>(
     connected: bool,
+    // The newest SENSOR timestamp, for the "as of" clock.
     last_update_ms: Option<i64>,
+    // OUR clock at the last decode, for the verdict (#1117).
+    last_receive_ms: Option<i64>,
     now_ms: i64,
     reconnected_at: Option<i64>,
+    // How many devices' clocks disagree with ours (#1117).
+    skewed_hosts: usize,
 ) -> Element<'a, Message> {
-    let verdict = Freshness::compute(connected, last_update_ms, now_ms);
+    let verdict = Freshness::compute(connected, last_receive_ms, now_ms);
     let dot = text("\u{25CF}") // ● filled circle — redundant with the label, never color-alone.
         .size(font::CAPTION)
         .style(move |theme: &Theme| text::Style {
@@ -159,6 +176,27 @@ pub fn freshness_indicator<'a>(
         );
     }
 
+    // Clock skew is its own indicator, not a modifier of the verdict (#1117).
+    // A skewed clock is not staleness — the data is arriving fine — and
+    // reporting it as staleness would say the wrong thing about a fleet that
+    // is working. What it does mean is that some host's "as of" cannot be
+    // compared with any other's.
+    if skewed_hosts > 0 {
+        let label = if skewed_hosts == 1 {
+            "· clock skew on 1 host".to_string()
+        } else {
+            format!("· clock skew on {skewed_hosts} hosts")
+        };
+        content =
+            content.push(
+                text(label)
+                    .size(font::CAPTION)
+                    .style(|theme: &Theme| text::Style {
+                        color: Some(theme::colors(theme).warning()),
+                    }),
+            );
+    }
+
     content.into()
 }
 
@@ -189,6 +227,43 @@ pub fn age_label<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The acceptance criterion** (#1117): a point stamped an hour in the
+    /// future, then silence, goes Stale after ten seconds.
+    ///
+    /// It did not, and the arithmetic is the whole reason: `now - ts` on a
+    /// future timestamp is negative, `saturating_sub` floors it at 0, and 0 is
+    /// inside every window — so the indicator read **Live**. One host resumed
+    /// from a snapshot, or one box whose NTP never started, pinned it for the
+    /// whole fleet, and it stayed pinned after every sensor had died.
+    #[test]
+    fn a_point_stamped_in_the_future_does_not_pin_the_verdict() {
+        let now = 1_700_000_000_000;
+        let an_hour_ahead = now + 3_600_000;
+
+        // The premise, so the test does not merely restate the fix: the
+        // sensor's own clock still saturates the way it always did.
+        assert_eq!(
+            Freshness::compute(true, Some(an_hour_ahead), now),
+            Freshness::Live,
+            "a future SENSOR timestamp still reads Live — which is why the \
+             verdict must not be computed from one"
+        );
+
+        // What the verdict is computed from now: our clock at decode. The
+        // point arrived, then nothing for eleven seconds.
+        let received = now;
+        assert_eq!(
+            Freshness::compute(true, Some(received), now + 11_000),
+            Freshness::Stale,
+            "silence is silence, whatever the publisher's clock claims"
+        );
+        assert_eq!(
+            Freshness::compute(true, Some(received), now + 5_000),
+            Freshness::Live,
+            "and inside the window it is still Live"
+        );
+    }
 
     #[test]
     fn paused_when_disconnected() {
