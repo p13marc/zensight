@@ -588,10 +588,35 @@ impl AlertsState {
     /// rule engine, counting alerts that existed only in this process. The
     /// badge it feeds means more now, not less: it counts what the *fleet* is
     /// telling this GUI, which is the only alerting there is.
+    /// Firing, not acknowledged, **and not silenced** (#1121).
+    ///
+    /// There used to be two of these. This one ignored silences and fed the
+    /// Alerts page header; `external_count` honoured them and fed the nav
+    /// badge — so muting a noisy source dropped the badge to 3 while the
+    /// header over the same list still read "7 unacknowledged". Two numbers
+    /// for one question is worse than either answer.
+    ///
+    /// `external_count` is this function; it is kept as the name the nav badge
+    /// has always called.
     pub fn unacknowledged_external(&self) -> usize {
+        let now = now_ms();
         self.external
             .keys()
-            .filter(|k| !self.is_external_acked(k))
+            .filter(|k| !self.is_external_acked(k) && !self.is_silenced_alert(k, now))
+            .count()
+    }
+
+    /// Firing and not acknowledged, but **silenced** — the ones the count
+    /// above leaves out (#1121).
+    ///
+    /// Shown beside it rather than folded into it. A silence is an operator's
+    /// deliberate act, and a header that simply got smaller after one would
+    /// read as the problem going away.
+    pub fn silenced_unacknowledged(&self) -> usize {
+        let now = now_ms();
+        self.external
+            .keys()
+            .filter(|k| !self.is_external_acked(k) && self.is_silenced_alert(k, now))
             .count()
     }
 
@@ -825,12 +850,11 @@ impl AlertsState {
     }
 
     /// Count of *un-acknowledged*, *non-silenced* firing external alerts (badge).
+    /// The nav badge's number, which is
+    /// [`unacknowledged_external`](Self::unacknowledged_external) — one
+    /// function, one number (#1121).
     pub fn external_count(&self) -> usize {
-        let now = now_ms();
-        self.external
-            .keys()
-            .filter(|k| !self.is_external_acked(k) && !self.is_silenced_alert(k, now))
-            .count()
+        self.unacknowledged_external()
     }
 }
 
@@ -874,14 +898,20 @@ fn render_header(state: &AlertsState) -> Element<'_, Message> {
     .align_y(Alignment::Center);
 
     let unacked = state.unacknowledged_external();
-    let unack_badge: Element<'_, Message> = if unacked > 0 {
+    let silenced = state.silenced_unacknowledged();
+    // The silenced count rides beside the number rather than inside it
+    // (#1121): a silence is an operator's deliberate act, and a header that
+    // simply got smaller after one would read as the problem going away.
+    let unack_badge: Element<'_, Message> = if unacked > 0 || silenced > 0 {
+        let mut label = format!("{unacked} unacknowledged");
+        if silenced > 0 {
+            label.push_str(&format!(" ({silenced} silenced)"));
+        }
         row![
             icons::status_warning(IconSize::Small),
-            text(format!("{unacked} unacknowledged"))
-                .size(14)
-                .style(|theme: &Theme| text::Style {
-                    color: Some(crate::view::theme::colors(theme).warning()),
-                })
+            text(label).size(14).style(|theme: &Theme| text::Style {
+                color: Some(crate::view::theme::colors(theme).warning()),
+            })
         ]
         .spacing(5)
         .align_y(Alignment::Center)
@@ -1516,6 +1546,62 @@ const MAX_ALERT_MESSAGE_LEN: usize = 60;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **One number, not two** (#1121).
+    ///
+    /// `external_count` (nav badge) excluded silenced alerts and
+    /// `unacknowledged_external` (page header) did not — so muting a noisy
+    /// source dropped the badge to 3 while the header over the same list still
+    /// read "7 unacknowledged". Two numbers for one question is worse than
+    /// either answer.
+    #[test]
+    fn the_badge_and_the_header_count_the_same_thing() {
+        let mut state = AlertsState::default();
+        let alert = |source: &str| {
+            zensight_common::Alert::new(
+                source,
+                Protocol::Sysinfo,
+                zensight_common::AlertKind::Expectation,
+                "disk-full",
+                zensight_common::AlertSeverity::Critical,
+                format!("{source} is full"),
+            )
+        };
+        for s in ["web01", "web02", "noisy01"] {
+            state.ingest_external_from(Some("h-aabbccddeeff".into()), alert(s));
+        }
+        assert_eq!(state.unacknowledged_external(), 3);
+        assert_eq!(state.external_count(), 3);
+        assert_eq!(state.silenced_unacknowledged(), 0);
+
+        // Mute the noisy one.
+        let now = now_ms();
+        state.set_silences(vec![zensight_common::silence::Silence {
+            id: "s1".into(),
+            matchers: vec![zensight_common::silence::Matcher {
+                name: "source".into(),
+                op: zensight_common::silence::MatchOp::default(),
+                value: "noisy01".into(),
+            }],
+            starts_at: now - 1_000,
+            ends_at: now + 3_600_000,
+            by: "test".into(),
+            note: String::new(),
+        }]);
+
+        assert_eq!(
+            state.unacknowledged_external(),
+            state.external_count(),
+            "the header and the badge are one function now"
+        );
+        assert_eq!(state.unacknowledged_external(), 2, "the muted one is out");
+        assert_eq!(
+            state.silenced_unacknowledged(),
+            1,
+            "and it is still counted, beside the number rather than inside it \
+             — a silence is a deliberate act, not the problem going away"
+        );
+    }
 
     /// **The external order is total** (#1120).
     ///

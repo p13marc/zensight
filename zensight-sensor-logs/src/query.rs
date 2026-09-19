@@ -116,13 +116,15 @@ pub async fn run_events(
 
     while let Ok(query) = queryable.recv_async().await {
         let params = query.parameters();
+        // Percent-decoded (#1122). Zenoh's `Parameters` splits on `;` and `=`
+        // and does not decode, so a caller that did not encode broke the
+        // grammar and one that did reached the matcher as `foo%20bar`. A value
+        // with no `%` decodes to itself, so an older caller is unaffected.
+        let text_param = |name: &str| params.get(name).map(zensight_common::percent_decode);
         let since = params.get("since").and_then(|v| v.parse::<i64>().ok());
         // v1 (RFC 05 §5): `source=` filters the observed device (a central
         // receiver holds many sources); `host=` accepted as the legacy alias.
-        let host = params
-            .get("source")
-            .or_else(|| params.get("host"))
-            .map(str::to_string);
+        let host = text_param("source").or_else(|| text_param("host"));
         // `limit=` is the paginated alias of `max=`.
         let max = params
             .get("max")
@@ -135,17 +137,24 @@ pub async fn run_events(
 
         let from = params.get("from").and_then(|v| v.parse::<i64>().ok());
         let to = params.get("to").and_then(|v| v.parse::<i64>().ok());
-        let after_uid = params.get("after_uid").map(str::to_string);
+        let after_uid = text_param("after_uid");
         let durable_query = from.is_some() || to.is_some() || after_uid.is_some();
 
         // Content-search selectors (#553): compile once per query. A bad/oversized
         // regex is rejected here rather than pinning a core.
+        let (pattern, severity_min, unit, app, facility) = (
+            text_param("pattern"),
+            text_param("severity_min"),
+            text_param("unit"),
+            text_param("app"),
+            text_param("facility"),
+        );
         let matcher = match crate::search::LogMatcher::new(
-            params.get("pattern"),
-            params.get("severity_min"),
-            params.get("unit"),
-            params.get("app"),
-            params.get("facility"),
+            pattern.as_deref(),
+            severity_min.as_deref(),
+            unit.as_deref(),
+            app.as_deref(),
+            facility.as_deref(),
         ) {
             Ok(m) => m,
             Err(e) => {

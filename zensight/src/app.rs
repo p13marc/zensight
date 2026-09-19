@@ -9427,12 +9427,22 @@ impl ZenSight {
         }
         // Push the active message filter to the sensor (#554/#553): it filters
         // server-side, so more matching lines fit under the reply cap and the
-        // depth isn't limited to what the client already buffered. Skip values
-        // carrying a `;`/`?` (they'd break Zenoh's `Parameters` grammar) — those
-        // still filter locally.
+        // depth isn't limited to what the client already buffered.
+        //
+        // **Encoded** (#1122). It used to go in raw, with a `;`/`?` merely
+        // skipped: so a space, `=`, `#` or `&` went straight into the
+        // selector, and a pattern carrying `;` silently fell back to
+        // client-side filtering over `LOG_FETCH_MAX` rows with nothing on
+        // screen to say so — a search that looked like it was scanning history
+        // and was scanning five hundred lines. `urlencode` existed for exactly
+        // this and was used only by the ack path.
+        //
+        // The sensor percent-decodes since #1122; a value with no `%` decodes
+        // to itself, so this is safe against an older sensor for every pattern
+        // that worked before.
         let pattern = self.syslog_filter.message_filter.trim();
-        if !pattern.is_empty() && !pattern.contains([';', '?']) {
-            selector.push_str(&format!(";pattern={pattern}"));
+        if !pattern.is_empty() {
+            selector.push_str(&format!(";pattern={}", urlencode(pattern)));
         }
         if let Some(from) = q.from {
             selector.push_str(&format!(";from={from}"));
@@ -9441,7 +9451,10 @@ impl ZenSight {
             selector.push_str(&format!(";to={to}"));
         }
         if let Some(cursor) = &q.after_uid {
-            selector.push_str(&format!(";after_uid={cursor}"));
+            // A uid is `<13 digits><12 digits>` so it needs no encoding —
+            // encoded anyway, because "this one happens not to need it" is how
+            // the pattern above came to be raw.
+            selector.push_str(&format!(";after_uid={}", urlencode(cursor)));
         }
         selector
     }
@@ -10683,12 +10696,29 @@ mod log_fetch_tests {
         let filtered = a.log_events_selector(&LogQuery::default());
         assert!(filtered.contains("pattern=timeout"));
 
-        // ...unless it carries `;`/`?`, which would break the Parameters
-        // grammar — then it filters locally only.
-        a.syslog_filter
-            .set_message_filter("5\\d\\d?;drop".to_string());
-        let unsafe_pattern = a.log_events_selector(&LogQuery::default());
-        assert!(!unsafe_pattern.contains("pattern="), "{unsafe_pattern}");
+        // ...**including** one carrying `;`/`?`, since #1122. It used to be
+        // dropped — which meant the search silently fell back to client-side
+        // filtering over `LOG_FETCH_MAX` rows, with nothing on screen to say
+        // that "search history" had become "search the last five hundred
+        // lines". It is percent-encoded now, and the sensor decodes it.
+        let pattern = "5\\d\\d?;drop";
+        a.syslog_filter.set_message_filter(pattern.to_string());
+        let encoded = a.log_events_selector(&LogQuery::default());
+        assert!(encoded.contains("pattern="), "{encoded}");
+        assert!(
+            !encoded.contains(";drop"),
+            "the `;` must not reach the Parameters grammar unescaped: {encoded}"
+        );
+        // And it round-trips: the sensor reads it back as what was typed.
+        let sent = encoded
+            .split(";pattern=")
+            .nth(1)
+            .expect("the parameter is there");
+        assert_eq!(
+            zensight_common::percent_decode(sent),
+            pattern,
+            "what the sensor decodes is what the operator typed"
+        );
 
         // Every fetch is capped.
         assert!(live.contains(&format!("max={LOG_FETCH_MAX}")));
@@ -12086,16 +12116,12 @@ fn adopt_name(device: &zensight_common::DiscoveredDevice) -> String {
 ///
 /// A selector's parameters are `;`-separated `k=v` pairs, so a value carrying
 /// `;`, `=`, `?` or a space would silently split into something else. An
-/// operator's name and note are exactly the values that can contain those.
+/// operator's name and note are exactly the values that can contain those —
+/// and so is a log search pattern, which went in raw until #1122.
+///
+/// One table, shared with the decoder the sensors read through
+/// (`zensight_common::percent_decode`): an encoder and a decoder that disagree
+/// about which characters are unreserved is worse than neither.
 fn urlencode(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    for b in v.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            _ => out.push_str(&format!("%{b:02X}")),
-        }
-    }
-    out
+    zensight_common::percent_encode(v)
 }
