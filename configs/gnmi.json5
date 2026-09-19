@@ -72,6 +72,10 @@
         // TLS settings (optional)
         tls: {
           enabled: false,
+          // skip_verify is REFUSED at startup when tls.enabled is true
+          // (#1137): it used to log a warning and verify the certificate
+          // anyway. For a device with a self-signed certificate, point
+          // ca_cert at that certificate — it works as its own CA.
           skip_verify: false,
           // ca_cert: "/path/to/ca.crt",
           // client_cert: "/path/to/client.crt",
