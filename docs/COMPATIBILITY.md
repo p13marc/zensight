@@ -21,21 +21,68 @@ named. Where it is only a habit, this page says so rather than implying more.
 | **`alert_key` derivation** | Normative RFC 11 §3.1, computed by `zenkey::alert::alert_key`. Origin is never hashed in; host-scoped labels are excluded before hashing | **Stable.** If it ever moves, the release carries the state sweep in [RELEASING.md](../RELEASING.md#migration-re-keying-the-alert-state-on-upgrade-737). |
 | **The `@desired` never-list** | `zensight-common/src/desired.rs` — a lint over every fragment, plus the structural defence that a reconciler only deserializes its own sentinel's config type | **Stable constraint.** No desired document may carry a secret, or anything a sensor needs to *reach the bus*: endpoints, TLS material, the namespace. One bad publish must never lock a fleet out of its own supervision. |
 | **Exported Prometheus / OTel series names** | `build_metric_name` + the semconv table. Nothing pins them | **May break with a minor**, with a rename table in the CHANGELOG. It has happened twice (logs in 0.8.0, SNMP's 49 names in 0.11.0). Dashboards and recording rules are yours to update. |
-| **Config file shapes** | JSON5, parsed with `serde`. No file version, no schema version | **May break with a minor.** See the hazard below. |
+| **Config file shapes** | JSON5, loaded through `SensorConfig::parse_strict` — `serde_ignored` over the whole document, `zenoh` exempt (#1150). No file version, no schema version | **May break with a minor**, but never in silence: an undeclared key is a startup refusal naming its full path, and `--check-config` tells you before the deploy. See the hazard below. |
 | **The GUI's and the historian's local store** | `zensight-store`'s `SCHEMA_VERSION`; a mismatch moves the file aside and starts fresh, and never migrates — through `PersistentStore::open_or_move_aside`, which both callers now use (#1061) | **Explicitly not stable.** It is a cache. The fleet history the GUI's copy shadows lives in the historian; the historian's own copy shadows the live bus. A bump costs one restart's history, not durability from then on. |
 | **Rust crate APIs** | Every crate is `publish = false`; there is no crates.io publish in the pipeline | **Not a public surface at all.** Depend on the bus, not on the types. |
 
-### The config hazard worth stating out loud
+### The config hazard, and the half of it that is closed
 
-Nothing in the workspace sets `serde(deny_unknown_fields)` except two call sites that
-needed it. Combined with `#[serde(default)]` everywhere, that means:
+Every config a producer, exporter or service loads goes through
+`SensorConfig::parse_strict` (#1150). It collects **every** key no struct
+declares, by full dotted path, in one pass:
 
-> **A setting that has been removed still loads.** It does not error, it does not warn — it
-> simply stops being honoured.
+> **A key nothing declares is a startup refusal**, naming each one, before any
+> session is opened. A misspelled `probe.poll_interval_sec` used to parse clean
+> and take the Rust default on a production host.
 
-So a config that "still works" after an upgrade is not evidence that nothing changed. Read
-the CHANGELOG's `### Removed` entries on a minor bump; that is the only place a dropped
-setting is announced.
+```
+unknown config key(s): probe.poll_interval_sec, snmp.devices.0.comunity.
+Fix the typo, or set allow_unknown_fields: true to ignore (mixed-version fleets).
+```
+
+This is `serde_ignored`, **not** `serde(deny_unknown_fields)`, and the
+difference is the point: `deny_unknown_fields` errors at the first struct to see
+a stray key, so the message names the field but not where it sits, and it aborts
+before a collector could run — which rules out both the list above and the
+escape hatch below. The mechanism is `zensight-sensor-logs`' (#547), lifted into
+`zensight-sensor-core` so every producer has it rather than one.
+
+Two exemptions, both deliberate:
+
+- **the `zenoh` block is not checked.** It is the one block a newer participant
+  must be able to hand to an older one mid-rollout; refusing an unknown
+  transport knob would turn a staged upgrade into an outage;
+- **`allow_unknown_fields: true`** downgrades the refusal to one `warn!` naming
+  the keys, for a mixed-version fleet sharing one file. It is read off the raw
+  tree, so a config struct does not have to declare it to honour it.
+
+Two consequences follow, and both are load-bearing:
+
+- **A removed setting must keep a shim for one minor.** Dropping the field
+  outright turns an upgrade into a startup failure on every host that still
+  carries the key, which is worse than the silence it replaced. The rule is the
+  deprecation window below: keep the field, log the deprecation at startup
+  naming what to move to, remove it in `0.N+2`.
+- **This refuses what is *extra*, not what is *missing*.** A key that was never
+  in the shipped config still parses clean and takes the Rust default — which is
+  how `sysinfo`'s `temperatures` and `power` stayed dark for months. The
+  per-crate "the shipped config physically contains this key" tests walk the raw
+  tree for exactly that reason, and they stay.
+
+Run `--check-config` before a deploy. Every sensor, both exporters, the
+correlator, the historian and `zensight-desired` accept it: it parses, validates
+and exits, opening no session and joining no fleet, so a deploy script can gate
+on the exit status.
+
+```bash
+zensight-sensor-snmp --config /etc/zensight/snmp.json5 --check-config
+# config ok: /etc/zensight/snmp.json5
+```
+
+So a config that "still works" after an upgrade is still not evidence that
+nothing changed — a *present* key that stopped being honoured is now refused,
+but a key you never set is not. Read the CHANGELOG's `### Removed` entries on a
+minor bump.
 
 ---
 

@@ -15,6 +15,15 @@ use zensight_sensor_container::upstream::UpstreamChecker;
 async fn main() -> Result<()> {
     let args = SensorArgs::parse_with_default("container.json5");
     let config = ContainerSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // `--check-config` stops here, before the runner, the session and any
+    // publisher exists (#1150). A config check that joins the fleet is not a
+    // check — it is a deployment.
+    if args.check_config {
+        zensight_sensor_core::report_config_ok(&args.config);
+        return Ok(());
+    }
+
     let source = config.container.resolved_source();
     let cc = config.container.clone();
 

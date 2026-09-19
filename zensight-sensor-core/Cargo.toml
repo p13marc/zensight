@@ -30,6 +30,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
 json5 = { workspace = true }
+serde_ignored.workspace = true
 
 # Time
 chrono = "0.4"

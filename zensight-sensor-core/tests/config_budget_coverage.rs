@@ -3,7 +3,9 @@
 //! `docs/ops/SIZING.md` tells the operator to set `budget_rss_mb` on every
 //! sensor. Before #1091 only two of sixteen had a field to set it in, and the
 //! other fourteen accepted the key and discarded it — nothing in this tree
-//! sets `deny_unknown_fields`, so the omission was silent in both directions.
+//! checked for unknown keys, so the omission was silent in both directions.
+//! Since #1150 the discarding half is a startup refusal; the *missing* half is
+//! still silent, which is what this test is for.
 //!
 //! This is a raw-tree assertion on purpose. A typed parse would deserialise a
 //! file that had lost the key back into `None` and pass, which is exactly the

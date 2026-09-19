@@ -224,7 +224,10 @@ when nothing is declared. Those are starting points, not measurements: the two
 that came from a measurement are netring (448) and the historian (256), and
 they say so in their own files. Until #1091 only those two had a field to set
 it in and the other fourteen accepted the key and discarded it, because nothing
-in this tree sets `deny_unknown_fields`.
+in this tree checked for unknown keys. Since #1150 every config goes through
+`SensorConfig::parse_strict`, so a budget written into the wrong block is a
+startup refusal naming its full path rather than a number nobody honours — and
+`--check-config` reports it before the deploy.
 
 The historian is the one producer with a second, **deprecated** spelling:
 `historian.resources.budget_rss_mb`, which is still read for deployments that

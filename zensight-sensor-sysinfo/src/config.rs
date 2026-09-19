@@ -876,10 +876,12 @@ mod tests {
     /// The shipped example config must physically contain every flag it claims,
     /// at the right path.
     ///
-    /// Nothing in the workspace sets `deny_unknown_fields`, so a key in the wrong
-    /// block — or missing entirely — parses clean and silently takes the Rust
-    /// default. That is exactly how `temperatures` / `power` stayed dark for so
-    /// long: real fields that no shipped config ever mentioned.
+    /// A key in the wrong block is a startup refusal now (#1150), but a key
+    /// *missing entirely* still parses clean and silently takes the Rust
+    /// default — the strict loader refuses what is *extra*, not what is
+    /// *absent*. That is exactly how `temperatures` / `power` stayed dark for so
+    /// long: real fields that no shipped config ever mentioned. So this
+    /// assertion stays, and it walks the raw tree.
     ///
     /// Asserting the *parsed* value would be vacuous here, since every flag below
     /// is spelled `false` and `false` is also the Rust default — the test would

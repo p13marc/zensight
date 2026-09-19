@@ -301,7 +301,11 @@ impl ModbusSensorConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
-        let config: ModbusSensorConfig = json5::from_str(&content)?;
+        // The shared strict parser (#1150): a key no struct declares is an
+        // error naming its full path, not a silent default.
+        let config: ModbusSensorConfig =
+            <Self as zensight_sensor_core::SensorConfig>::parse_strict(&content)
+                .map_err(|e| ConfigError::Validation(e.to_string()))?;
         config.validate_config()?;
         Ok(config)
     }

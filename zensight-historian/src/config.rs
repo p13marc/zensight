@@ -169,10 +169,14 @@ pub struct HistorianSensorConfig {
     /// producer that shipped this block **nested**, as
     /// `historian.resources.budget_rss_mb`, before #1091 gave every producer
     /// the top-level spelling. Both are read; the nested one is deprecated
-    /// but still authoritative when it is the only one set, because nothing
-    /// in this tree sets `deny_unknown_fields` — moving the key outright
-    /// would have discarded a real operator's budget in silence, which is the
-    /// 2026-08-17 sequence `docs/ops/SIZING.md` is written about.
+    /// but still authoritative when it is the only one set. Moving the key
+    /// outright would have discarded a real operator's budget in silence —
+    /// the 2026-08-17 sequence `docs/ops/SIZING.md` is written about. It is
+    /// kept as a declared field rather than left to be ignored, which is what
+    /// the strict loader (#1150) now requires of every deprecated key: a shim
+    /// that still reads, not a key that silently stops being read — dropping
+    /// it outright would now be a startup failure on every host that carries
+    /// it.
     #[serde(default)]
     pub resources: zensight_sensor_core::ResourcesConfig,
 }
@@ -357,9 +361,9 @@ mod tests {
     }
 
     /// #1091 moved this key to the top level. A deployment that still carries
-    /// the old nested spelling must keep its budget: nothing here sets
-    /// `deny_unknown_fields`, so a config whose only budget sat under
-    /// `historian.` would otherwise parse clean and run with none.
+    /// the old nested spelling must keep its budget: the field is still
+    /// declared, so a config whose only budget sits under `historian.` is
+    /// read rather than refused by the strict loader (#1150).
     #[test]
     fn the_deprecated_nested_spelling_still_declares_a_budget() {
         let mut c = HistorianSensorConfig::default();
@@ -384,8 +388,9 @@ mod tests {
     }
 
     /// The shipped config carries the budget at the TOP level now. A raw-tree
-    /// assertion, because with `deny_unknown_fields` off a typed one would
-    /// pass on a file that had lost the key entirely.
+    /// assertion, because a typed one passes on a file that lost the key
+    /// entirely — the strict loader refuses keys that are *extra*, not keys
+    /// that are *missing*.
     #[test]
     fn shipped_config_spells_out_the_budget_at_the_top_level() {
         let raw = std::fs::read_to_string(

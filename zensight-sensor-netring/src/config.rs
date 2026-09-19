@@ -1001,9 +1001,9 @@ mod tests {
 
     /// The shipped example config must physically spell out the opt-in detectors.
     ///
-    /// Nothing here sets `deny_unknown_fields`, so an absent key parses clean and
-    /// silently takes the Rust default — which is how these detectors stayed
-    /// invisible. Asserting the parsed value would be vacuous (they ship `false`
+    /// An absent key parses clean and silently takes the Rust default — the
+    /// strict loader (#1150) refuses what is *extra*, not what is *missing* —
+    /// which is how these detectors stayed invisible. Asserting the parsed value would be vacuous (they ship `false`
     /// and default `false`), so walk the raw tree and prove the key is present.
     /// `gen-configs.sh` seds them on for the demo, and a sed can only flip a key
     /// that is really there.

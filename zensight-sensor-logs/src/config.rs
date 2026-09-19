@@ -1134,36 +1134,21 @@ impl SyslogSensorConfig {
     }
 
     /// Parse config, rejecting unknown keys (#547) unless
-    /// `allow_unknown_fields` is set. Unknown keys are collected by full path
-    /// (including nested/external types) via `serde_ignored`, so a typo like
-    /// `novlety` fails loudly naming the key instead of silently taking the
-    /// default. With the escape hatch on, unknown keys are logged as warnings.
+    /// `allow_unknown_fields` is set.
+    ///
+    /// This was the tree's only strict loader. #1150 lifted it into
+    /// [`SensorConfig::parse_strict`](zensight_sensor_core::SensorConfig::parse_strict)
+    /// so every producer gets it, and this is the thin call that remains —
+    /// kept because `load_from_file` and this crate's tests name it, and
+    /// because the mechanism is still worth finding from here.
+    ///
+    /// One behaviour moved with it: the shared parser **exempts the `zenoh`
+    /// block**, which must stay forward-compatible across a rollout. Nothing
+    /// else changed — the escape hatch is read off the raw tree now rather
+    /// than off the typed config, which is the same bool.
     pub fn parse_strict(content: &str) -> anyhow::Result<Self> {
-        // json5 → Value → serde_ignored, so one parse yields both the typed
-        // config and the set of ignored (unknown) key paths.
-        let value: serde_json::Value = json5::from_str(content)?;
-        let mut unknown: Vec<String> = Vec::new();
-        let config: Self = serde_ignored::deserialize(value, |path| {
-            unknown.push(path.to_string());
-        })?;
-
-        if !unknown.is_empty() {
-            let list = unknown.join(", ");
-            if config.allow_unknown_fields {
-                tracing::warn!(
-                    unknown_keys = %list,
-                    "config has unknown keys (allow_unknown_fields is set — ignoring)"
-                );
-            } else {
-                anyhow::bail!(
-                    "unknown config key(s): {list}. Fix the typo, or set \
-                     allow_unknown_fields: true to ignore (mixed-version fleets)."
-                );
-            }
-        }
-
-        config.validate_config()?;
-        Ok(config)
+        <Self as zensight_sensor_core::SensorConfig>::parse_strict(content)
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 
     /// Validate the configuration.
@@ -1314,8 +1299,12 @@ impl zensight_sensor_core::SensorConfig for SyslogSensorConfig {
     }
 
     fn validate(&self) -> zensight_sensor_core::Result<()> {
+        // `{e:#}`, not `{e}`: this crate's validation errors carry anyhow
+        // context, and the outermost layer alone reads as "listener 0
+        // timezone" without ever naming the zone. Since #1150 the shared
+        // loader is what calls this, so the flattening happened here.
         self.validate_config()
-            .map_err(|e| zensight_sensor_core::SensorError::config(e.to_string()))
+            .map_err(|e| zensight_sensor_core::SensorError::config(format!("{e:#}")))
     }
 }
 

@@ -15,6 +15,14 @@ use zensight_historian::{PRODUCER, ingest, query};
 async fn main() -> Result<()> {
     let args = SensorArgs::parse_with_default("historian.json5");
     let config = HistorianSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // `--check-config` stops here, before the runner, the session and any
+    // publisher exists (#1150). A config check that joins the fleet is not a
+    // check — it is a deployment.
+    if args.check_config {
+        zensight_sensor_core::report_config_ok(&args.config);
+        return Ok(());
+    }
     let source = config.resolved_source();
     let hc = config.historian.clone();
 

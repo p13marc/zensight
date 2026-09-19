@@ -294,8 +294,10 @@ impl GnmiConfig {
     /// Load configuration from a JSON5 file
     pub fn load_from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Self = json5::from_str(&content)?;
-        Ok(config)
+        // The shared strict parser (#1150): a key no struct declares is an
+        // error naming its full path, not a silent default.
+        <Self as zensight_sensor_core::SensorConfig>::parse_strict(&content)
+            .map_err(|e| anyhow::anyhow!("{e}"))
     }
 }
 
