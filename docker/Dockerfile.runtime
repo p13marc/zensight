@@ -51,7 +51,8 @@ USER zensight
 WORKDIR /home/zensight
 
 # 7447: Zenoh default port (TCP). Sensor-specific ports (syslog 514, SNMP
-# traps 162, Prometheus exporter 9464, …) are documented per sensor in docs/SENSORS.md.
+# traps 162, Prometheus exporter 9464, …) are documented in docs/DEPLOYMENT.md.
+# (This line pointed at docs/SENSORS.md, which has never existed — #1158.)
 EXPOSE 7447
 
 ENV ZENSIGHT_BINARY=${BINARY_PACKAGE}

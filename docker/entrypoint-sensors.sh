@@ -4,7 +4,8 @@
 # (ZENSIGHT_ZENOH_CONNECT, ZENSIGHT_ZENOH_TLS_*), warns about missing host
 # mounts, detects the capture interface in the HOST network namespace
 # (--net=host), generates the demo-max configs, then hands off to the shared
-# spawner in fail-fast mode.
+# spawner. The spawner does NOT fail fast — #813 removed FAIL_FAST; see the
+# note at the bottom of this file.
 #
 # See docs/DEPLOYMENT.md for the full `podman run` invocation.
 

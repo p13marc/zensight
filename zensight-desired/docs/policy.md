@@ -141,12 +141,21 @@ The two guards do different jobs, and the first is the load-bearing one. A
 failed or slow catalog GET produces an **empty fleet**, which is
 indistinguishable on the wire from a fleet that really is empty; without the
 host check, every document the compiler ever published becomes a deletion
-candidate in the same pass, and after `grace × refresh` — ten minutes on the
-shipped defaults — the whole fleet reverts to its file baselines. So a key
+candidate in the same pass, and after `delete_grace_periods` consecutive such
+passes — **which is not `grace × refresh`** — the whole fleet reverts to its file baselines. So a key
 whose host is not in this pass's catalog is held **indefinitely** and does not
 even accrue grace: *"I cannot see it"* is not *"it should have no
 configuration"*, and the sensor is reconciling that document quite happily
 meanwhile.
+
+> **Grace counts passes, not minutes** (#1158). This page used to say "ten
+> minutes on the shipped defaults", reading `delete_grace_periods` (2) ×
+> `refresh_secs` (300 s). That is only the bound when **nothing else wakes the
+> loop**. The daemon also recompiles on an entity-document event (coalesced by
+> a 2 s sleep) and on an adoption wake, so two passes can fall seconds apart —
+> and a catalog that is failing while entity documents are moving is exactly
+> when both happen at once. Treat the grace as "two passes", and raise
+> `delete_grace_periods` rather than `refresh_secs` if you want more of it.
 
 The grace then covers the narrower case the first guard lets through: the host
 is here, and the policy briefly stopped yielding for it.
