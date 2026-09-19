@@ -132,7 +132,7 @@ pub use rpc::{
     ERR_BUSY, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED, ERR_UNSUPPORTED,
     RpcError, RpcRequest, RpcResult,
 };
-pub use serialization::{Format, decode, decode_auto, encode};
+pub use serialization::{Format, decode, decode_auto, decode_with_encoding, encode};
 pub use session::connect;
 pub use state::ZensightState;
 pub use stream::{

@@ -21,6 +21,16 @@ pub enum Error {
     #[error("Invalid key expression: {0}")]
     KeyExpr(String),
 
+    /// The payload's encoding could not be determined: the sample declared
+    /// none this build knows, and the first byte does not decide between JSON
+    /// and CBOR (#1148).
+    ///
+    /// Refusing here is the point. A top-level scalar is genuinely ambiguous —
+    /// JSON `42` is a complete, valid CBOR negative integer — so guessing
+    /// returns a wrong number rather than an error.
+    #[error("Ambiguous payload encoding: {0}")]
+    AmbiguousEncoding(String),
+
     /// A registry `type` name with no entry in the RFC 08 §5 type table
     /// (`schema::SCHEMAS`) — the payload cannot be decoded because nothing
     /// in this build knows what it is.

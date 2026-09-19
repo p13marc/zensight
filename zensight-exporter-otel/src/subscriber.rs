@@ -85,9 +85,10 @@ impl TelemetrySubscriber {
             if sample.kind() == SampleKind::Delete {
                 continue;
             }
-            if let Ok(alert) =
-                zensight_common::decode_auto::<zensight_common::Alert>(&sample.payload().to_bytes())
-                && alert.state == zensight_common::AlertState::Firing
+            if let Ok(alert) = zensight_common::decode_with_encoding::<zensight_common::Alert>(
+                sample.encoding(),
+                &sample.payload().to_bytes(),
+            ) && alert.state == zensight_common::AlertState::Firing
             {
                 let origin = zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
                     .map(|p| p.origin.to_string());

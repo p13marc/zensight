@@ -50,7 +50,10 @@ pub async fn fetch(session: &Arc<Session>, timeout: std::time::Duration) -> Vec<
     let mut by_id: std::collections::BTreeMap<String, HostEntity> = Default::default();
     while let Ok(reply) = replies.recv_async().await {
         if let Ok(sample) = reply.result()
-            && let Ok(e) = zensight_common::decode_auto::<HostEntity>(&sample.payload().to_bytes())
+            && let Ok(e) = zensight_common::decode_with_encoding::<HostEntity>(
+                sample.encoding(),
+                &sample.payload().to_bytes(),
+            )
         {
             // Newest wins between two catalogs mid-handover; on a tie, the
             // one that arrived first, so the result does not depend on the

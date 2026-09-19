@@ -389,7 +389,7 @@ pub async fn fetch_one<T: serde::de::DeserializeOwned>(
     let replies = session.get(&key).await.ok()?;
     let reply = replies.recv_async().await.ok()?;
     let sample = reply.result().ok()?;
-    zensight_common::decode_auto(&sample.payload().to_bytes()).ok()
+    zensight_common::decode_with_encoding(sample.encoding(), &sample.payload().to_bytes()).ok()
 }
 
 #[cfg(test)]

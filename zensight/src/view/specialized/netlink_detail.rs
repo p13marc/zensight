@@ -384,7 +384,10 @@ pub async fn fetch_records_all<T: DeserializeOwned>(
     let mut any = false;
     while let Ok(reply) = replies.recv_async().await {
         let Ok(sample) = reply.result() else { continue };
-        match zensight_common::decode_auto::<Vec<T>>(&sample.payload().to_bytes()) {
+        match zensight_common::decode_with_encoding::<Vec<T>>(
+            sample.encoding(),
+            &sample.payload().to_bytes(),
+        ) {
             Ok(mut records) => {
                 out.append(&mut records);
                 any = true;
@@ -437,7 +440,10 @@ pub async fn fetch_records<T: DeserializeOwned>(
                 continue;
             }
         };
-        match zensight_common::decode_auto::<Vec<T>>(&sample.payload().to_bytes()) {
+        match zensight_common::decode_with_encoding::<Vec<T>>(
+            sample.encoding(),
+            &sample.payload().to_bytes(),
+        ) {
             Ok(records) => {
                 answered += 1;
                 if best.as_ref().is_none_or(|b| records.len() > b.len()) {

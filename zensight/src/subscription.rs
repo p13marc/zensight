@@ -9,7 +9,8 @@ use zensight_common::ZensightState;
 use zensight_common::keyexpr::{parse_key, refine_key};
 use zensight_common::{
     Alert, ErrorReport, HealthSnapshot, HostEntity, LinkProfile, SensorInfo, TelemetryPoint,
-    ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto, entities_query_key,
+    ZenohConfig, all_entity_wildcard, all_telemetry_wildcard, decode_auto, decode_with_encoding,
+    entities_query_key,
 };
 
 use crate::message::{Message, Reading};
@@ -365,7 +366,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
                         && let Ok(alert) =
-                            zensight_common::decode_auto::<Alert>(&sample.payload().to_bytes())
+                            zensight_common::decode_with_encoding::<Alert>(sample.encoding(), &sample.payload().to_bytes())
                     {
                         let origin = zensight_common::keyexpr::parse_key(sample.key_expr().as_str())
                             .map(|p| p.origin.to_string());
@@ -463,9 +464,9 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                 let mut seeded = Vec::new();
                 while let Ok(reply) = replies.recv_async().await {
                     if let Ok(sample) = reply.result()
-                        && let Ok(edge) = zensight_common::decode_auto::<
+                        && let Ok(edge) = zensight_common::decode_with_encoding::<
                             zensight_common::relation::Edge,
-                        >(&sample.payload().to_bytes())
+                        >(sample.encoding(), &sample.payload().to_bytes())
                     {
                         seeded.push(edge);
                     }
@@ -731,9 +732,9 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                             {
                                 if sample.kind() == SampleKind::Delete {
                                     yield Message::AckRetired(r);
-                                } else if let Ok(ack) = decode_auto::<
+                                } else if let Ok(ack) = decode_with_encoding::<
                                     zensight_common::ack::AlertAck,
-                                >(&sample.payload().to_bytes()) {
+                                >(sample.encoding(), &sample.payload().to_bytes()) {
                                     yield Message::AckReceived(Box::new(ack));
                                 }
                             }
@@ -751,9 +752,9 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                             if let Some(id) = key.rsplit('/').next().filter(|i| !i.is_empty()) {
                                 if sample.kind() == SampleKind::Delete {
                                     yield Message::SilenceRetired(id.to_string());
-                                } else if let Ok(sil) = decode_auto::<
+                                } else if let Ok(sil) = decode_with_encoding::<
                                     zensight_common::silence::Silence,
-                                >(&sample.payload().to_bytes()) {
+                                >(sample.encoding(), &sample.payload().to_bytes()) {
                                     yield Message::SilenceReceived(Box::new(sil));
                                 }
                             }
@@ -771,9 +772,9 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
                             if let Some(id) = key.rsplit('/').next().filter(|i| !i.is_empty()) {
                                 if sample.kind() == SampleKind::Delete {
                                     yield Message::IncidentRetired(id.to_string());
-                                } else if let Ok(inc) = decode_auto::<
+                                } else if let Ok(inc) = decode_with_encoding::<
                                     zensight_common::incident::Incident,
-                                >(&sample.payload().to_bytes()) {
+                                >(sample.encoding(), &sample.payload().to_bytes()) {
                                     yield Message::IncidentReceived(Box::new(inc));
                                 }
                             }

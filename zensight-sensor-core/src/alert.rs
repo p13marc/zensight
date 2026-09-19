@@ -712,7 +712,10 @@ impl AlertReporter {
             if sample.kind() == zenoh::sample::SampleKind::Delete {
                 continue;
             }
-            match zensight_common::decode_auto::<Alert>(&sample.payload().to_bytes()) {
+            match zensight_common::decode_with_encoding::<Alert>(
+                sample.encoding(),
+                &sample.payload().to_bytes(),
+            ) {
                 Ok(alert) => inherited.push((sample.key_expr().to_string(), alert)),
                 Err(e) => tracing::warn!(
                     error = %e, key = %sample.key_expr(),

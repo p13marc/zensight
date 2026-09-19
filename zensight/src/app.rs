@@ -6346,9 +6346,11 @@ impl ZenSight {
                     .await
                     .map_err(|_| "the sensor did not answer".to_string())?;
                 match reply.result() {
-                    Ok(sample) => zensight_common::decode_auto::<
+                    Ok(sample) => zensight_common::decode_with_encoding::<
                         zensight_common::outlet::OutletStatus,
-                    >(&sample.payload().to_bytes())
+                    >(
+                        sample.encoding(), &sample.payload().to_bytes()
+                    )
                     .map_err(|e| e.to_string()),
                     // A refusal is an `error/gated` reply carrying the switch
                     // that refused (#866/#957) — surfaced verbatim, because

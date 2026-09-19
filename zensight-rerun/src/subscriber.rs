@@ -20,7 +20,6 @@ use tracing::{debug, info, trace, warn};
 use zenoh::Session;
 use zenoh::sample::{Sample, SampleKind};
 use zensight_common::alert::Alert;
-use zensight_common::decode_auto;
 use zensight_common::entity::HostEntity;
 use zensight_common::health::HealthSnapshot;
 use zensight_common::keyexpr::{
@@ -28,6 +27,7 @@ use zensight_common::keyexpr::{
     entities_query_key,
 };
 use zensight_common::telemetry::TelemetryPoint;
+use zensight_common::{decode_auto, decode_with_encoding};
 
 use crate::config::FilterConfig;
 use crate::sink::ControlItem;
@@ -218,7 +218,10 @@ async fn seed_entities(session: Arc<Session>, tx_control: mpsc::Sender<ControlIt
             let mut seeded = 0usize;
             while let Ok(reply) = replies.recv_async().await {
                 if let Ok(sample) = reply.result()
-                    && let Ok(entity) = decode_auto::<HostEntity>(&sample.payload().to_bytes())
+                    && let Ok(entity) = decode_with_encoding::<HostEntity>(
+                        sample.encoding(),
+                        &sample.payload().to_bytes(),
+                    )
                 {
                     seeded += 1;
                     {

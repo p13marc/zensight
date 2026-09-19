@@ -158,7 +158,9 @@ where
 {
     let read = serve(session.clone(), ctx, &[topic], move |_req| status()).await?;
     let write = serve(session, ctx, &[topic, "set"], move |req: RpcRequest| {
-        let cmd = req.json::<Cmd>();
+        // JSON or CBOR (#1148): the caller's session picks, and this tree's
+        // default is CBOR.
+        let cmd = req.decode::<Cmd>();
         let fut = cmd.map(&apply);
         async move {
             match fut {

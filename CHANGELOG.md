@@ -404,6 +404,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`decode_auto` turned a JSON scalar into a different number, and the write
+  half of `<topic>/set` read JSON only** (#1148). Two halves of one thing: the
+  sniff was doing a job the wire already answered.
+
+  `detect_format` returned `Cbor` for anything that was not `{` or `[`, so a
+  first byte that decides nothing was read as a decision. JSON `42` is `0x34`,
+  which is a **complete, valid CBOR negative integer** — `decode_auto::<i64>(b"42")`
+  returned `-21`, cleanly, with no error anywhere. No `TelemetryPoint` hits it
+  (a map sniffs as `0xA…`), but the function is generic and public, which is
+  exactly the shape of a defect that waits. It returns `Option<Format>` now and
+  `decode_auto` refuses an undecidable payload with a new
+  `Error::AmbiguousEncoding` naming the byte. The reverse mis-sniff is left
+  alone deliberately: `0x7B` is both `{` and CBOR major 3 / ai 27, so a
+  top-level CBOR string reads as JSON and *fails* — a wrong answer that says so
+  is a different class of problem.
+
+  RFC 08 §7 puts the sniff **last**, after the sample's `Encoding`. Every
+  producer in this tree already stamps `Format::encoding()` on every put and
+  **no consumer had ever read it back**. `decode_with_encoding` does, and the
+  fifteen subscriber call sites that decode a `Sample` now use it; the sniff
+  stays as the fallback for bytes with no metadata attached.
+
+  And `serve_topic`'s write half was `serde_json::from_slice` while
+  `docs/data-model.md` said "every consumer decodes via `decode_auto`", so a
+  caller whose session serialises CBOR — **this tree's default** — got
+  `error/invalid-args` from `logs rules/set`, `netlink expectations/set` and
+  `collection/set`, and `hostspec` and `systemd` `expectations/set`. A read
+  procedure answered and the write beside it did not, which reads as "the sensor
+  is up but rejects my config". `RpcRequest::decode` takes either; `json()`
+  stays for a body whose contract really is JSON. `zensight-desired`'s
+  `overrides/set` moved with it.
+
+  The acceptance test stands `serve_topic` up on a real bus and posts both
+  encodings; it fails on the parent with the CBOR body refused.
+
 - **parallax: a hostile responder could write the snippet the operator is told
   to paste** (#1149). `suggest()` built the copy-pasteable `rtsp[]` entry with
   `format!("{ name: \"{stream}\", url: \"{url}\" }")`. The name was reduced to

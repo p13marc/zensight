@@ -140,7 +140,25 @@ impl RpcRequest {
         }
     }
 
-    /// Decode the JSON request body.
+    /// Decode the request body, **JSON or CBOR** (#1148).
+    ///
+    /// `docs/data-model.md` says "every consumer decodes via `decode_auto`",
+    /// and the write half of the generic `<topic>/set` seam did not: it was
+    /// `serde_json::from_slice`, so a caller whose session serialises CBOR —
+    /// which is this tree's default — got `error/invalid-args` from
+    /// `logs rules/set`, `netlink expectations/set` and `collection/set`, and
+    /// `hostspec` and `systemd` `expectations/set`. A read procedure answered
+    /// them and the write beside it did not.
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> std::result::Result<T, RpcError> {
+        crate::serialization::decode_auto(&self.payload)
+            .map_err(|e| RpcError::invalid_args(format!("bad request body: {e}")))
+    }
+
+    /// Decode the request body as JSON, specifically.
+    ///
+    /// Prefer [`decode`](Self::decode) — a caller's format is the caller's
+    /// business. This stays for a body whose contract really is JSON and
+    /// nothing else.
     pub fn json<T: serde::de::DeserializeOwned>(&self) -> std::result::Result<T, RpcError> {
         serde_json::from_slice(&self.payload)
             .map_err(|e| RpcError::invalid_args(format!("bad request body: {e}")))

@@ -91,7 +91,10 @@ impl TelemetrySubscriber {
             if sample.kind() == SampleKind::Delete {
                 continue;
             }
-            if let Ok(alert) = zensight_common::decode_auto::<Alert>(&sample.payload().to_bytes()) {
+            if let Ok(alert) = zensight_common::decode_with_encoding::<Alert>(
+                sample.encoding(),
+                &sample.payload().to_bytes(),
+            ) {
                 let origin = Self::origin_of(sample.key_expr().as_str());
                 collector.record_alert_from(origin, alert);
                 seeded += 1;
