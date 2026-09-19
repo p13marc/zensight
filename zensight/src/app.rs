@@ -513,10 +513,18 @@ impl ZenSight {
             explorer_ctl: None,
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
-            store: if demo_mode {
-                zensight_store::MetricStore::new(zensight_store::DEFAULT_HOT_CAPACITY, None)
-            } else {
-                zensight_store::MetricStore::with_default_persistence()
+            store: {
+                let mut store = if demo_mode {
+                    zensight_store::MetricStore::new(zensight_store::DEFAULT_HOT_CAPACITY, None)
+                } else {
+                    zensight_store::MetricStore::with_default_persistence()
+                };
+                // The backstop (#1115). Eviction is what keeps the number down
+                // in ordinary operation; this is what stops a label explosion
+                // filling memory faster than any sweep can reap it. Refused
+                // series are counted, never silent.
+                store.set_max_series(Some(crate::view::dashboard::MAX_HOT_SERIES));
+                store
             },
             live_historians: std::collections::BTreeSet::new(),
             time_cursor: crate::history::TimeCursor::Live,
@@ -9775,11 +9783,42 @@ impl ZenSight {
 
         // Bound the device map over long sessions: reap devices gone for a day
         // (#40). Logged so the drop is never silent.
-        let evicted = self
+        //
+        // The METRIC STORE goes with them (#1115). It used to keep its copy
+        // for the life of the process: `evict_stale_devices` reaped
+        // `DeviceState` and returned a count, so nothing could tell the store
+        // what to drop. On a fleet with churning `{name}`/`{target}`/`{vmid}`
+        // chunks that is the larger half of the leak — a container that ran
+        // for an hour, a probe target removed from the config, a guest
+        // destroyed: they add for days and never leave.
+        let gone = self
             .dashboard
-            .evict_stale_devices(now, crate::view::dashboard::DEVICE_EVICTION_AGE_MS);
-        if evicted > 0 {
-            tracing::info!(evicted, "Evicted stale devices from dashboard");
+            .evict_stale_devices_named(now, crate::view::dashboard::DEVICE_EVICTION_AGE_MS);
+        if !gone.is_empty() {
+            let mut series = 0;
+            for id in &gone {
+                series += self.store.evict_device(&zensight_store::device_prefix(
+                    id.protocol.as_str(),
+                    &id.origin,
+                    &id.source,
+                ));
+            }
+            tracing::info!(
+                evicted = gone.len(),
+                series,
+                "Evicted stale devices from dashboard and their hot series"
+            );
+        }
+
+        // And the per-series sweep the device eviction cannot reach (#1115): a
+        // host that is still very much alive, publishing a different set of
+        // series than it was yesterday. Its device is not stale; its dead
+        // series are.
+        let idle = self
+            .store
+            .evict_idle_series(now, crate::view::dashboard::SERIES_IDLE_TTL_MS);
+        if idle > 0 {
+            tracing::info!(idle, "Evicted idle hot series");
         }
 
         // Silences expire by their own `ends_at` when read (#925), and the

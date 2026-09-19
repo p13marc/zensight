@@ -134,6 +134,33 @@ pub const SEARCH_DEBOUNCE_MS: i64 = 300;
 /// that known-down devices remain visible; only long-gone ones are reaped.
 pub const DEVICE_EVICTION_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
+/// Age after which a **hot series** that has received no sample is dropped
+/// from the metric store (#1115).
+///
+/// Shorter than [`DEVICE_EVICTION_AGE_MS`] on purpose, because it answers a
+/// different question. A device is kept for a day so a known-down host stays
+/// visible on the dashboard — its card is the point. A *series* has no card:
+/// a container that ran for an hour, a probe target removed from the config,
+/// a guest destroyed. Its ring holds an hour of samples nobody will look at
+/// again, and on a churning fleet there are thousands of them.
+///
+/// Two hours: longer than any chart window the GUI offers, so a series is
+/// never reaped out from under something on screen, and short enough that a
+/// day of churn does not accumulate.
+pub const SERIES_IDLE_TTL_MS: i64 = 2 * 60 * 60 * 1000;
+
+/// Hard ceiling on hot series held by the GUI's store (#1115).
+///
+/// A **backstop**, not the mechanism: `evict_device` and `evict_idle_series`
+/// are what keep the number down in ordinary operation. This is what stops a
+/// label explosion — one producer minting a chunk per request — from filling
+/// memory faster than any sweep can reap it.
+///
+/// 40 000 is roughly three times the 10–15 k a 50-host fleet reaches, so a
+/// deployment that is merely large never meets it; one that does has something
+/// wrong upstream, and the refusal counter is how it says so.
+pub const MAX_HOT_SERIES: usize = 40_000;
+
 /// Connection state for Zenoh session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ConnectionState {
@@ -347,6 +374,26 @@ impl DashboardState {
         self.devices
             .retain(|_, d| now.saturating_sub(d.last_update) <= max_age_ms);
         before - self.devices.len()
+    }
+
+    /// The same reap, returning **which** devices went (#1115).
+    ///
+    /// `evict_stale_devices` reaped `DeviceState` and returned a count, so the
+    /// caller could not tell the metric store what to drop — and the store's
+    /// copy of a gone host's series stayed for the life of the process. On a
+    /// fleet with churning `{name}`/`{target}`/`{vmid}` chunks that is the
+    /// larger half of the leak, because those series never come back.
+    pub fn evict_stale_devices_named(&mut self, now: i64, max_age_ms: i64) -> Vec<DeviceId> {
+        let gone: Vec<DeviceId> = self
+            .devices
+            .iter()
+            .filter(|(_, d)| now.saturating_sub(d.last_update) > max_age_ms)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &gone {
+            self.devices.remove(k);
+        }
+        gone
     }
 
     /// Set (or clear) the status filter, resetting pagination (#34).
