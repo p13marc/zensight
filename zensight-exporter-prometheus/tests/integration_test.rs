@@ -520,7 +520,7 @@ async fn test_collector_stats() {
             TelemetryValue::Gauge(i as f64 * 10.0),
             HashMap::new(),
         );
-        collector.record(&key_for("snmp", &point), &point);
+        collector.record(&key_for("sysinfo", &point), &point);
     }
 
     let stats = collector.stats();
@@ -546,7 +546,7 @@ async fn test_http_server_metrics_endpoint() {
         TelemetryValue::Gauge(42.0),
         HashMap::new(),
     );
-    collector.record(&key_for("snmp", &point), &point);
+    collector.record(&key_for("sysinfo", &point), &point);
 
     // Start HTTP server on random port
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -676,7 +676,7 @@ async fn test_high_cardinality_protection() {
             TelemetryValue::Gauge(i as f64),
             HashMap::new(),
         );
-        collector.record(&key_for("snmp", &point), &point);
+        collector.record(&key_for("sysinfo", &point), &point);
     }
 
     // Should be capped at max_series

@@ -1017,7 +1017,7 @@ mod tests {
         point
             .labels
             .insert("unit".to_string(), "sshd.service".to_string());
-        let key = SeriesKey::from_identity(&identity_of("snmp", &point), "zensight");
+        let key = SeriesKey::from_identity(&identity_of("systemd", &point), "zensight");
 
         assert_eq!(key.name, "zensight_systemd_unit_active");
         let unit_labels: Vec<_> = key.labels.iter().filter(|(k, _)| k == "unit").collect();
@@ -1371,7 +1371,7 @@ mod tests {
         // happens in the field.
         for i in 0..50 {
             let p = make_point(&format!("req{i}"), "flows", TelemetryValue::Gauge(i as f64));
-            collector.record(&key_for("snmp", &p), &p);
+            collector.record(&key_for("netflow", &p), &p);
         }
 
         let held_by_leaker = collector
