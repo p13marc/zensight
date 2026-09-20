@@ -1,7 +1,7 @@
 //! Mapping from ZenSight syslog TelemetryPoints to OpenTelemetry logs.
 
 use opentelemetry::logs::Severity;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 /// Syslog severity — the one canonical model (#557), re-exported. The
 /// exporter-specific bits (combined number/name parse, OTel-crate mapping, and
@@ -205,10 +205,11 @@ pub struct LogRecord {
 impl LogRecord {
     /// Try to extract a log record from a TelemetryPoint.
     ///
-    /// Returns None if the point is not a syslog text message.
-    pub fn from_telemetry(point: &TelemetryPoint) -> Option<Self> {
+    /// Returns None if the point is not a syslog text message. `producer` is
+    /// the key's chunk 4 — the point no longer carries it (#1255).
+    pub fn from_telemetry(producer: &str, point: &TelemetryPoint) -> Option<Self> {
         // Only process syslog text messages
-        if point.protocol != Protocol::Logs {
+        if producer != "logs" {
             return None;
         }
 
@@ -255,6 +256,7 @@ impl LogRecord {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use zensight_common::telemetry::Protocol;
 
     #[test]
     fn test_syslog_severity_from_str() {
@@ -312,7 +314,7 @@ mod tests {
             unit: None,
         };
 
-        let record = LogRecord::from_telemetry(&point).unwrap();
+        let record = LogRecord::from_telemetry(point.protocol.as_str(), &point).unwrap();
 
         assert_eq!(record.body, "Connection refused");
         assert_eq!(record.severity, SyslogSeverity::Warning);
@@ -338,7 +340,7 @@ mod tests {
             unit: None,
         };
 
-        assert!(LogRecord::from_telemetry(&point).is_none());
+        assert!(LogRecord::from_telemetry(point.protocol.as_str(), &point).is_none());
     }
 
     #[test]
@@ -353,6 +355,6 @@ mod tests {
             unit: None,
         };
 
-        assert!(LogRecord::from_telemetry(&point).is_none());
+        assert!(LogRecord::from_telemetry(point.protocol.as_str(), &point).is_none());
     }
 }

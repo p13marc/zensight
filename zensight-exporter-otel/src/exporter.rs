@@ -51,9 +51,11 @@ impl TelemetryFilter {
         }
     }
 
-    /// Check if a telemetry point should be included.
-    pub fn should_include(&self, point: &TelemetryPoint) -> bool {
-        let protocol = point.protocol.as_str();
+    /// Check if a telemetry point should be included. `producer` is the key's
+    /// chunk 4 (`keyexpr::producer_name`) — the point no longer carries it
+    /// (#1255).
+    pub fn should_include(&self, producer: &str, point: &TelemetryPoint) -> bool {
+        let protocol = producer;
 
         // Check protocol filters
         if !self.include_protocols.is_empty()
@@ -224,8 +226,9 @@ enum ObsKind {
 struct Observation {
     value: f64,
     attrs: Vec<opentelemetry::KeyValue>,
-    /// Which producer published it — the cardinality-quota dimension (#1145).
-    producer: &'static str,
+    /// Which producer published it — the cardinality-quota dimension (#1145),
+    /// the key's chunk 4 since #1255.
+    producer: String,
     last_updated: Instant,
 }
 
@@ -691,13 +694,21 @@ impl OtelExporter {
             stats.points_received += 1;
         }
 
+        // The producer is the key's chunk 4 (#1255); a key that is not a v1
+        // telemetry key is a failed metric, as an unrefinable one is.
+        let Some(producer) = zensight_common::keyexpr::producer_name(key) else {
+            let mut stats = self.stats.write();
+            stats.metrics_failed += 1;
+            return;
+        };
+
         // Apply filter
-        if !self.filter.should_include(point) {
+        if !self.filter.should_include(&producer, point) {
             let mut stats = self.stats.write();
             stats.points_filtered += 1;
             trace!(
                 source = %point.source,
-                protocol = %point.protocol,
+                producer = %producer,
                 "Point filtered"
             );
             return;
@@ -713,8 +724,8 @@ impl OtelExporter {
         // Logs are the signal that MOST needs a per-host resource (#755): a
         // backend derives stream identity from the resource, so a shared one
         // collapses the whole fleet into a single log stream.
-        if self.export_logs && is_log_exportable(&point.value, point.protocol) {
-            self.record_log(key, point);
+        if self.export_logs && is_log_exportable(&point.value, &producer) {
+            self.record_log(key, &producer, point);
         }
     }
 
@@ -856,7 +867,7 @@ impl OtelExporter {
                 // then on every new series was refused, so a host joining the
                 // fleet afterwards exported nothing at all until the
                 // staleness sweep happened to free a slot.
-                let producer = point.protocol.as_str();
+                let producer = identity.producer.clone();
                 let mut total = 0usize;
                 let mut held = 0usize;
                 let mut producers: std::collections::HashSet<&str> =
@@ -864,17 +875,17 @@ impl OtelExporter {
                 for series in store.values() {
                     total += series.len();
                     for obs in series.values() {
-                        producers.insert(obs.producer);
+                        producers.insert(obs.producer.as_str());
                         if obs.producer == producer {
                             held += 1;
                         }
                     }
                 }
-                producers.insert(producer);
+                producers.insert(producer.as_str());
                 let quota = Self::producer_quota(self.max_gauge_series, producers.len());
                 if total >= self.max_gauge_series || held >= quota {
                     warn!(
-                        producer,
+                        producer = %producer,
                         held,
                         quota,
                         max = self.max_gauge_series,
@@ -889,7 +900,7 @@ impl OtelExporter {
                     stats.metrics_failed += 1;
                     *stats
                         .series_refused_by_producer
-                        .entry(producer.to_string())
+                        .entry(producer.clone())
                         .or_insert(0) += 1;
                     return;
                 }
@@ -1105,7 +1116,7 @@ impl OtelExporter {
         }
     }
 
-    fn record_log(&self, key: &str, point: &TelemetryPoint) {
+    fn record_log(&self, key: &str, producer: &str, point: &TelemetryPoint) {
         // Resolve the host from the KEY so the record lands on that host's
         // logger, and therefore that host's resource.
         let stack = identify(key, point, &Default::default(), |n: &str| n.to_string())
@@ -1120,7 +1131,7 @@ impl OtelExporter {
             },
         };
 
-        let Some(record) = LogRecord::from_telemetry(point) else {
+        let Some(record) = LogRecord::from_telemetry(producer, point) else {
             return;
         };
 
@@ -1716,8 +1727,8 @@ mod tests {
             TelemetryValue::Gauge(1.0),
         );
 
-        assert!(filter.should_include(&snmp_point));
-        assert!(!filter.should_include(&sysinfo_point));
+        assert!(filter.should_include(snmp_point.protocol.as_str(), &snmp_point));
+        assert!(!filter.should_include(sysinfo_point.protocol.as_str(), &sysinfo_point));
     }
 
     #[test]
@@ -1741,8 +1752,8 @@ mod tests {
             TelemetryValue::Gauge(1.0),
         );
 
-        assert!(!filter.should_include(&point1));
-        assert!(filter.should_include(&point2));
+        assert!(!filter.should_include(point1.protocol.as_str(), &point1));
+        assert!(filter.should_include(point2.protocol.as_str(), &point2));
     }
 
     // ---- OTLP wire assertions (#754) --------------------------------------
@@ -1978,10 +1989,10 @@ mod tests {
             "syslog",
             TelemetryValue::Text("sshd: accepted".into()),
         );
-        p.protocol = Protocol::Logs;
         p.timestamp = EVENT_MS;
         exporter.record_log(
             &format!("v1/h-0123456789ab/telemetry/logs/{}", p.metric),
+            "logs",
             &p,
         );
 

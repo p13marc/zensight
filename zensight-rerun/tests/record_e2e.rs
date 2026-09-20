@@ -112,8 +112,8 @@ async fn record_mode_produces_a_valid_rrd() {
     // counter whose first sample the rate converter absorbs).
     let base_ts = zensight_common::telemetry::current_timestamp_millis();
     for tick in 0..10 {
-        for point in demo::metrics::points_for_tick(base_ts, 500, tick) {
-            ctx.publish_point(&point).await.unwrap();
+        for (producer, point) in demo::metrics::points_for_tick(base_ts, 500, tick) {
+            ctx.publish_point(producer, &point).await.unwrap();
         }
     }
 

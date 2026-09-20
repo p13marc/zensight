@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::RwLock;
 use tracing::{debug, trace, warn};
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 use crate::config::{AggregationConfig, FilterConfig, PrometheusConfig};
 use zensight_common::exposition::{MetricIdentity, MetricKind, identify};
@@ -93,7 +93,7 @@ pub struct StoredMetric {
     pub unit: Option<String>,
     /// Which producer published it — the quota dimension (#1145), and the
     /// label on the refusal counter.
-    pub producer: &'static str,
+    pub producer: String,
     /// When this metric was last updated.
     pub last_updated: Instant,
     /// Original timestamp from the telemetry point.
@@ -114,7 +114,7 @@ impl StoredMetric {
         if identity.kind == MetricKind::Unsupported {
             return None;
         }
-        if point.protocol == Protocol::Logs && point.metric.starts_with("events/") {
+        if identity.producer == "logs" && point.metric.starts_with("events/") {
             return None;
         }
 
@@ -142,7 +142,7 @@ impl StoredMetric {
             text_label,
             help: identity.description.clone(),
             unit: identity.unit.clone(),
-            producer: point.protocol.as_str(),
+            producer: identity.producer.clone(),
             last_updated: Instant::now(),
             timestamp_ms: point.timestamp,
         })
@@ -209,9 +209,11 @@ impl MetricFilter {
         }
     }
 
-    /// Check if a telemetry point should be included.
-    pub fn should_include(&self, point: &TelemetryPoint) -> bool {
-        let protocol = point.protocol.as_str();
+    /// Check if a telemetry point should be included. `producer` is the key's
+    /// chunk 4 (`keyexpr::producer_name`) — the point no longer carries it
+    /// (#1255).
+    pub fn should_include(&self, producer: &str, point: &TelemetryPoint) -> bool {
+        let protocol = producer;
 
         // Check protocol filters
         if !self.include_protocols.is_empty()
@@ -410,8 +412,20 @@ impl MetricCollector {
             stats.points_received += 1;
         }
 
+        // The producer is the key's chunk 4 (#1255). A key that is not a v1
+        // telemetry key is counted where the registry refusal below would
+        // have counted it, rather than filtered silently.
+        let Some(producer) = zensight_common::keyexpr::producer_name(key) else {
+            let mut stats = self.stats.write();
+            *stats
+                .points_unrefined
+                .entry(zensight_common::exposition::Unrefined::NotAV1Key.reason())
+                .or_insert(0) += 1;
+            return;
+        };
+
         // Check filter
-        if !self.filter.should_include(point) {
+        if !self.filter.should_include(&producer, point) {
             let mut stats = self.stats.write();
             stats.points_filtered += 1;
             trace!(
@@ -473,11 +487,11 @@ impl MetricCollector {
         // happened to free a slot, and the only trace was one `warn!` naming
         // no producer.
         if !metrics.contains_key(&key) {
-            let producer = point.protocol.as_str();
+            let producer = identity.producer.as_str();
             let mut held = 0usize;
             let mut producers: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for m in metrics.values() {
-                producers.insert(m.producer);
+                producers.insert(m.producer.as_str());
                 if m.producer == producer {
                     held += 1;
                 }
@@ -1312,8 +1326,8 @@ mod tests {
         let snmp_point = make_point("r1", Protocol::Snmp, "m", TelemetryValue::Gauge(1.0));
         let sysinfo_point = make_point("s1", Protocol::Sysinfo, "m", TelemetryValue::Gauge(1.0));
 
-        assert!(filter.should_include(&snmp_point));
-        assert!(!filter.should_include(&sysinfo_point));
+        assert!(filter.should_include(snmp_point.protocol.as_str(), &snmp_point));
+        assert!(!filter.should_include(sysinfo_point.protocol.as_str(), &sysinfo_point));
     }
 
     #[test]
@@ -1337,8 +1351,8 @@ mod tests {
             TelemetryValue::Gauge(1.0),
         );
 
-        assert!(!filter.should_include(&point1));
-        assert!(filter.should_include(&point2));
+        assert!(!filter.should_include(point1.protocol.as_str(), &point1));
+        assert!(filter.should_include(point2.protocol.as_str(), &point2));
     }
 
     #[test]
@@ -1362,8 +1376,8 @@ mod tests {
             TelemetryValue::Gauge(1.0),
         );
 
-        assert!(!filter.should_include(&point1));
-        assert!(filter.should_include(&point2));
+        assert!(!filter.should_include(point1.protocol.as_str(), &point1));
+        assert!(filter.should_include(point2.protocol.as_str(), &point2));
     }
 
     #[test]

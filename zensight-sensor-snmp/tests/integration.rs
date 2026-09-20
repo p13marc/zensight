@@ -20,7 +20,6 @@ fn test_snmp_telemetry_encoding() {
     // The frontend should be able to decode it
     let decoded: TelemetryPoint = decode_auto(&encoded).expect("Decoding failed");
     assert_eq!(decoded.source, "router01");
-    assert_eq!(decoded.protocol, Protocol::Snmp);
     assert_eq!(decoded.metric, "system/sysUpTime");
 }
 

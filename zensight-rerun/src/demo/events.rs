@@ -103,7 +103,7 @@ pub async fn run(ctx: &DemoContext, burst: u64) -> anyhow::Result<(u64, u64, u64
     // Steady sequence, paced (real wall-clock pacing keeps the live viewer
     // readable; timestamps are the scripted domain times regardless).
     for point in steady_sequence(base_ts) {
-        ctx.publish_point(&point).await?;
+        ctx.publish_point("netlink", &point).await?;
         events += 1;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -131,7 +131,7 @@ pub async fn run(ctx: &DemoContext, burst: u64) -> anyhow::Result<(u64, u64, u64
         )
         .with_label("peer", "10.0.0.99")
         .with_label("seq", i.to_string());
-        ctx.publish_point(&point).await?;
+        ctx.publish_point("netlink", &point).await?;
         events += 1;
     }
 

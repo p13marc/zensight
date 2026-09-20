@@ -65,13 +65,14 @@ impl DemoContext {
         Self { session, registry }
     }
 
-    /// Publish one telemetry point on its canonical v1 key.
-    pub async fn publish_point(&self, point: &TelemetryPoint) -> anyhow::Result<()> {
-        let key = format!(
-            "{}/{}",
-            v1ctx(point.protocol.as_str()).telemetry_prefix(),
-            point.metric
-        );
+    /// Publish one telemetry point on its canonical v1 key under `producer`
+    /// — the key's chunk 4, which the point no longer carries (#1255).
+    pub async fn publish_point(
+        &self,
+        producer: &str,
+        point: &TelemetryPoint,
+    ) -> anyhow::Result<()> {
+        let key = format!("{}/{}", v1ctx(producer).telemetry_prefix(), point.metric);
         self.registry
             .put_serializable(&key, point, Format::Cbor, QosClass::Telemetry)
             .await?;

@@ -967,7 +967,6 @@ mod tests {
         let point = to_telemetry_point(&received, false, &uid);
 
         assert_eq!(point.source, "myhost");
-        assert_eq!(point.protocol, Protocol::Logs);
         assert_eq!(point.metric, format!("events/{uid}"));
         assert!(matches!(point.value, TelemetryValue::Text(_)));
         assert_eq!(point.labels.get("facility"), Some(&"auth".to_string()));

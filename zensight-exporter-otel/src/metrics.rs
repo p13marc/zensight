@@ -125,10 +125,12 @@ pub fn is_metric_exportable(value: &TelemetryValue) -> bool {
     !matches!(value, TelemetryValue::Text(_) | TelemetryValue::Binary(_))
 }
 
-/// Check if a TelemetryValue can be exported as an OTEL log.
-pub fn is_log_exportable(value: &TelemetryValue, protocol: Protocol) -> bool {
+/// Check if a TelemetryValue can be exported as an OTEL log. `producer` is the
+/// key's chunk 4 (`keyexpr::producer_name`) — the point no longer carries it
+/// (#1255).
+pub fn is_log_exportable(value: &TelemetryValue, producer: &str) -> bool {
     // Only syslog text messages are exported as logs
-    matches!(protocol, Protocol::Logs) && matches!(value, TelemetryValue::Text(_))
+    producer == "logs" && matches!(value, TelemetryValue::Text(_))
 }
 
 #[cfg(test)]
@@ -205,8 +207,8 @@ mod tests {
         let gauge = TelemetryValue::Gauge(1.0);
 
         // Only syslog text is exportable as log
-        assert!(is_log_exportable(&text, Protocol::Logs));
-        assert!(!is_log_exportable(&text, Protocol::Snmp));
-        assert!(!is_log_exportable(&gauge, Protocol::Logs));
+        assert!(is_log_exportable(&text, "logs"));
+        assert!(!is_log_exportable(&text, "snmp"));
+        assert!(!is_log_exportable(&gauge, "logs"));
     }
 }

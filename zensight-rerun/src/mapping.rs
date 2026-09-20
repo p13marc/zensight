@@ -234,8 +234,8 @@ impl Sampler {
 /// Build the Rerun entity path for a metric series: correlated sources land
 /// under `hosts/<entity_id>/…`, everything else under `sensors/…`
 /// (02-mapping.md §1).
-pub fn metric_entity_path(point: &TelemetryPoint, index: &EntityIndex) -> String {
-    let protocol = point.protocol.as_str();
+pub fn metric_entity_path(producer: &str, point: &TelemetryPoint, index: &EntityIndex) -> String {
+    let protocol = producer;
     match index.resolve(protocol, &point.source) {
         Some(entity_id) => format!("hosts/{entity_id}/{protocol}/{}", point.metric),
         None => format!("sensors/{protocol}/{}/{}", point.source, point.metric),
@@ -352,14 +352,14 @@ mod tests {
 
         // Uncorrelated → sensors/ fallback.
         assert_eq!(
-            metric_entity_path(&p, &index),
+            metric_entity_path(p.protocol.as_str(), &p, &index),
             "sensors/sysinfo/host1/cpu/usage"
         );
 
         // Correlated → hosts/<entity_id>.
         index.upsert(&entity("h_0123456789ab", &[], &[("sysinfo", "host1")]));
         assert_eq!(
-            metric_entity_path(&p, &index),
+            metric_entity_path(p.protocol.as_str(), &p, &index),
             "hosts/h_0123456789ab/sysinfo/cpu/usage"
         );
         assert_eq!(

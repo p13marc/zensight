@@ -1515,7 +1515,6 @@ mod tests {
         // Every point is sourced + labelled with the interface index.
         for p in &pts {
             assert_eq!(p.source, "host1");
-            assert_eq!(p.protocol, Protocol::Netlink);
             assert_eq!(p.labels.get("ifindex").map(String::as_str), Some("2"));
         }
     }

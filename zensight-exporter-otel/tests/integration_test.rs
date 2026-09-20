@@ -156,9 +156,9 @@ fn test_syslog_to_otel_log() {
         .collect(),
     );
 
-    assert!(is_log_exportable(&point.value, point.protocol));
+    assert!(is_log_exportable(&point.value, point.protocol.as_str()));
 
-    let log_record = LogRecord::from_telemetry(&point);
+    let log_record = LogRecord::from_telemetry("logs", &point);
     assert!(log_record.is_some());
 
     let record = log_record.unwrap();
@@ -180,7 +180,7 @@ fn test_non_syslog_not_log_exportable() {
     );
 
     // SNMP text is not a log
-    assert!(!is_log_exportable(&point.value, point.protocol));
+    assert!(!is_log_exportable(&point.value, point.protocol.as_str()));
 }
 
 #[test]
@@ -265,9 +265,9 @@ fn test_filter_include_protocols() {
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&snmp_point));
-    assert!(filter.should_include(&sysinfo_point));
-    assert!(!filter.should_include(&modbus_point));
+    assert!(filter.should_include(snmp_point.protocol.as_str(), &snmp_point));
+    assert!(filter.should_include(sysinfo_point.protocol.as_str(), &sysinfo_point));
+    assert!(!filter.should_include(modbus_point.protocol.as_str(), &modbus_point));
 }
 
 #[test]
@@ -295,8 +295,8 @@ fn test_filter_exclude_protocols() {
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&snmp_point));
-    assert!(!filter.should_include(&syslog_point));
+    assert!(filter.should_include(snmp_point.protocol.as_str(), &snmp_point));
+    assert!(!filter.should_include(syslog_point.protocol.as_str(), &syslog_point));
 }
 
 #[test]
@@ -331,9 +331,9 @@ fn test_filter_include_sources() {
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&point1));
-    assert!(filter.should_include(&point2));
-    assert!(!filter.should_include(&point3));
+    assert!(filter.should_include(point1.protocol.as_str(), &point1));
+    assert!(filter.should_include(point2.protocol.as_str(), &point2));
+    assert!(!filter.should_include(point3.protocol.as_str(), &point3));
 }
 
 #[test]
@@ -361,8 +361,8 @@ fn test_filter_exclude_sources() {
         HashMap::new(),
     );
 
-    assert!(!filter.should_include(&point1));
-    assert!(filter.should_include(&point2));
+    assert!(!filter.should_include(point1.protocol.as_str(), &point1));
+    assert!(filter.should_include(point2.protocol.as_str(), &point2));
 }
 
 #[test]
@@ -403,9 +403,9 @@ fn test_filter_combined() {
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&point1));
-    assert!(!filter.should_include(&point2));
-    assert!(!filter.should_include(&point3));
+    assert!(filter.should_include(point1.protocol.as_str(), &point1));
+    assert!(!filter.should_include(point2.protocol.as_str(), &point2));
+    assert!(!filter.should_include(point3.protocol.as_str(), &point3));
 }
 
 #[test]
@@ -441,7 +441,7 @@ fn test_filter_empty_allows_all() {
 
     for point in points {
         assert!(
-            filter.should_include(&point),
+            filter.should_include(point.protocol.as_str(), &point),
             "Empty filter should allow {:?}",
             point.protocol
         );
@@ -489,7 +489,7 @@ fn test_multiple_protocols_classification() {
             value
         );
         assert_eq!(
-            is_log_exportable(&value, protocol),
+            is_log_exportable(&value, protocol.as_str()),
             expected_log,
             "Protocol {:?} with value {:?} log exportable mismatch",
             protocol,
@@ -516,11 +516,12 @@ fn test_full_syslog_flow() {
     );
 
     // Should be log exportable
-    assert!(is_log_exportable(&point.value, point.protocol));
+    assert!(is_log_exportable(&point.value, point.protocol.as_str()));
     assert!(!is_metric_exportable(&point.value));
 
     // Should produce valid log record
-    let record = LogRecord::from_telemetry(&point).expect("Should create log record");
+    let record = LogRecord::from_telemetry(point.protocol.as_str(), &point)
+        .expect("Should create log record");
 
     assert_eq!(record.hostname, "server01");
     assert_eq!(record.body, "Failed password for invalid user admin");

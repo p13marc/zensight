@@ -30,7 +30,7 @@ use zensight_common::telemetry::TelemetryPoint;
 use zensight_common::{decode_auto, decode_with_encoding};
 
 use crate::config::FilterConfig;
-use crate::sink::ControlItem;
+use crate::sink::{ControlItem, TelemetryItem};
 
 /// How long the late-joiner entity seed GET waits for the correlator.
 pub const ENTITY_SEED_TIMEOUT: Duration = Duration::from_secs(3);
@@ -65,7 +65,7 @@ pub struct SubscriberStats {
 pub async fn run_with_session(
     session: Arc<Session>,
     filters: FilterConfig,
-    tx_telemetry: mpsc::Sender<TelemetryPoint>,
+    tx_telemetry: mpsc::Sender<TelemetryItem>,
     tx_control: mpsc::Sender<ControlItem>,
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<Arc<SubscriberStats>> {
@@ -273,7 +273,7 @@ async fn handle_control_sample<T: serde::de::DeserializeOwned>(
 fn handle_telemetry_sample(
     sample: &Sample,
     filters: &FilterConfig,
-    tx_telemetry: &mpsc::Sender<TelemetryPoint>,
+    tx_telemetry: &mpsc::Sender<TelemetryItem>,
     stats: &SubscriberStats,
 ) {
     if sample.kind() == SampleKind::Delete {
@@ -289,12 +289,21 @@ fn handle_telemetry_sample(
 
     let payload = sample.payload().to_bytes();
     stats.telemetry_received.fetch_add(1, Ordering::Relaxed);
+    // The producer is the key's chunk 4 (#1255): the point no longer carries
+    // it, and the sink needs it for the entity path once the key is gone.
+    let Some(producer) = zensight_common::keyexpr::producer_name(sample.key_expr().as_str()) else {
+        trace!(key = %sample.key_expr(), "telemetry key names no producer");
+        return;
+    };
     match decode_auto::<TelemetryPoint>(&payload) {
         Ok(point) => {
-            if !filters.allows_protocol(point.protocol.as_str()) {
+            if !filters.allows_protocol(&producer) {
                 return;
             }
-            if tx_telemetry.try_send(point).is_err() {
+            if tx_telemetry
+                .try_send(TelemetryItem { producer, point })
+                .is_err()
+            {
                 // Full (or closed) — drop-newest, count it, never block.
                 stats.telemetry_dropped.fetch_add(1, Ordering::Relaxed);
             }
