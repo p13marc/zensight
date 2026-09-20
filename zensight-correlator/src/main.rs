@@ -1,18 +1,29 @@
 //! ZenSight identity correlator daemon.
+//!
+//! Two identities on one process (#1202). It is `@catalog` — the single-writer
+//! **service origin** whose entities, incidents, acks and silences every
+//! consumer reads, elected through `ServiceGuard::catalog` — and it is also an
+//! ordinary host-origin **producer** named `correlator`, through
+//! `SensorRunner`, which opens the one session, publishes the five framework
+//! documents (a health document with `self_stats`, the declared budget and the
+//! shed ladder) under `state/correlator/…`, and serves `introspect`/`describe`
+//! there. The `@catalog` keys are untouched by that: the service's alive token
+//! and the producer's are different keys, and a second correlator on the same
+//! bus still loses the election.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use tokio::sync::{mpsc, watch};
 use tracing::{error, info};
-use zensight_common::config::LoggingConfig;
 use zensight_common::{catalog_rpc_key, entities_query_key, names_query_key};
+use zensight_sensor_core::{SensorArgs, SensorRunner};
 
 use zensight_common::service_guard::{self, ServiceGuard, Standing};
 use zensight_correlator::config::CorrelatorConfig;
 use zensight_correlator::engine::{CorrelatorState, Engine};
-use zensight_correlator::{pdns, publisher, query, subscriber};
+use zensight_correlator::{PRODUCER, pdns, publisher, query, subscriber};
 
 /// Cross-sensor identity correlation service for ZenSight.
 #[derive(Parser, Debug)]
@@ -20,18 +31,25 @@ use zensight_correlator::{pdns, publisher, query, subscriber};
 #[command(about = "Merge host evidence into the single-writer entity keyspace")]
 #[command(version)]
 struct Args {
-    /// Path to configuration file (JSON5 format).
-    #[arg(short, long)]
-    config: Option<String>,
+    /// The flags every producer takes: `--config` (default
+    /// `correlator.json5`, as every sensor defaults to its own file),
+    /// `--log-level` (overrides the file's `logging.level`) and
+    /// `--check-config` (#1150).
+    #[command(flatten)]
+    common: SensorArgs,
 
     /// Run with synthetic evidence instead of subscribing to the bus (GUI dev).
     #[arg(long)]
     demo: bool,
-    /// Parse and validate the config, print the verdict, and exit — open no
-    /// session, publish nothing (#1150). A deploy script gates on the exit
-    /// status.
-    #[arg(long)]
-    check_config: bool,
+}
+
+impl Args {
+    fn parse_with_default_config() -> Self {
+        let matches = Self::command()
+            .mut_arg("config", |arg| arg.default_value("correlator.json5"))
+            .get_matches();
+        Self::from_arg_matches(&matches).expect("the arguments parse")
+    }
 }
 
 /// How long to wait for the spawned tasks to declare their queryables before
@@ -50,32 +68,35 @@ const ENGINE_CHANNEL_CAP: usize = 4096;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = Args::parse_with_default_config();
 
-    let config = match &args.config {
-        Some(path) => CorrelatorConfig::load_from_file(path)?,
-        None => CorrelatorConfig::default(),
-    };
+    let config = CorrelatorConfig::load_from_file(&args.common.config)?;
 
-    // `--check-config` stops here, before the Zenoh session exists (#1150).
-    // A deploy script gates on the exit status.
-    if args.check_config {
-        match &args.config {
-            Some(path) => println!("config ok: {path}"),
-            None => println!("config ok: built-in defaults (no --config given)"),
-        }
+    // `--check-config` stops here, before the runner and the session exist
+    // (#1150). A deploy script gates on the exit status.
+    if args.common.check_config {
+        zensight_sensor_core::report_config_ok(&args.common.config);
         return Ok(());
     }
 
-    init_tracing(&config.logging);
-    info!(demo = args.demo, "starting ZenSight correlator");
+    // What the tasks below need is cloned out before the config moves into
+    // the runner (the engine takes its own clone).
+    let serialization = config.serialization;
+    let allow_operator_assertions = config.allow_operator_assertions;
+    let incidents_enabled = config.incidents_enabled;
+    let operator_decisions = config.operator_decisions.clone();
+    let engine_config = config.clone();
 
-    // Connect to Zenoh.
-    let session = Arc::new(
-        zensight_common::session::connect(&config.zenoh)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to connect to Zenoh: {e}"))?,
-    );
+    // The runner (#1202) initialises tracing, opens the one session and owns
+    // the health, identity and budget publishers of the `correlator`
+    // producer. Everything `@catalog` below rides the same session.
+    let source = zensight_sensor_core::resolved_source(None);
+    let mut runner = SensorRunner::new_with_args(PRODUCER, source, config, Some(&args.common))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    runner = runner.with_format(serialization).with_identity();
+    let session = runner.session().clone();
+    info!(demo = args.demo, "starting ZenSight correlator");
 
     // Single-writer guard. This wins the election and takes the claim token;
     // it deliberately does NOT declare `alive` — that happens below, once the
@@ -87,6 +108,10 @@ async fn main() -> anyhow::Result<()> {
     // loser whose zid sorted right; waiting here makes takeover cost one poll
     // interval. The loop also re-campaigns after an unreadable claim set, which
     // is the answer that used to be misread as sole candidacy.
+    //
+    // While standing by the process is not yet a producer either: the runner
+    // has not started, so no health document claims a catalog that is not
+    // serving. A signal here exits cleanly through the runner's own close.
     let guard = ServiceGuard::catalog(session.clone());
     let _claim = loop {
         match guard.campaign(GUARD_TIMEOUT).await? {
@@ -117,14 +142,46 @@ async fn main() -> anyhow::Result<()> {
     // The operator decisions the bus cannot re-derive, loaded BEFORE the bus
     // seed so a live document still wins (#1102).
     let state = {
-        let mut st = CorrelatorState::new(config.clone());
-        if !config.operator_decisions.trim().is_empty() {
+        let mut st = CorrelatorState::new(engine_config);
+        if !operator_decisions.trim().is_empty() {
             st = st.with_journal(zensight_correlator::journal::Journal::new(
-                &config.operator_decisions,
+                &operator_decisions,
             ));
         }
         Arc::new(Mutex::new(st))
     };
+
+    // The health document reports what this process holds (#1202): the two
+    // "for health reporting" accessors finally have a consumer.
+    {
+        let st = state.clone();
+        runner.health().register_table_stats(Box::new(move || {
+            let s = st.lock().unwrap_or_else(|e| e.into_inner());
+            vec![
+                zensight_common::health::TableStats {
+                    name: "entities".to_string(),
+                    entries: s.entity_count() as u64,
+                    bytes: None,
+                    capacity_entries: None,
+                    capacity_bytes: None,
+                },
+                zensight_common::health::TableStats {
+                    name: "firing_alerts".to_string(),
+                    entries: s.firing_alerts() as u64,
+                    bytes: None,
+                    capacity_entries: None,
+                    capacity_bytes: None,
+                },
+                zensight_common::health::TableStats {
+                    name: "relation_claims".to_string(),
+                    entries: s.relation_claims() as u64,
+                    bytes: None,
+                    capacity_entries: None,
+                    capacity_bytes: None,
+                },
+            ]
+        }));
+    }
 
     // Engine.
     let (edge_tx, edge_rx) =
@@ -135,273 +192,123 @@ async fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new(state.clone(), rx, op_tx)
         .with_pdns(pdns_tx)
         .with_edges(edge_tx);
-    if config.incidents_enabled {
+    if incidents_enabled {
         engine = engine.with_incidents(incident_tx);
     } else {
         info!("incident evaluation disabled by config (incidents_enabled: false)");
     }
     let engine = engine;
-    let engine_shutdown = shutdown_rx.clone();
-    let engine_task = tokio::spawn(async move {
-        if let Err(e) = engine.run(engine_shutdown).await {
-            error!(error = %e, "engine error");
-        }
-    });
+    {
+        let engine_shutdown = shutdown_rx.clone();
+        runner.spawn_named("engine", async move {
+            if let Err(e) = engine.run(engine_shutdown).await {
+                error!(error = %e, "engine error");
+            }
+        });
+    }
 
-    // Entity publisher (drains ops → cached AdvancedPublishers + tombstones).
-    let pub_session = session.clone();
-    let pub_shutdown = shutdown_rx.clone();
-    let serialization = config.serialization;
-    let publish_task = tokio::spawn(async move {
-        if let Err(e) = publisher::run(pub_session, serialization, op_rx, pub_shutdown).await {
-            error!(error = %e, "publisher error");
-        }
-    });
+    // Every worker below is a runner task (#1202): supervised, so a panic
+    // shows in the health document's `dead_workers`, and aborted by the
+    // runner on shutdown. `shutdown_rx` is still handed to each, because the
+    // publishers drain on it.
+    macro_rules! worker {
+        ($name:literal, $body:expr) => {{
+            let sh = shutdown_rx.clone();
+            let s = session.clone();
+            let st = state.clone();
+            let _ = &st;
+            let fut = $body(s, st, sh);
+            runner.spawn_named($name, async move {
+                if let Err(e) = fut.await {
+                    error!(error = %e, concat!($name, " error"));
+                }
+            });
+        }};
+    }
 
-    // Incident publisher (#923). Spawned whether or not incidents are enabled:
-    // with the engine leg off, no op ever arrives and this task idles on an
-    // empty channel — which costs nothing and keeps the shutdown path one
-    // shape rather than two.
-    let incident_task = {
-        let s = session.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = publisher::run_incidents(s, serialization, incident_rx, sh).await {
-                error!(error = %e, "incident publisher error");
-            }
-        })
-    };
+    worker!("publisher", |s, _st, sh| publisher::run(
+        s,
+        serialization,
+        op_rx,
+        sh
+    ));
+    worker!("incident-publisher", |s, _st, sh| publisher::run_incidents(
+        s,
+        serialization,
+        incident_rx,
+        sh
+    ));
+    worker!("edge-publisher", |s, _st, sh| publisher::run_edges(
+        s,
+        serialization,
+        edge_rx,
+        sh
+    ));
+    worker!("pdns-publisher", |s, _st, sh| pdns::run(
+        s,
+        serialization,
+        pdns_rx,
+        sh
+    ));
+    worker!("entities-queryable", query::serve_entities);
+    worker!("edges-queryable", query::serve_edges);
+    worker!("incidents-queryable", query::serve_incidents);
+    worker!("alias-seed", query::serve_alias_seed);
+    worker!("assertion-seed", query::serve_assertion_seed);
+    worker!("acks-queryable", query::serve_acks);
+    worker!("silences-queryable", query::serve_silences);
+    worker!("names-queryable", query::serve_names);
+    worker!("catalog-introspect", |s, _st, sh| query::serve_introspect(
+        s, sh
+    ));
+    worker!("catalog-describe", |s, _st, sh| query::serve_describe(
+        s, sh
+    ));
+    worker!("assertions", |s, st, sh| query::serve_assertions(
+        s,
+        st,
+        serialization,
+        allow_operator_assertions,
+        sh
+    ));
+    worker!("ack-and-silence", |s, st, sh| query::serve_ack_and_silence(
+        s,
+        st,
+        serialization,
+        allow_operator_assertions,
+        sh
+    ));
+    worker!("lifecycle-sweep", |s, st, sh| query::run_lifecycle_sweep(
+        s,
+        st,
+        std::time::Duration::from_secs(30),
+        sh
+    ));
 
-    // Edge publisher (#917): the catalog's resolved relationship graph on
-    // @catalog/state/edge/*, with the same lifecycle as entities.
-    let edge_task = {
-        let s = session.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = publisher::run_edges(s, serialization, edge_rx, sh).await {
-                error!(error = %e, "edge publisher error");
-            }
-        })
-    };
-
-    // Historical passive-DNS publisher: durable IP↔name records on
-    // @catalog/state/pdns (#310), meant to be captured by a router-hosted
-    // storage backend.
-    let pdns_task = {
-        let s = session.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = pdns::run(s, serialization, pdns_rx, sh).await {
-                error!(error = %e, "pdns publisher error");
-            }
-        })
-    };
-
-    // Late-joiner queryables (entities seed + on-demand names).
-    let entities_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_entities(s, st, sh).await {
-                error!(error = %e, "entities queryable error");
-            }
-        })
-    };
-    let edges_query_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_edges(s, st, sh).await {
-                error!(error = %e, "edges queryable error");
-            }
-        })
-    };
-    let incidents_query_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_incidents(s, st, sh).await {
-                error!(error = %e, "incidents queryable error");
-            }
-        })
-    };
-    // The alias seed (#1107) — the family README.md tells consumers to follow
-    // and which answered nothing.
-    let alias_seed_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_alias_seed(s, st, sh).await {
-                error!(error = %e, "alias seed queryable error");
-            }
-        })
-    };
-    // The assertion seed (#1102) — the family a restart had no way to recover.
-    let assertion_seed_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_assertion_seed(s, st, sh).await {
-                error!(error = %e, "assertion seed queryable error");
-            }
-        })
-    };
-    let acks_query_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_acks(s, st, sh).await {
-                error!(error = %e, "acks queryable error");
-            }
-        })
-    };
-    let silences_query_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_silences(s, st, sh).await {
-                error!(error = %e, "silences queryable error");
-            }
-        })
-    };
-    let names_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_names(s, st, sh).await {
-                error!(error = %e, "names queryable error");
-            }
-        })
-    };
-
-    let introspect_task = {
-        let s = session.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_introspect(s, sh).await {
-                error!(error = %e, "introspect queryable error");
-            }
-        })
-    };
-
-    let describe_task = {
-        let s = session.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_describe(s, sh).await {
-                error!(error = %e, "describe queryable error");
-            }
-        })
-    };
-
-    // Operator identity assertions (#473): link/unlink. Served whether or not
-    // they are enabled — a gated procedure that *replies* "gated" tells an
-    // operator the feature exists; one that isn't declared just times out.
-    let assertion_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        let allowed = config.allow_operator_assertions;
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_assertions(s, st, serialization, allowed, sh).await {
-                error!(error = %e, "assertion queryable error");
-            }
-        })
-    };
-
-    // Ack/silence (#924): the same gate as link/unlink, and served whether or
-    // not it is enabled for the same reason — a gated procedure that replies
-    // "gated" tells an operator the feature exists.
-    let ack_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        let allowed = config.allow_operator_assertions;
-        tokio::spawn(async move {
-            if let Err(e) = query::serve_ack_and_silence(s, st, serialization, allowed, sh).await {
-                error!(error = %e, "ack/silence queryable error");
-            }
-        })
-    };
-
-    // Lifecycle sweep (#924): tombstone acks whose occurrence ended and
-    // silences past `ends_at`. On a timer, because `ends_at` is a clock and a
-    // window must close on a fleet where nothing else is happening.
-    let sweep_task = {
-        let s = session.clone();
-        let st = state.clone();
-        let sh = shutdown_rx.clone();
-        tokio::spawn(async move {
-            if let Err(e) =
-                query::run_lifecycle_sweep(s, st, std::time::Duration::from_secs(30), sh).await
-            {
-                error!(error = %e, "ack/silence sweep error");
-            }
-        })
-    };
-
-    // Input source: real evidence subscribers, or (in --demo) a synthetic feed
-    // driving the exact same engine/store/publisher pipeline.
-    let input_task = if args.demo {
+    if args.demo {
         let feed_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
+        runner.spawn_named("demo-feed", async move {
             zensight_correlator::demo::feed(tx, feed_shutdown).await;
-        })
+        });
     } else {
         let sub_session = session.clone();
         let sub_shutdown = shutdown_rx.clone();
-        tokio::spawn(async move {
+        runner.spawn_named("evidence-subscriber", async move {
             if let Err(e) = subscriber::run(sub_session, tx, sub_shutdown).await {
                 error!(error = %e, "subscriber error");
             }
-        })
-    };
+        });
+    }
 
-    // Presence, last (RFC 04 §5: `alive` ⇒ callable).
-    //
-    // Every queryable above is declared inside a spawned task, so reading the
-    // served set once here would race them — the same problem, and the same
-    // bounded wait, as `SensorRunner`'s `await_registry_coverage`
-    // (`DECLARATION_GRACE`, #648). The correlator is not a `SensorRunner`, so
-    // it never inherited that discipline: it used to assert `alive` inside the
-    // election, before a single queryable existed. On a loaded two-lane CI
-    // runner that window is wide enough for a judge's introspect sweep to land
-    // inside it, and `zensight-conformance` caught exactly that — which is the
-    // gate doing its job.
-    // The catalog's callable surface, by the exact keys it declares.
-    //
-    // NOT `await_registry_coverage`: that helper derives the serve-side
-    // spelling from *this host's* origin (`v1/h-…/@rpc/catalog/names`), which
-    // is right for a sensor and wrong here — the catalog serves on the
-    // `@catalog` SERVICE origin. Point it at this producer and it reports every
-    // procedure as unserved while the log says they are ready, then
-    // debug-panics. `await_served` takes concrete keys and makes no assumption
-    // about how they were spelled.
-    //
-    // It takes the producer name too (#1087): the write-coverage check rides
-    // along here exactly as it does inside `check_registry_coverage` for a
-    // sensor. It did not before, and the check is origin-derived, so the six
-    // write procedures below — more than any sensor has — were the ones nothing
-    // ever checked had gone through the audited seam.
+    // Declare the catalog `alive` only once every procedure it advertises is
+    // served (RFC 04 §5: alive ⇒ callable). A bounded wait, not a snapshot —
+    // the tasks above declare their queryables asynchronously. `await_served`
+    // takes concrete keys and makes no assumption about how they were
+    // declared.
     let callable = [
         entities_query_key(),
         names_query_key(),
-        // The three state seeds a late-joining frontend GETs. `entity` was
-        // always here; `incident` was missed by #923 and `ack`/`silence` did
-        // not exist until #925, which is exactly how a GUI came to issue three
-        // seed GETs of which two were answered by nothing at all.
         zensight_common::keyexpr::all_incidents_wildcard(),
-        // #1102: the assertion family was missing from this list, which is
-        // both the bug and how it stayed invisible — the list exists to assert
-        // what this producer can answer.
         zensight_common::keyexpr::all_assertion_wildcard(),
         zensight_common::keyexpr::all_alias_wildcard(),
         zensight_common::keyexpr::all_acks_wildcard(),
@@ -418,80 +325,43 @@ async fn main() -> anyhow::Result<()> {
     let missing =
         zensight_common::served::await_served("catalog", &callable, DECLARATION_GRACE).await;
     if !missing.is_empty() {
-        // Not fatal: presence with a partial surface is still better than a
-        // catalog the fleet cannot see at all, and the conformance judge will
-        // say so plainly if it matters. But it must not pass silently.
         error!(
             missing = ?missing,
-            "declaring `alive` with queryables still undeclared after {DECLARATION_GRACE:?} —              RFC 04 §5 says alive means callable, so this window is a promise this              process cannot yet keep"
+            "declaring `alive` with queryables still undeclared after {DECLARATION_GRACE:?} — \
+             RFC 04 §5 says alive means callable, so this window is a promise this \
+             process cannot yet keep"
         );
     }
     let _alive = match guard.declare_alive().await {
         Ok(token) => Some(token),
-        // A broken liveliness path must not stop the catalog, exactly as it
-        // must not stop a sensor's telemetry.
         Err(e) => {
             error!(error = %e, "failed to declare the catalog alive token");
             None
         }
     };
 
-    // Wait for a termination signal.
-    wait_for_shutdown().await;
+    // The runner declares the `correlator` producer's own alive token, waits
+    // for SIGTERM/Ctrl+C, then aborts the workers, retracts this process's
+    // alerts and closes the session. The `@catalog` claim and alive tokens
+    // above live until this function returns, which is after that.
+    let result = runner
+        .run_with_metadata(Some(serde_json::json!({
+            "service_origin": "@catalog",
+            "demo": args.demo,
+            "incidents_enabled": incidents_enabled,
+            "allow_operator_assertions": allow_operator_assertions,
+            "action_surface": false,
+        })))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"));
     info!("shutting down");
     let _ = shutdown_tx.send(true);
-
-    let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = input_task.await;
-        let _ = engine_task.await;
-        let _ = publish_task.await;
-        let _ = edge_task.await;
-        let _ = incident_task.await;
-        let _ = incidents_query_task.await;
-        let _ = acks_query_task.await;
-        let _ = silences_query_task.await;
-        let _ = ack_task.await;
-        let _ = sweep_task.await;
-        let _ = pdns_task.await;
-        let _ = entities_task.await;
-        let _ = names_task.await;
-        let _ = edges_query_task.await;
-        let _ = introspect_task.await;
-        let _ = describe_task.await;
-        let _ = assertion_task.await;
-        let _ = assertion_seed_task.await;
-        let _ = alias_seed_task.await;
-    })
-    .await;
-
-    session
-        .close()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to close Zenoh session: {e}"))?;
     info!("correlator stopped");
-    Ok(())
+    result
 }
 
-/// Initialize tracing from the logging config, quieting zenoh internals.
-fn init_tracing(logging: &LoggingConfig) {
-    use tracing_subscriber::EnvFilter;
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!("zensight_correlator={},zenoh=warn", logging.level))
-    });
-    match logging.format {
-        zensight_common::LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
-        zensight_common::LogFormat::Text => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
-        }
-    }
-}
-
-/// Block until Ctrl-C or SIGTERM.
+/// The standby loop's signal wait — before the runner runs, so before the
+/// runner's own.
 async fn wait_for_shutdown() {
     tokio::select! {
         _ = tokio::signal::ctrl_c() => {}

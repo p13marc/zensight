@@ -1,12 +1,12 @@
 //! Zenoh subscriber for receiving telemetry points.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::watch;
 use tracing::{info, trace, warn};
 use zenoh::sample::{Sample, SampleKind};
 use zensight_common::alert::Alert;
-use zensight_common::config::ZenohConfig;
 use zensight_common::keyexpr::{all_alerts_wildcard, all_liveliness_wildcard};
 
 use crate::collector::SharedCollector;
@@ -37,17 +37,15 @@ pub struct SubscriberStats {
 /// Zenoh subscriber that feeds telemetry to the collector.
 pub struct TelemetrySubscriber {
     collector: SharedCollector,
-    zenoh_config: ZenohConfig,
     key_expr: String,
     stats: SubscriberStats,
 }
 
 impl TelemetrySubscriber {
     /// Create a new subscriber.
-    pub fn new(collector: SharedCollector, zenoh_config: ZenohConfig) -> Self {
+    pub fn new(collector: SharedCollector) -> Self {
         Self {
             collector,
-            zenoh_config,
             key_expr: DEFAULT_KEY_EXPR.to_string(),
             stats: SubscriberStats::default(),
         }
@@ -155,23 +153,20 @@ impl TelemetrySubscriber {
         counts
     }
 
-    /// Run the subscriber until the shutdown signal is received.
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
-        info!("Connecting to Zenoh...");
-
-        // The shared builder is the ONLY place the session `namespace` (= the
-        // deployment base) is set (#466). An exporter with its own hand-rolled
-        // `zenoh::Config` would subscribe to a keyspace no sensor publishes to,
-        // and would simply export nothing — quietly.
-        let session = zensight_common::session::connect(&self.zenoh_config)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to open Zenoh session: {}", e))?;
-
-        info!(
-            zid = %session.zid(),
-            "Connected to Zenoh"
-        );
-
+    /// Run the subscriber on the runner's session until the shutdown signal
+    /// is received.
+    ///
+    /// The session is the process's one session (#1202): the runner opened it
+    /// through the shared builder — the ONLY place the session `namespace`
+    /// (= the deployment base) is set (#466) — and publishes this exporter's
+    /// own health document on it. A second session here would have been a
+    /// second peer with its own routing state, for one process.
+    pub async fn run(
+        self,
+        session: Arc<zenoh::Session>,
+        mut shutdown: watch::Receiver<bool>,
+    ) -> anyhow::Result<()> {
+        let session = &*session;
         // Subscribe to telemetry
         info!(key_expr = %self.key_expr, "Subscribing to telemetry");
         // An ADVANCED subscriber, not a plain one (#763). Sensors publish
@@ -181,7 +176,7 @@ impl TelemetrySubscriber {
         // sample dropped in flight was simply lost. For a metrics pipeline that
         // is the wrong trade — a gap in a dashboard is a claim about the world.
         let subscriber =
-            zensight_common::subscribe::declare_telemetry_subscriber(&session, &self.key_expr)
+            zensight_common::subscribe::declare_telemetry_subscriber(session, &self.key_expr)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to create subscriber: {}", e))?;
 
@@ -265,7 +260,7 @@ impl TelemetrySubscriber {
         // lost every firing alert until its next state transition. Same class
         // of bug as the staleness sweep, from the other end.
         if self.collector.export_alerts() {
-            let seeded = Self::seed_alerts(&session, &self.collector).await;
+            let seeded = Self::seed_alerts(session, &self.collector).await;
             if seeded > 0 {
                 info!(seeded, "Seeded firing alerts from the bus");
             }
@@ -273,7 +268,7 @@ impl TelemetrySubscriber {
             // acknowledged, and how they group. Without this the `acked` label
             // reads `false` for every acknowledged alert until the catalog next
             // re-emits, which its content-hash gate makes deliberately rare.
-            let (incidents, acks) = self.seed_catalog(&session).await;
+            let (incidents, acks) = self.seed_catalog(session).await;
             if incidents > 0 || acks > 0 {
                 info!(incidents, acks, "Seeded catalog state from the bus");
             }
@@ -542,7 +537,7 @@ mod tests {
             FilterConfig::default(),
         ));
 
-        let subscriber = TelemetrySubscriber::new(collector, ZenohConfig::default());
+        let subscriber = TelemetrySubscriber::new(collector);
         assert_eq!(subscriber.key_expr, DEFAULT_KEY_EXPR);
     }
 
@@ -554,8 +549,7 @@ mod tests {
             FilterConfig::default(),
         ));
 
-        let subscriber =
-            TelemetrySubscriber::new(collector, ZenohConfig::default()).with_key_expr("custom/**");
+        let subscriber = TelemetrySubscriber::new(collector).with_key_expr("custom/**");
         assert_eq!(subscriber.key_expr, "custom/**");
     }
 

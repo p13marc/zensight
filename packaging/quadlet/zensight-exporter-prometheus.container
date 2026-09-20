@@ -8,7 +8,8 @@
 # host address Prometheus is configured to scrape. A bridged network needs an
 # explicit PublishPort matching that config, in two places instead of one.
 #
-# No health document yet — see #1202.
+# A host-origin producer too (#1202): `state/exporter-prometheus/health`
+# carries this process's self_stats, so the budget below is measurable.
 [Unit]
 Description=ZenSight prometheus exporter
 After=network-online.target

@@ -123,8 +123,10 @@ does). Then two subtractions, both deliberate:
 
 **`info` findings are not defects.** Calibrated against a real dev deployment:
 `admin-unreachable` (no router in a peer-only mesh), `storage-coverage` (no
-storage) and `describe-missing` (not every producer is running) all fire at
-`info` in a perfectly healthy isolated run, as do the `cardinality-over-declared`
+storage) and `describe-missing` (not every producer is running — since #1202
+that list includes the service tier's `correlator`, `policy-compiler`,
+`exporter-prometheus` and `exporter-otel`, of which the isolated run starts at
+most the correlator) all fire at `info` in a perfectly healthy isolated run, as do the `cardinality-over-declared`
 exemptions for `{var...}` families. A gate that reddens on those is a gate
 nobody keeps.
 

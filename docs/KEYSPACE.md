@@ -365,6 +365,17 @@ in a log.
   declare `artifact`/`tree`/`store` (blake3), so the slice answers "does this
   producer serve blobs?" and the generated `zensight_common::registry::blob`
   module carries the typed key builders.
+- **Every process on the bus is a producer** (#1202). The service tier —
+  the correlator (`@catalog`), the policy compiler (`@desired`, its `run`
+  daemon) and both exporters — runs through `SensorRunner` too, as the
+  host-origin producers `correlator`, `policy-compiler`, `exporter-prometheus`
+  and `exporter-otel`: each publishes the five framework documents (health with
+  `self_stats`, errors, sensor, self-evidence, `sensor-budget` alerts) and
+  serves `introspect`/`describe` on its host-origin keys. The service origins
+  are unchanged — `@catalog`/`@desired` keys stay the single writer's — and
+  the four registries (`correlator.toml`, `policy-compiler.toml`,
+  `exporter-*.toml`) declare nothing but the framework set: none of them
+  publishes telemetry (RFC 04 §1.1).
 - **The registry is load-bearing.** Publishing a telemetry subject that is not
   registered panics in debug builds and warns once per name in release
   (`zensight_common::metric_guard`). This is only meaningful because the host

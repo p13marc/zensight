@@ -1,61 +1,59 @@
 //! OpenTelemetry exporter for ZenSight telemetry.
+//!
+//! A host-origin **producer** since #1202: `SensorRunner` opens the one
+//! session, publishes the five framework documents (a health document with
+//! `self_stats`, the declared budget and the shed ladder) under
+//! `state/exporter-otel/…`, and serves `introspect`/`describe`. The exporter
+//! still publishes no telemetry (RFC 04 §1.1); what changed is that a fleet
+//! can now see this process the way it sees every sensor.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use tokio::sync::watch;
-use tracing::{Level, error, info};
-use tracing_subscriber::EnvFilter;
+use tracing::{error, info};
+use zensight_sensor_core::{SensorArgs, SensorRunner};
 
-use zensight_exporter_otel::{ExporterConfig, OtelExporter, TelemetrySubscriber};
+use zensight_exporter_otel::{ExporterConfig, OtelExporter, PRODUCER, TelemetrySubscriber};
 
 /// OpenTelemetry exporter for ZenSight telemetry.
 #[derive(Parser, Debug)]
 #[command(name = "zensight-exporter-otel")]
-#[command(about = "Export ZenSight telemetry via OpenTelemetry OTLP")]
+#[command(about = "Export ZenSight telemetry to OpenTelemetry collectors")]
 #[command(version)]
 struct Args {
-    /// Path to configuration file (JSON5 format).
-    #[arg(short, long)]
-    config: Option<String>,
+    /// The flags every producer takes: `--config` (default
+    /// `otel-exporter.json5`, as every sensor defaults to its own file),
+    /// `--log-level` (overrides the file's `logging.level`, #757) and
+    /// `--check-config` (#1150).
+    #[command(flatten)]
+    common: SensorArgs,
 
     /// OTLP endpoint (overrides config).
     #[arg(long)]
     endpoint: Option<String>,
+}
 
-    /// Log level (trace, debug, info, warn, error).
-    ///
-    /// No `default_value`, deliberately: with one, the flag always wins and
-    /// `logging.level` in the config file is unreachable — which is exactly why
-    /// it was dead config (#757). Absent here means "use the file".
-    #[arg(long)]
-    log_level: Option<String>,
-    /// Parse and validate the config, print the verdict, and exit — open no
-    /// session, publish nothing (#1150). A deploy script gates on the exit
-    /// status.
-    #[arg(long)]
-    check_config: bool,
+impl Args {
+    fn parse_with_default_config() -> Self {
+        let matches = Self::command()
+            .mut_arg("config", |arg| arg.default_value("otel-exporter.json5"))
+            .get_matches();
+        Self::from_arg_matches(&matches).expect("the arguments parse")
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = Args::parse_with_default_config();
 
-    // Load configuration
-    let mut config = if let Some(config_path) = &args.config {
-        ExporterConfig::load_from_file(config_path)?
-    } else {
-        ExporterConfig::default()
-    };
+    let mut config = ExporterConfig::load_from_file(&args.common.config)?;
 
-    // `--check-config` stops here, before the Zenoh session and the OTLP
-    // exporter exist (#1150). A deploy script gates on the exit status.
-    if args.check_config {
-        match &args.config {
-            Some(path) => println!("config ok: {path}"),
-            None => println!("config ok: built-in defaults (no --config given)"),
-        }
+    // `--check-config` stops here, before the runner, the session and the
+    // OTLP exporter exist (#1150). A deploy script gates on the exit status.
+    if args.common.check_config {
+        zensight_sensor_core::report_config_ok(&args.common.config);
         return Ok(());
     }
 
@@ -64,53 +62,58 @@ async fn main() -> anyhow::Result<()> {
         config.opentelemetry.endpoint = endpoint;
     }
 
-    // Initialize logging
-    // The CLI flag OVERRIDES the file rather than replacing it, so both work
-    // and the more specific one wins (#757).
-    let level_str = args
-        .log_level
-        .clone()
-        .unwrap_or_else(|| config.logging.level.clone());
-    let log_level = level_str.parse().unwrap_or(Level::INFO);
-    let filter = EnvFilter::from_default_env()
-        .add_directive(format!("zensight_exporter_otel={}", log_level).parse()?)
-        .add_directive(format!("zenoh={}", Level::WARN).parse()?)
-        .add_directive(format!("opentelemetry={}", Level::WARN).parse()?);
+    // Everything the exporter needs is cloned out before the config moves
+    // into the runner.
+    let otel = config.opentelemetry.clone();
+    let filters = config.filters.clone();
 
-    match config.logging.format {
-        zensight_exporter_otel::config::LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
-        zensight_exporter_otel::config::LogFormat::Text => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
-        }
-    }
+    // The runner (#1202) initialises tracing (`logging.level`/`format`, the
+    // CLI flag winning — #757's rule, now the framework's), opens the one
+    // session and owns the health, identity and budget publishers.
+    let source = zensight_sensor_core::resolved_source(None);
+    let mut runner = SensorRunner::new_with_args(PRODUCER, source, config, Some(&args.common))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    runner = runner.with_identity();
+    let session = runner.session().clone();
 
     info!("Starting ZenSight OpenTelemetry Exporter");
     info!(
-        endpoint = %config.opentelemetry.endpoint,
-        protocol = ?config.opentelemetry.protocol,
-        export_metrics = config.opentelemetry.export_metrics,
-        export_logs = config.opentelemetry.export_logs,
-        export_alerts = config.opentelemetry.export_alerts,
-        traces = config.opentelemetry.traces.enabled,
+        endpoint = %otel.endpoint,
+        protocol = ?otel.protocol,
+        export_metrics = otel.export_metrics,
+        export_logs = otel.export_logs,
+        export_alerts = otel.export_alerts,
+        traces = otel.traces.enabled,
         "Configuration loaded"
     );
 
-    // Create shutdown signal
+    // The workers' shutdown, flipped after the runner returns.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Create the OTEL exporter
-    let exporter = Arc::new(OtelExporter::new(&config.opentelemetry, &config.filters).await?);
+    let exporter = Arc::new(OtelExporter::new(&otel, &filters).await?);
+
+    // The health document reports what this process holds (#1202): the
+    // series it is observing for its asynchronous instruments.
+    {
+        let e = exporter.clone();
+        runner.health().register_table_stats(Box::new(move || {
+            vec![zensight_common::health::TableStats {
+                name: "series".to_string(),
+                entries: e.series_count() as u64,
+                bytes: None,
+                capacity_entries: None,
+                capacity_bytes: None,
+            }]
+        }));
+    }
 
     // Create Zenoh subscriber. A configured `filters.key_expr` narrows the
     // telemetry subscription (R6/#357) — default stays the full telemetry class selector.
     let subscriber = {
-        let s = TelemetrySubscriber::new(exporter.clone(), config.zenoh.clone());
-        match &config.filters.key_expr {
+        let s = TelemetrySubscriber::new(exporter.clone());
+        match &filters.key_expr {
             Some(ke) => s.with_key_expr(ke.clone()),
             None => s,
         }
@@ -133,83 +136,74 @@ async fn main() -> anyhow::Result<()> {
     /// enough that no real incident is forgotten mid-flight, short enough that
     /// a reinstalled fleet does not ratchet the tracker to `MAX_PENDING`.
     const SPAN_TTL: Duration = Duration::from_secs(3600);
-    let cleanup_exporter = exporter.clone();
-    let mut cleanup_shutdown = shutdown_rx.clone();
-    let cleanup_task = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(SWEEP_EVERY);
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {
-                    cleanup_exporter.cleanup_stale_observations(STALE_AFTER);
-                    // The same sweep, for the same reason (#1146): a producer
-                    // that stopped reporting will not send the `Resolved` an
-                    // open lifecycle is waiting for. Without this the tracker
-                    // only ever grew, and at `MAX_PENDING` it stopped emitting
-                    // spans at all for the rest of the process's life.
-                    //
-                    // The TTL is generous next to the sweep, because sensors
-                    // re-publish a firing alert: a real incident refreshes
-                    // itself long before this, so what expires here is a
-                    // lifecycle whose producer is gone.
-                    cleanup_exporter.expire_alert_spans(SPAN_TTL);
-                }
-                _ = cleanup_shutdown.changed() => {
-                    if *cleanup_shutdown.borrow() {
-                        break;
+    {
+        let cleanup_exporter = exporter.clone();
+        let mut cleanup_shutdown = shutdown_rx.clone();
+        runner.spawn_named("cleanup", async move {
+            let mut interval = tokio::time::interval(SWEEP_EVERY);
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {
+                        cleanup_exporter.cleanup_stale_observations(STALE_AFTER);
+                        // The same sweep, for the same reason (#1146): a producer
+                        // that stopped reporting will not send the `Resolved` an
+                        // open lifecycle is waiting for. Without this the tracker
+                        // only ever grew, and at `MAX_PENDING` it stopped emitting
+                        // spans at all for the rest of the process's life.
+                        //
+                        // The TTL is generous next to the sweep, because sensors
+                        // re-publish a firing alert: a real incident refreshes
+                        // itself long before this, so what expires here is a
+                        // lifecycle whose producer is gone.
+                        cleanup_exporter.expire_alert_spans(SPAN_TTL);
+                    }
+                    _ = cleanup_shutdown.changed() => {
+                        if *cleanup_shutdown.borrow() {
+                            break;
+                        }
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
-    // Start subscriber
-    let subscriber_shutdown = shutdown_rx.clone();
+    // Start subscriber.
+    //
     // A dead pipeline winds the process down rather than lingering in a state
     // whose only symptom is silence (#757). This exporter has no /health to
     // report through — it pushes rather than being scraped — so exiting
     // non-zero, and letting the systemd unit's `Restart=on-failure` do its job,
-    // IS the signal.
-    let subscriber_fail_tx = shutdown_tx.clone();
-    let pipeline_failed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let failed_flag = pipeline_failed.clone();
-    let subscriber_task = tokio::spawn(async move {
-        if let Err(e) = subscriber.run(subscriber_shutdown).await {
-            error!("Subscriber error: {}", e);
-            failed_flag.store(true, std::sync::atomic::Ordering::Release);
-            let _ = subscriber_fail_tx.send(true);
-        }
-    });
-
-    // Wait for shutdown signal
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received Ctrl+C, shutting down...");
-        }
-        _ = async {
-            #[cfg(unix)]
-            {
-                let mut sigterm = tokio::signal::unix::signal(
-                    tokio::signal::unix::SignalKind::terminate()
-                ).unwrap();
-                sigterm.recv().await;
+    // IS the signal. The failure races the runner below.
+    let (failed_tx, mut failed_rx) = watch::channel(false);
+    {
+        let subscriber_shutdown = shutdown_rx.clone();
+        let session = session.clone();
+        runner.spawn_named("telemetry-subscriber", async move {
+            if let Err(e) = subscriber.run(session, subscriber_shutdown).await {
+                error!("Subscriber error: {}", e);
+                let _ = failed_tx.send(true);
             }
-            #[cfg(not(unix))]
-            {
-                std::future::pending::<()>().await;
-            }
-        } => {
-            info!("Received SIGTERM, shutting down...");
-        }
+        });
     }
 
-    // Signal shutdown
-    shutdown_tx.send(true)?;
+    // The runner waits for SIGTERM/Ctrl+C, then aborts the workers, retracts
+    // this process's alerts and closes the session.
+    let metadata = serde_json::json!({
+        "endpoint": otel.endpoint,
+        "export_metrics": otel.export_metrics,
+        "export_logs": otel.export_logs,
+        "export_alerts": otel.export_alerts,
+        "traces": otel.traces.enabled,
+        "action_surface": false,
+    });
+    let outcome = tokio::select! {
+        r = runner.run_with_metadata(Some(metadata)) => r.map_err(|e| anyhow::anyhow!("{e}")),
+        _ = failed_rx.changed() => Err(anyhow::anyhow!("telemetry pipeline failed")),
+    };
 
-    // Wait for subscriber to finish
-    let _ = tokio::time::timeout(Duration::from_secs(5), subscriber_task).await;
-
-    // Shutdown OTEL exporter
-    cleanup_task.abort();
+    // Signal shutdown to whatever is still draining, then flush the OTEL
+    // pipeline: a stop must not discard what it has already accepted.
+    let _ = shutdown_tx.send(true);
     exporter.shutdown()?;
 
     // Print final stats
@@ -224,11 +218,10 @@ async fn main() -> anyhow::Result<()> {
 
     // Exit non-zero when the pipeline died, so a supervisor restarts us instead
     // of leaving a process that is running and exporting nothing (#757).
-    if pipeline_failed.load(std::sync::atomic::Ordering::Acquire) {
-        error!("Exporter stopped because its telemetry pipeline failed");
-        anyhow::bail!("telemetry pipeline failed");
+    if let Err(e) = &outcome {
+        error!("Exporter stopped because its telemetry pipeline failed: {e}");
+    } else {
+        info!("Exporter stopped");
     }
-
-    info!("Exporter stopped");
-    Ok(())
+    outcome
 }

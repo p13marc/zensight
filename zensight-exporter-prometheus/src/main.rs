@@ -1,15 +1,22 @@
 //! Prometheus exporter for ZenSight telemetry.
+//!
+//! A host-origin **producer** since #1202: `SensorRunner` opens the one
+//! session, publishes the five framework documents (a health document with
+//! `self_stats`, the declared budget and the shed ladder) under
+//! `state/exporter-prometheus/…`, and serves `introspect`/`describe`. The
+//! exporter still publishes no telemetry (RFC 04 §1.1); what changed is that a
+//! fleet can now see this process the way it sees every sensor.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches, Parser};
 use tokio::sync::watch;
-use tracing::{Level, error, info};
-use tracing_subscriber::EnvFilter;
+use tracing::{error, info};
+use zensight_sensor_core::{SensorArgs, SensorRunner};
 
 use zensight_exporter_prometheus::{
-    ExporterConfig, HttpServer, MetricCollector, RemoteWriteClient, TelemetrySubscriber,
+    ExporterConfig, HttpServer, MetricCollector, PRODUCER, RemoteWriteClient, TelemetrySubscriber,
 };
 
 /// Prometheus exporter for ZenSight telemetry.
@@ -18,46 +25,39 @@ use zensight_exporter_prometheus::{
 #[command(about = "Export ZenSight telemetry as Prometheus metrics")]
 #[command(version)]
 struct Args {
-    /// Path to configuration file (JSON5 format).
-    #[arg(short, long)]
-    config: Option<String>,
+    /// The flags every producer takes: `--config` (default
+    /// `prometheus-exporter.json5`, as every sensor defaults to its own
+    /// file), `--log-level` (overrides the file's `logging.level`, #757) and
+    /// `--check-config` (#1150).
+    #[command(flatten)]
+    common: SensorArgs,
 
     /// HTTP listen address (overrides config).
     #[arg(long)]
     listen: Option<String>,
+}
 
-    /// Log level (trace, debug, info, warn, error).
-    ///
-    /// No `default_value`, deliberately: with one, the flag always wins and
-    /// `logging.level` in the config file is unreachable — which is exactly why
-    /// it was dead config (#757). Absent here means "use the file".
-    #[arg(long)]
-    log_level: Option<String>,
-    /// Parse and validate the config, print the verdict, and exit — open no
-    /// session, publish nothing (#1150). A deploy script gates on the exit
-    /// status.
-    #[arg(long)]
-    check_config: bool,
+impl Args {
+    fn parse_with_default_config() -> Self {
+        let matches = Self::command()
+            .mut_arg("config", |arg| {
+                arg.default_value("prometheus-exporter.json5")
+            })
+            .get_matches();
+        Self::from_arg_matches(&matches).expect("the arguments parse")
+    }
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let args = Args::parse_with_default_config();
 
-    // Load configuration
-    let mut config = if let Some(config_path) = &args.config {
-        ExporterConfig::load_from_file(config_path)?
-    } else {
-        ExporterConfig::default()
-    };
+    let mut config = ExporterConfig::load_from_file(&args.common.config)?;
 
-    // `--check-config` stops here, before the Zenoh session and the HTTP
-    // listener exist (#1150). A deploy script gates on the exit status.
-    if args.check_config {
-        match &args.config {
-            Some(path) => println!("config ok: {path}"),
-            None => println!("config ok: built-in defaults (no --config given)"),
-        }
+    // `--check-config` stops here, before the runner, the session and the
+    // HTTP listener exist (#1150). A deploy script gates on the exit status.
+    if args.common.check_config {
+        zensight_sensor_core::report_config_ok(&args.common.config);
         return Ok(());
     }
 
@@ -66,35 +66,26 @@ async fn main() -> anyhow::Result<()> {
         config.prometheus.listen = listen;
     }
 
-    // Initialize logging.
-    //
-    // `logging.level` in the config file was dead — only the CLI flag was ever
-    // read (#757). The flag now OVERRIDES the file rather than replacing it, so
-    // both work and the more specific one wins.
-    let level_str = args
-        .log_level
-        .clone()
-        .unwrap_or_else(|| config.logging.level.clone());
-    let log_level = level_str.parse().unwrap_or(Level::INFO);
-    let filter = EnvFilter::from_default_env()
-        .add_directive(format!("zensight_exporter_prometheus={}", log_level).parse()?)
-        .add_directive(format!("zenoh={}", Level::WARN).parse()?);
+    // Everything the collector and the server need is cloned out before the
+    // config moves into the runner.
+    let prometheus = config.prometheus.clone();
+    let aggregation = config.aggregation.clone();
+    let filters = config.filters.clone();
+    let remote_write = config.remote_write.clone();
 
-    match config.logging.format {
-        zensight_exporter_prometheus::config::LogFormat::Json => {
-            tracing_subscriber::fmt()
-                .with_env_filter(filter)
-                .json()
-                .init();
-        }
-        zensight_exporter_prometheus::config::LogFormat::Text => {
-            tracing_subscriber::fmt().with_env_filter(filter).init();
-        }
-    }
+    // The runner (#1202) initialises tracing (`logging.level`/`format`, the
+    // CLI flag winning — #757's rule, now the framework's), opens the one
+    // session and owns the health, identity and budget publishers.
+    let source = zensight_sensor_core::resolved_source(None);
+    let mut runner = SensorRunner::new_with_args(PRODUCER, source, config, Some(&args.common))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    runner = runner.with_identity();
+    let session = runner.session().clone();
 
     info!("Starting ZenSight Prometheus Exporter");
 
-    // Create shutdown signal
+    // The workers' shutdown, flipped after the runner returns.
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     // Whether the ingest pipeline is actually alive. `/health` reports it, so
@@ -103,14 +94,44 @@ async fn main() -> anyhow::Result<()> {
 
     // Create the collector
     let collector = Arc::new(MetricCollector::new(
-        config.prometheus.clone(),
-        config.aggregation.clone(),
-        config.filters.clone(),
+        prometheus.clone(),
+        aggregation.clone(),
+        filters.clone(),
     ));
 
+    // The health document reports what this process holds (#1202): the
+    // series it is forwarding, and the alerts and incidents it mirrors.
+    {
+        let c = collector.clone();
+        runner.health().register_table_stats(Box::new(move || {
+            vec![
+                zensight_common::health::TableStats {
+                    name: "series".to_string(),
+                    entries: c.series_count() as u64,
+                    bytes: None,
+                    capacity_entries: Some(aggregation.max_series as u64),
+                    capacity_bytes: None,
+                },
+                zensight_common::health::TableStats {
+                    name: "alerts".to_string(),
+                    entries: c.alert_count() as u64,
+                    bytes: None,
+                    capacity_entries: None,
+                    capacity_bytes: None,
+                },
+                zensight_common::health::TableStats {
+                    name: "incidents".to_string(),
+                    entries: c.incident_count() as u64,
+                    bytes: None,
+                    capacity_entries: None,
+                    capacity_bytes: None,
+                },
+            ]
+        }));
+    }
+
     // Parse listen address
-    let listen_addr = config
-        .prometheus
+    let listen_addr = prometheus
         .listen
         .parse()
         .map_err(|e| anyhow::anyhow!("Invalid listen address: {}", e))?;
@@ -118,8 +139,8 @@ async fn main() -> anyhow::Result<()> {
     // Create components. A configured `filters.key_expr` narrows the telemetry
     // subscription (R6/#357) — default stays the full telemetry class selector.
     let subscriber = {
-        let s = TelemetrySubscriber::new(collector.clone(), config.zenoh.clone());
-        match &config.filters.key_expr {
+        let s = TelemetrySubscriber::new(collector.clone());
+        match &filters.key_expr {
             Some(ke) => s.with_key_expr(ke.clone()),
             None => s,
         }
@@ -127,18 +148,16 @@ async fn main() -> anyhow::Result<()> {
     let http_server = HttpServer::new(
         collector.clone(),
         listen_addr,
-        config.prometheus.path.clone(),
+        prometheus.path.clone(),
         health.clone(),
     );
 
     // Start cleanup task
     let cleanup_collector = collector.clone();
-    let cleanup_interval = Duration::from_secs(config.aggregation.cleanup_interval_secs);
+    let cleanup_interval = Duration::from_secs(aggregation.cleanup_interval_secs);
     let mut cleanup_shutdown = shutdown_rx.clone();
-
-    let cleanup_task = tokio::spawn(async move {
+    runner.spawn_named("cleanup", async move {
         let mut interval = tokio::time::interval(cleanup_interval);
-
         loop {
             tokio::select! {
                 _ = interval.tick() => {
@@ -159,76 +178,61 @@ async fn main() -> anyhow::Result<()> {
     // used to log the error and carry on, serving an empty /metrics and a 200
     // /health forever — indistinguishable, to anything watching, from
     // "connected, no data yet". A monitoring component that reports healthy
-    // while it monitors nothing is worse than one that is plainly down.
-    let subscriber_shutdown = shutdown_rx.clone();
-    let subscriber_health = health.clone();
-    let subscriber_fail_tx = shutdown_tx.clone();
-    let subscriber_task = tokio::spawn(async move {
-        if let Err(e) = subscriber.run(subscriber_shutdown).await {
-            error!("Subscriber error: {}", e);
-            subscriber_health.set_failed();
-            // Wind the process down rather than linger in a state whose only
-            // symptom is silence.
-            let _ = subscriber_fail_tx.send(true);
-        }
-    });
+    // while it monitors nothing is worse than one that is plainly down. The
+    // failure flips `pipeline_failed`, which races the runner below.
+    let (failed_tx, mut failed_rx) = watch::channel(false);
+    {
+        let subscriber_shutdown = shutdown_rx.clone();
+        let subscriber_health = health.clone();
+        let session = session.clone();
+        runner.spawn_named("telemetry-subscriber", async move {
+            if let Err(e) = subscriber.run(session, subscriber_shutdown).await {
+                error!("Subscriber error: {}", e);
+                subscriber_health.set_failed();
+                let _ = failed_tx.send(true);
+            }
+        });
+    }
 
     // Start HTTP server
-    let http_shutdown = shutdown_rx.clone();
-    let http_task = tokio::spawn(async move {
-        if let Err(e) = http_server.run(http_shutdown).await {
-            error!("HTTP server error: {}", e);
-        }
-    });
+    {
+        let http_shutdown = shutdown_rx.clone();
+        runner.spawn_named("http", async move {
+            if let Err(e) = http_server.run(http_shutdown).await {
+                error!("HTTP server error: {}", e);
+            }
+        });
+    }
 
     // Start remote-write push loop (optional; default off)
-    let remote_write_task = if config.remote_write.enabled {
-        let client = RemoteWriteClient::new(collector.clone(), &config.remote_write)?;
+    if remote_write.enabled {
+        let client = RemoteWriteClient::new(collector.clone(), &remote_write)?;
         let rw_shutdown = shutdown_rx.clone();
-        Some(tokio::spawn(async move {
+        runner.spawn_named("remote-write", async move {
             if let Err(e) = client.run(rw_shutdown).await {
                 error!("Remote-write error: {}", e);
             }
-        }))
-    } else {
-        None
-    };
-
-    // Wait for shutdown signal
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Received Ctrl+C, shutting down...");
-        }
-        _ = async {
-            #[cfg(unix)]
-            {
-                let mut sigterm = tokio::signal::unix::signal(
-                    tokio::signal::unix::SignalKind::terminate()
-                ).unwrap();
-                sigterm.recv().await;
-            }
-            #[cfg(not(unix))]
-            {
-                std::future::pending::<()>().await;
-            }
-        } => {
-            info!("Received SIGTERM, shutting down...");
-        }
+        });
     }
 
-    // Signal shutdown
-    shutdown_tx.send(true)?;
+    // The runner waits for SIGTERM/Ctrl+C, then aborts the workers, retracts
+    // this process's alerts and closes the session. A pipeline failure ends
+    // the wait early: exiting non-zero, and letting the unit's
+    // `Restart=on-failure` do its job, IS the signal (#757).
+    let metadata = serde_json::json!({
+        "listen": prometheus.listen,
+        "path": prometheus.path,
+        "remote_write": remote_write.enabled,
+        "max_series": aggregation.max_series,
+        "action_surface": false,
+    });
+    let outcome = tokio::select! {
+        r = runner.run_with_metadata(Some(metadata)) => r.map_err(|e| anyhow::anyhow!("{e}")),
+        _ = failed_rx.changed() => Err(anyhow::anyhow!("telemetry pipeline failed")),
+    };
 
-    // Wait for tasks to complete
-    let _ = tokio::time::timeout(Duration::from_secs(5), async {
-        let _ = subscriber_task.await;
-        let _ = http_task.await;
-        let _ = cleanup_task.await;
-        if let Some(task) = remote_write_task {
-            let _ = task.await;
-        }
-    })
-    .await;
+    // Signal shutdown to whatever is still draining.
+    let _ = shutdown_tx.send(true);
 
     // Print final stats
     let stats = collector.stats();
@@ -240,6 +244,10 @@ async fn main() -> anyhow::Result<()> {
         "Final statistics"
     );
 
-    info!("Exporter stopped");
-    Ok(())
+    if let Err(e) = &outcome {
+        error!("Exporter stopped: {e}");
+    } else {
+        info!("Exporter stopped");
+    }
+    outcome
 }

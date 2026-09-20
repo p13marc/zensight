@@ -56,10 +56,10 @@ later. Capabilities are the `.service`'s `AmbientCapabilities` without the
 
 | Unit | Exposure | Capabilities | `MemoryMax` | `budget_rss_mb` |
 |---|---|---|---:|---:|
-| `zensight-correlator` | 1.7 OK | — | 128M | — |
-| `zensight-desired` | 1.7 OK | — | 96M | — |
-| `zensight-exporter-otel` | 1.7 OK | — | 128M | — |
-| `zensight-exporter-prometheus` | 1.7 OK | — | 128M | — |
+| `zensight-correlator` | 1.7 OK | — | 128M | 96 |
+| `zensight-desired` | 1.7 OK | — | 96M | 72 |
+| `zensight-exporter-otel` | 1.7 OK | — | 128M | 96 |
+| `zensight-exporter-prometheus` | 1.7 OK | — | 128M | 96 |
 | `zensight-historian` | 1.7 OK | — | 320M | 256 |
 | `zensight-sensor-bmc` | 1.7 OK | — | 96M | 72 |
 | `zensight-sensor-container` | 2.2 OK | — | 64M | 48 |
@@ -77,10 +77,10 @@ later. Capabilities are the `.service`'s `AmbientCapabilities` without the
 | `zensight-sensor-sysinfo` | 1.8 OK | — | 256M | 192 |
 | `zensight-sensor-systemd` | 1.8 OK | — | 128M | 96 |
 
-The four service-tier rows have no budget because they have no health document
-to carry one — see #1202. Their `MemoryMax` is therefore the only number
-holding them, and it cannot be measured with `just fleet-sizing` the way a
-sensor's can.
+The four service-tier rows carry a budget since #1202: each of those
+processes is a host-origin producer through `SensorRunner` now, so it publishes
+a health document, and `just fleet-sizing` measures it the way it measures a
+sensor. The check's rule 2 — the budget below the backstop — is live for them.
 
 Every `MemoryMax` here is a **starting point**, not a measurement. The two
 budgets that came from one — netring's 448 and the historian's 256 — say so in

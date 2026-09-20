@@ -537,6 +537,11 @@ impl CorrelatorState {
         self.silences.contains_key(id)
     }
 
+    /// Number of entities currently held, for health reporting (#1202).
+    pub fn entity_count(&self) -> usize {
+        self.last.len()
+    }
+
     /// Number of firing alerts held, for health reporting.
     pub fn firing_alerts(&self) -> usize {
         self.alerts.len()

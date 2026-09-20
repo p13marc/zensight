@@ -223,6 +223,25 @@ pub enum Protocol {
     /// component that must be able to say it is approaching its budget, so
     /// "not a sensor" is not a reason to leave it outside.
     Historian,
+    /// The identity correlator's process identity (#1202): the host-origin
+    /// producer beside the `@catalog` service origin. Same reasoning as the
+    /// historian — the framework's identity of a producer runs through this
+    /// enum, and a process with a budget must be able to say it is
+    /// approaching it. Wire token `correlator`.
+    Correlator,
+    /// The fleet policy compiler's process identity (#1202), beside the
+    /// `@desired` service origin. `desired` is the service's registry name,
+    /// so the process is `policy-compiler` — the crate's own description.
+    #[serde(rename = "policy-compiler")]
+    PolicyCompiler,
+    /// The Prometheus exporter's process identity (#1202). Wire token
+    /// `exporter-prometheus`.
+    #[serde(rename = "exporter-prometheus")]
+    ExporterPrometheus,
+    /// The OpenTelemetry exporter's process identity (#1202). Wire token
+    /// `exporter-otel`.
+    #[serde(rename = "exporter-otel")]
+    ExporterOtel,
 }
 
 impl Protocol {
@@ -246,6 +265,10 @@ impl Protocol {
             Protocol::Probe => "probe",
             Protocol::Historian => "historian",
             Protocol::Bmc => "bmc",
+            Protocol::Correlator => "correlator",
+            Protocol::PolicyCompiler => "policy-compiler",
+            Protocol::ExporterPrometheus => "exporter-prometheus",
+            Protocol::ExporterOtel => "exporter-otel",
         }
     }
 
@@ -289,6 +312,10 @@ impl std::str::FromStr for Protocol {
             "probe" => Ok(Protocol::Probe),
             "historian" => Ok(Protocol::Historian),
             "bmc" => Ok(Protocol::Bmc),
+            "correlator" => Ok(Protocol::Correlator),
+            "policy-compiler" => Ok(Protocol::PolicyCompiler),
+            "exporter-prometheus" => Ok(Protocol::ExporterPrometheus),
+            "exporter-otel" => Ok(Protocol::ExporterOtel),
             _ => Err(()),
         }
     }
@@ -330,6 +357,29 @@ mod tests {
     fn test_protocol_display() {
         assert_eq!(Protocol::Snmp.as_str(), "snmp");
         assert_eq!(Protocol::Logs.as_str(), "logs");
+    }
+
+    /// The service tier's four process identities (#1202): the wire token is
+    /// the hyphenated producer name, on both directions of serde, `as_str`
+    /// and `FromStr` — `rename_all = "lowercase"` alone would have written
+    /// `policycompiler`, which no key carries.
+    #[test]
+    fn service_tier_variants_round_trip_their_hyphenated_names() {
+        for (p, token) in [
+            (Protocol::Correlator, "correlator"),
+            (Protocol::PolicyCompiler, "policy-compiler"),
+            (Protocol::ExporterPrometheus, "exporter-prometheus"),
+            (Protocol::ExporterOtel, "exporter-otel"),
+        ] {
+            assert_eq!(p.as_str(), token);
+            assert_eq!(token.parse::<Protocol>(), Ok(p));
+            assert_eq!(serde_json::to_value(p).unwrap(), serde_json::json!(token));
+            assert_eq!(
+                serde_json::from_value::<Protocol>(serde_json::json!(token)).unwrap(),
+                p
+            );
+            assert_eq!(p.display_name(), token);
+        }
     }
 
     #[test]

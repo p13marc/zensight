@@ -299,6 +299,13 @@ pub fn protocol_icon<Message: 'static>(
         // depict — the generic mark, deliberately, rather than borrowing a
         // sensor's iconography for a service.
         zensight_common::Protocol::Historian => protocol_generic(size),
+        // #1202: the service tier's process identities — a correlator, a
+        // policy compiler and two exporters — are not sensors and have no
+        // protocol to depict; the generic mark.
+        zensight_common::Protocol::Correlator
+        | zensight_common::Protocol::PolicyCompiler
+        | zensight_common::Protocol::ExporterPrometheus
+        | zensight_common::Protocol::ExporterOtel => protocol_generic(size),
     }
 }
 

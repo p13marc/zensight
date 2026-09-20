@@ -196,6 +196,12 @@ pub fn specialized_view<'a>(
         // (#910). A tab of its own would show its health document, which the
         // Sensors card already does.
         Protocol::Historian => None,
+        // #1202: the service tier's process identities have one surface — the
+        // Sensors card their health document feeds — and no device tab.
+        Protocol::Correlator
+        | Protocol::PolicyCompiler
+        | Protocol::ExporterPrometheus
+        | Protocol::ExporterOtel => None,
         // No `_` arm: every enum member decides here, explicitly, whether it
         // has a tab. A new variant that forgets is a compile error, which is
         // the point.

@@ -41,3 +41,9 @@ pub mod traces;
 pub use config::ExporterConfig;
 pub use exporter::{OtelExporter, SharedExporter};
 pub use subscriber::TelemetrySubscriber;
+
+/// The producer chunk this exporter's own framework documents ride under
+/// (#1202): `v1/<origin>/state/exporter-otel/{health,errors,sensor,…}`. It
+/// publishes no telemetry (RFC 04 §1.1); this names the process, not what it
+/// forwards.
+pub const PRODUCER: &str = "exporter-otel";

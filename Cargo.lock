@@ -14223,6 +14223,7 @@ dependencies = [
  "zenoh",
  "zenoh-ext",
  "zensight-common",
+ "zensight-sensor-core",
 ]
 
 [[package]]
@@ -14242,6 +14243,7 @@ dependencies = [
  "zenkey",
  "zenoh",
  "zensight-common",
+ "zensight-sensor-core",
 ]
 
 [[package]]
@@ -14266,6 +14268,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-sensor-core",
 ]
 
 [[package]]
@@ -14294,6 +14297,7 @@ dependencies = [
  "tracing-subscriber",
  "zenoh",
  "zensight-common",
+ "zensight-sensor-core",
 ]
 
 [[package]]

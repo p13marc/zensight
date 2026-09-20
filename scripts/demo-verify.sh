@@ -89,12 +89,16 @@ cargo build $relflag --locked -p zensight-historian --example historian-query >/
 # The one-shot GET phase 4 reads the sensor's applied marker with. Same
 # reasoning: a test fixture with a `main`, not something to ship.
 cargo build $relflag --locked -p zensight-common --example rpc_get >/dev/null
+# The state watcher phase 5 reads the service tier's health documents with
+# (#1202): a subscriber, because a health document has no late-joiner seed
+# and a GET on it answers nothing.
+cargo build $relflag --locked -p zensight-common --example state_watch >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" \
     "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-sensor-netlink" "$BIN/zensight-historian" \
     "$BIN/zensight-desired" "$BIN/zensight-correlator" "$BIN/examples/historian-query" \
-    "$BIN/examples/rpc_get"
+    "$BIN/examples/rpc_get" "$BIN/examples/state_watch"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -662,3 +666,41 @@ shipped policy's — no disk-full rule in the effective config:
 $applied"
 
 echo "OK — demo/fleet-policy.json5 -> @desired -> sysinfo applied/thresholds (source: desired)."
+
+# ---------------------------------------------------------------------------
+# Phase 5 (#1202): every service-tier process this script started is a
+# producer, and says so on the bus.
+#
+# The correlator and both exporters run through `SensorRunner` now, so each
+# publishes `v1/<origin>/state/<producer>/health` every five seconds — the
+# document `just fleet-sizing` reads, and the one thing that could not exist
+# before #1202. The producers are NAMED, not globbed: an absent document is a
+# failure, and a loop over whatever showed up would report success just as
+# loudly as one that checked (the `head`/SIGPIPE lesson). `policy-compiler`
+# is not in the list because this script runs `plan` and `apply`, which are
+# one-shot commands; only `run` is a producer.
+#
+# One watch over the wildcard rather than one per producer: three health
+# ticks at 5 s is 15 s; the throttle is off so the first tick counts.
+# ---------------------------------------------------------------------------
+echo
+echo "==> phase 5: the service tier's health documents"
+health_producers=(exporter-prometheus exporter-otel correlator)
+health_ndjson=$(PROBE_CONNECT="$HUB" WATCH_SECS=15 WATCH_MIN_INTERVAL_SECS=0 \
+    "$BIN/examples/state_watch" 'v1/*/state/*/health' 2>>"$tmp/state-watch.log" || true)
+for producer in "${health_producers[@]}"; do
+    if ! grep -q "\"key\":\"v1/h-[0-9a-f]*/state/$producer/health\"" <<<"$health_ndjson"; then
+        keep_logs_on_failure
+        die "no health document from $producer in 15s — it is running (or was) and is not \
+a producer on the bus. Producers seen: $(grep -o '/state/[a-z-]*/health' <<<"$health_ndjson" | sort -u | tr '\n' ' ')$(logs_note "$tmp" "$tmp/exporter.log" "$tmp/otel.log" "$tmp/correlator.log" "$tmp/state-watch.log")"
+    fi
+    # The document carries self_stats: RSS against the declared budget is what
+    # the sizing report reads, and a budget of 0 is "undeclared", which the
+    # shipped configs no longer are.
+    grep "/state/$producer/health" <<<"$health_ndjson" | tail -1 \
+        | grep -q '"budget_bytes":[1-9]' \
+        || die "$producer's health document carries no declared budget — configs/*.json5's \
+resources block did not reach the runner"
+    echo "    $producer: health document with a declared budget"
+done
+echo "OK — the correlator and both exporters publish health documents with self_stats"

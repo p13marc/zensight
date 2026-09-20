@@ -1,0 +1,89 @@
+# Subject registry: the OpenTelemetry exporter's HOST-ORIGIN producer identity.
+# RFC 08 §2; issue #1202.
+#
+# An exporter is a consumer: it subscribes `v1/*/telemetry/**` and forwards
+# over OTLP. It publishes NO telemetry (RFC 04 §1.1). What it publishes is
+# the five framework documents every `SensorRunner` emits, so its health
+# document carries the series it observes against the declared budget, and
+# the shed ladder can act before the kernel does.
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "exporter-otel"
+description = "the OpenTelemetry exporter's process identity (#1202): a host-origin producer that forwards fleet telemetry, logs and alerts over OTLP and publishes only its own framework documents — health with the series count it observes, budget and shed ladder"
+
+# ── Framework subjects ───────────────────────────────────────────────────────
+#
+# There is no state-free producer and there cannot be: SensorRunner emits all
+# five of these unconditionally, so declaring fewer would be an RFC 08 §6.1
+# lie about what this build serves.
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "process health (framework); its self_stats carry the observed series, beside RSS against the declared budget"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim of the host running this exporter (framework, RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 32
+ttl_s = 900
+since = "1.0"
+description = "framework `sensor-budget`: the declared resource budget is being approached or exceeded"
+
+# ── Procedures ───────────────────────────────────────────────────────────────
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"

@@ -10,6 +10,11 @@ description = "Fleet policy compiler for ZenSight — compiles one fleet-policy.
 [dependencies]
 zenkey = { workspace = true }
 zensight-common.workspace = true
+# The producer framework (#1202): `run` is a host-origin producer named
+# `policy-compiler` — health with self_stats, budget, shed ladder — beside
+# the `@desired` service origin it owns. `plan`/`apply`/`render` are one-shot
+# commands and never touch it.
+zensight-sensor-core.workspace = true
 
 clap = { workspace = true }
 json5 = { workspace = true }

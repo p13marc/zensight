@@ -9,8 +9,10 @@ use std::time::Duration;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use zensight_desired::PRODUCER;
 use zensight_desired::config::DesiredDaemonConfig;
 use zensight_desired::policy::Policy;
+use zensight_sensor_core::SensorRunner;
 
 /// How long a one-shot catalog GET waits. Short: a compiler with no fleet
 /// answers "no hosts", which is a *report*, not a hang.
@@ -109,7 +111,12 @@ enum Command {
 async fn main() -> Result<()> {
     let args = Args::parse();
     let config = DesiredDaemonConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{e}"))?;
-    init_tracing(&config.logging.level);
+    // `run` is a producer (#1202): its runner initialises tracing from
+    // `logging` itself, and a second init is an error, not a no-op. The
+    // one-shot commands keep the light init.
+    if !matches!(args.command, Some(Command::Run)) {
+        init_tracing(&config.logging.level);
+    }
 
     let policy_path = args.policy.clone().unwrap_or(config.desired.policy.clone());
     let policy =
@@ -311,21 +318,23 @@ async fn main() -> Result<()> {
 /// The catalog subscription is the accelerator and the periodic pass is the
 /// floor — the same two-path shape the sensor-side reconciler uses, and for
 /// the same reason: a missed sample must cost latency, never correctness.
+/// The `run` daemon: a host-origin producer named `policy-compiler` (#1202)
+/// that owns the `@desired` service origin. `SensorRunner` opens the one
+/// session and publishes the framework documents; the election, the
+/// procedures and the compile loop ride that session, as runner tasks.
 async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
-    let session = connect(&config).await?;
+    let controller = config.desired.clone();
+    let source = zensight_sensor_core::resolved_source(None);
+    let mut runner = SensorRunner::new_with_args(PRODUCER, source, config, None)
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let format = runner.config().serialization;
+    runner = runner.with_format(format).with_identity();
+    let session = runner.session().clone();
+    // The same wait the one-shot commands take: a compile pass against a bus
+    // nobody has joined yet is a pass for a fleet of zero.
+    zensight_common::session::await_peer(&session, PEER_WAIT).await;
 
-    // `@desired` is a single-writer service origin (#1104). It used to declare
-    // `alive` unconditionally, with no claim key, no election and no standby —
-    // the README's whole mitigation was the sentence "run exactly one per
-    // deployment". A failover that started before the old instance died, or an
-    // operator running `apply` beside a live `run`, then had both publishing to
-    // `v1/@desired/state/<host>/…`; each seeds its `published` diff map from
-    // the storage, so each reads the other's write as a change and rewrites it.
-    // Every sensor flaps between two configurations and nothing says so.
-    //
-    // The catalog has had the RFC 06 §5.3 protocol for exactly this reason, and
-    // `Cargo.toml`'s member comment already called this daemon "the
-    // correlator's shape". Now it is the correlator's code.
     let guard = zensight_common::service_guard::ServiceGuard::desired(session.clone());
     let _claim = loop {
         match guard.campaign(GUARD_TIMEOUT).await? {
@@ -349,8 +358,6 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
         }
     };
 
-    // Declared BEFORE the first pass, so a change arriving during it is not
-    // lost between the GET and the subscription.
     let entity_sub = session
         .declare_subscriber(zensight_common::keyexpr::all_entity_wildcard())
         .with(flume::unbounded())
@@ -362,42 +369,33 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
 
     let mut pubr = zensight_desired::publish::Publisher0::new(
         session.clone(),
-        config.desired.delete_grace_periods,
+        controller.delete_grace_periods,
     );
     pubr.seed(CATALOG_TIMEOUT).await;
 
-    // Per-host adoptions (#939), and the procedure that records them.
-    let overrides_path = std::path::PathBuf::from(&config.desired.overrides);
+    let overrides_path = std::path::PathBuf::from(&controller.overrides);
     let overrides = Arc::new(tokio::sync::Mutex::new(
         zensight_desired::overrides::Overrides::load(&overrides_path)
             .map_err(|e| anyhow::anyhow!("{e}"))?,
     ));
     let (wake_tx, mut wake_rx) = tokio::sync::watch::channel(0u64);
-    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let serve_task = {
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    {
         let ctx = Arc::new(zensight_desired::serve::OverrideCtx {
             overrides: overrides.clone(),
             path: overrides_path.clone(),
-            allowed: config.desired.allow_overrides,
+            allowed: controller.allow_overrides,
             wake: wake_tx,
         });
         let s = session.clone();
         let rx = shutdown_rx.clone();
-        tokio::spawn(async move {
+        runner.spawn_named("desired-procedures", async move {
             if let Err(e) = zensight_desired::serve::serve(s, ctx, rx).await {
                 tracing::error!(error = %e, "the @desired procedures stopped");
             }
-        })
-    };
+        });
+    }
 
-    // `alive` LAST, after every queryable is actually serving. RFC 04 §5 is
-    // `alive ⇒ callable`, and a producer that says so before it can answer is
-    // lying for the width of that window — which for this daemon means a GUI
-    // enabling an Adopt button against nothing.
-    //
-    // The list comes from the registry slice, not from a hand-written array.
-    // The correlator's equivalent is hand-maintained and its own source
-    // records that three families were missing from it at some point.
     let missing = zensight_common::served::await_served(
         "desired",
         &zensight_desired::serve::declared_rpc_keys(),
@@ -419,83 +417,88 @@ async fn run(config: DesiredDaemonConfig, policy: Policy) -> Result<()> {
         }
     };
 
-    let period = Duration::from_secs(config.desired.refresh_secs.max(1));
-    let mut tick = tokio::time::interval(period);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut shutdown = Box::pin(wait_for_shutdown());
-
-    loop {
-        let compiled = {
-            // The daemon does NOT settle, and does not need to (#1045): it
-            // re-fetches every `refresh_secs`, so a first pass that ran inside
-            // the window is corrected by the next tick — and a key is deleted
-            // only after `delete_grace_periods` consecutive passes without it,
-            // so one empty pass cannot tombstone a fleet's desired state.
-            let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
-            let ov = overrides.lock().await;
-            zensight_desired::compile::compile_with(&policy, &fleet, &ov)
-        };
-        log_rejections(&compiled);
-        if config.desired.dry_run {
-            tracing::info!(
-                documents = compiled.docs.len(),
-                "dry_run: nothing published"
-            );
-        } else {
-            let r = pubr.apply(&compiled).await;
-            if r.wrote_nothing() {
-                tracing::debug!(unchanged = r.unchanged, "pass wrote nothing");
-            } else {
-                tracing::info!(
-                    added = r.added.len(),
-                    changed = r.changed.len(),
-                    deleted = r.deleted.len(),
-                    unchanged = r.unchanged,
-                    "pass applied"
-                );
-            }
-        }
-
-        // Wait for the next trigger: a catalog change, the floor, or a
-        // signal. An entity sample only wakes the loop — the pass itself
-        // always re-reads the whole fleet, so a burst of samples costs one
-        // pass rather than one each.
-        //
-        // **In practice the cadence is the correlator's re-emit, not
-        // `refresh_secs`.** The catalog republishes every entity every
-        // `reemit_secs` (60 by default) whether or not anything changed, so
-        // this loop wakes about once a minute on a steady fleet, and the
-        // 300-second floor is what remains if the subscription is unavailable.
-        // That is affordable precisely because of the property the whole crate
-        // is built on: a pass over an unchanged fleet publishes nothing. It
-        // costs one catalog GET and one compile, and it means a genuine change
-        // converges in seconds rather than in up to five minutes.
-        tokio::select! {
-            _ = &mut shutdown => break,
-            _ = tick.tick() => {}
-            // An adoption converges in seconds rather than at the next
-            // refresh: someone is watching the screen they pressed it on.
-            _ = wake_rx.changed() => {}
-            _ = async {
-                match &entity_sub {
-                    Some(sub) => { let _ = sub.recv_async().await; }
-                    None => std::future::pending::<()>().await,
+    // The compile loop, as a runner task: wakes on the period, on an
+    // override write, and on an entity change (debounced), and stops on the
+    // shutdown the runner's return flips.
+    {
+        let session = session.clone();
+        let policy = policy.clone();
+        let overrides = overrides.clone();
+        let dry_run = controller.dry_run;
+        let period = Duration::from_secs(controller.refresh_secs.max(1));
+        runner.spawn_named("compile-loop", async move {
+            let mut tick = tokio::time::interval(period);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                let compiled = {
+                    let fleet = zensight_desired::fleet::fetch(&session, CATALOG_TIMEOUT).await;
+                    let ov = overrides.lock().await;
+                    zensight_desired::compile::compile_with(&policy, &fleet, &ov)
+                };
+                log_rejections(&compiled);
+                if dry_run {
+                    tracing::info!(
+                        documents = compiled.docs.len(),
+                        "dry_run: nothing published"
+                    );
+                } else {
+                    let r = pubr.apply(&compiled).await;
+                    if r.wrote_nothing() {
+                        tracing::debug!(unchanged = r.unchanged, "pass wrote nothing");
+                    } else {
+                        tracing::info!(
+                            added = r.added.len(),
+                            changed = r.changed.len(),
+                            deleted = r.deleted.len(),
+                            unchanged = r.unchanged,
+                            "pass applied"
+                        );
+                    }
                 }
-            } => {
-                // Coalesce the rest of the burst rather than compiling once
-                // per entity in a fleet that just restarted.
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                if let Some(sub) = &entity_sub {
-                    while sub.try_recv().is_ok() {}
+
+                tokio::select! {
+                    _ = shutdown_rx.changed() => {
+                        if *shutdown_rx.borrow() {
+                            break;
+                        }
+                    }
+                    _ = tick.tick() => {}
+                    _ = wake_rx.changed() => {}
+                    _ = async {
+                        match &entity_sub {
+                            Some(sub) => { let _ = sub.recv_async().await; }
+                            None => std::future::pending::<()>().await,
+                        }
+                    } => {
+                        // Debounce: an entity sample only wakes the loop, and a
+                        // catalog re-emit is a burst of them.
+                        tokio::time::sleep(Duration::from_secs(2)).await;
+                        if let Some(sub) = &entity_sub {
+                            while sub.try_recv().is_ok() {}
+                        }
+                    }
                 }
             }
-        }
+        });
     }
 
+    // The runner declares the `policy-compiler` alive token, waits for
+    // SIGTERM/Ctrl+C, then aborts the tasks, retracts this process's alerts
+    // and closes the session. The `@desired` claim and alive tokens live
+    // until this function returns.
+    let result = runner
+        .run_with_metadata(Some(serde_json::json!({
+            "service_origin": zensight_desired::ORIGIN,
+            "policy": controller.policy,
+            "refresh_secs": controller.refresh_secs,
+            "dry_run": controller.dry_run,
+            "allow_overrides": controller.allow_overrides,
+            "action_surface": false,
+        })))
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"));
     let _ = shutdown_tx.send(true);
-    serve_task.abort();
-    let _ = session.close().await;
-    Ok(())
+    result
 }
 
 fn report(
@@ -542,11 +545,6 @@ fn report(
     }
 }
 
-/// Refusals are logged at `error`, not `warn`.
-///
-/// A document the compiler refused is a host that is **not** getting the
-/// policy someone wrote, and the sensor will never mention it because nothing
-/// reached it. If this line is not loud, nothing is.
 fn log_rejections(c: &zensight_desired::compile::Compiled) {
     for r in &c.rejected {
         tracing::error!(detail = %r, "document refused — this host is not receiving it");

@@ -53,3 +53,10 @@ pub mod serve;
 
 /// The service origin this daemon writes under (RFC 07 §3).
 pub const ORIGIN: &str = "@desired";
+
+/// The producer chunk the `run` daemon's own framework documents ride under
+/// (#1202): `v1/<origin>/state/policy-compiler/{health,errors,sensor,…}`. Not
+/// `desired` — that is the service's registry name (`desired.toml`), and
+/// zenkey-build generates one module per name — so the process identity is
+/// the crate's own description of itself.
+pub const PRODUCER: &str = "policy-compiler";

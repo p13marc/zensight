@@ -57,6 +57,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Every process on the bus is a producer: the service tier gets a health
+  document, a budget and the shed ladder** (#1202, closes it; #1059). The
+  correlator, the policy compiler (`zensight-desired run`) and both exporters
+  were the only processes with no health document, so `just fleet-sizing` had
+  no row for them and their `MemoryMax` was the only thing holding them. Each
+  now runs through `SensorRunner` as a host-origin producer — `correlator`,
+  `policy-compiler` (not `desired`, which is the service's registry name),
+  `exporter-prometheus`, `exporter-otel` — with four registries that declare
+  nothing but the framework set (none publishes telemetry, RFC 04 §1.1), four
+  `Protocol` variants (the hyphenated tokens `#[serde(rename)]`d), and a
+  `resources.budget_rss_mb` in each shipped config (96/72/96/96, three
+  quarters of the unit's `MemoryMax`, so `scripts/packaging-check.sh`'s
+  rule 2 is live for them). The health documents carry what each holds: the
+  correlator's entity count, firing alerts and relation claims (the two "for
+  health reporting" accessors finally have a consumer); the Prometheus
+  exporter's series, alerts and incidents; the OTel exporter's observed
+  series. The `@catalog`/`@desired` service origins are unchanged — the
+  election, the alive token and every service key are the single writer's,
+  and the process identity sits beside them. The exporters' subscriber now
+  rides the runner's session instead of opening a second one; their
+  `logging` is the shared `zensight_common::LoggingConfig` (same two fields,
+  same JSON); `--config` defaults to the binary's own file like every sensor
+  (`prometheus-exporter.json5`, `otel-exporter.json5`, `correlator.json5`)
+  instead of built-in defaults, and `--log-level` overrides the file's level
+  on all of them. `scripts/demo-verify.sh` gains phase 5: the three daemons
+  it starts must publish a health document with a declared budget within
+  15 s, named one by one. `registry.lock` +28 lines (additive).
+
 - **Producer-agnostic intake: a document the GUI has no type for is held and
   judged, not dropped** (#1256). `decode_sample` tries the compiled registry
   first; a state document from an unregistered producer — or a registered

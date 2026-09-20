@@ -37,3 +37,9 @@ pub use config::ExporterConfig;
 pub use http::HttpServer;
 pub use remote_write::RemoteWriteClient;
 pub use subscriber::TelemetrySubscriber;
+
+/// The producer chunk this exporter's own framework documents ride under
+/// (#1202): `v1/<origin>/state/exporter-prometheus/{health,errors,sensor,…}`.
+/// It publishes no telemetry (RFC 04 §1.1); this names the process, not what
+/// it forwards.
+pub const PRODUCER: &str = "exporter-prometheus";

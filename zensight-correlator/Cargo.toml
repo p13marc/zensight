@@ -17,6 +17,11 @@ ulid.workspace = true
 
 # Internal crates
 zensight-common = { path = "../zensight-common" }
+# The producer framework (#1202): the runner that opens the session, publishes
+# the five framework documents under the process's host-origin identity
+# (`correlator`) and serves introspect/describe there. `@catalog` — the
+# service origin — is untouched by it.
+zensight-sensor-core.workspace = true
 zenkey = { workspace = true }
 
 # Zenoh

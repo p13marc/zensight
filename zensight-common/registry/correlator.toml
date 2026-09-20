@@ -1,0 +1,96 @@
+# Subject registry: the correlator's HOST-ORIGIN producer identity. RFC 08 §2;
+# issue #1202.
+#
+# The correlator is `@catalog` — a single-writer SERVICE origin (RFC 06 §5),
+# whose registry is `catalog.toml`. This file is the other half: the process
+# itself, on the host it runs on, as a host-origin producer like the historian.
+# It publishes the five framework documents every `SensorRunner` emits — a
+# health document with `self_stats`, a declared budget and the shed ladder —
+# and serves `introspect`/`describe` on its host-origin keys. The `@catalog`
+# keys are untouched: entities, incidents, acks and silences are still the
+# service's, and a second correlator on the same bus still loses the election.
+#
+# Before this the four service-tier units were the only processes on the bus
+# with no health document, so `just fleet-sizing` had no row for them and
+# their `MemoryMax` was the only thing holding them.
+
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "correlator"
+description = "the identity correlator's process identity (#1202): the host-origin producer beside the `@catalog` service origin — health, budget and shed ladder for the process that fuses identity evidence into entities"
+
+# ── Framework subjects ───────────────────────────────────────────────────────
+#
+# There is no state-free producer and there cannot be: SensorRunner emits all
+# five of these unconditionally, so declaring fewer would be an RFC 08 §6.1
+# lie about what this build serves.
+
+[[subject]]
+path = "health"
+common = "health"
+class = "state"
+type = "HealthSnapshot"
+ttl_s = 120
+since = "1.0"
+description = "process health (framework); its self_stats carry the entity count, the firing-alert set and the relation claims held, beside RSS against the declared budget"
+
+[[subject]]
+path = "errors"
+common = "errors"
+class = "state"
+type = "ErrorReport"
+ttl_s = 300
+since = "1.0"
+description = "rolling error window (framework)"
+
+[[subject]]
+path = "sensor"
+common = "sensor"
+class = "state"
+type = "SensorInfo"
+ttl_s = 900
+since = "1.0"
+description = "registration document: identity, version, capabilities (framework, 60 s re-emit)"
+
+[[subject]]
+path = "evidence/self"
+common = "evidence_self"
+class = "state"
+type = "HostEvidence"
+ttl_s = 900
+since = "1.0"
+description = "self-identity claim of the host running this correlator (framework, RFC 06 §4)"
+
+[[subject]]
+path = "alert/{alert_key}"
+common = "alert"
+class = "state"
+type = "Alert"
+qos = "alert"
+cardinality = 32
+ttl_s = 900
+since = "1.0"
+description = "framework `sensor-budget`: the declared resource budget is being approached or exceeded"
+
+# ── Procedures ───────────────────────────────────────────────────────────────
+
+[[procedure]]
+path = "introspect"
+kind = "read"
+reply = "RegistrySlice"
+idempotent = true
+since = "1.0"
+description = "the registry slice this build serves (RFC 08 §6)"
+
+[[procedure]]
+path = "describe"
+kind = "read"
+fanout = "allowed"
+reply = "SchemaSet"
+idempotent = true
+since = "1.0"
+description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
