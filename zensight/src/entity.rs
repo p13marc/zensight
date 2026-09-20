@@ -16,9 +16,7 @@
 
 use std::collections::HashMap;
 use std::net::IpAddr;
-use std::str::FromStr;
-
-use zensight_common::{HostEntity, MemberClaim, Protocol};
+use zensight_common::{HostEntity, MemberClaim};
 
 use crate::message::DeviceId;
 
@@ -27,27 +25,25 @@ use crate::message::DeviceId;
 /// freshness indicator (the correlator may be gone).
 pub const ENTITY_STALE_MS: i64 = 180_000;
 
-/// The human identity of a device: `(protocol, source)`.
+/// The human identity of a device: `(producer, source)`.
 ///
 /// The entity index is keyed on this rather than on [`DeviceId`] because a
 /// [`MemberClaim`] names a sensor and a source and carries no origin — the
 /// correlator merges *human* identity, which is the whole point of it. A
 /// `DeviceId` projects down to a `MemberKey` (dropping its origin), so lookups
 /// still start from the device handle the GUI holds.
-pub type MemberKey = (Protocol, String);
+pub type MemberKey = (String, String);
 
-/// The [`MemberKey`] a claim was merged from. `None` when the claim's `sensor`
-/// string is not a known [`Protocol`] (forward-compat: a newer correlator
-/// merging an unknown sensor).
-pub fn member_key(m: &MemberClaim) -> Option<MemberKey> {
-    Protocol::from_str(&m.sensor)
-        .ok()
-        .map(|p| (p, m.source.clone()))
+/// The [`MemberKey`] a claim was merged from: the claim's `sensor` is the
+/// producer name. Total since #1256 — a member of a sensor this GUI was not
+/// compiled with used to be dropped here, so its device never found its host.
+pub fn member_key(m: &MemberClaim) -> MemberKey {
+    (m.sensor.clone(), m.source.clone())
 }
 
 /// Project a device handle onto its human identity.
 pub fn device_member_key(id: &DeviceId) -> MemberKey {
-    (id.protocol, id.source.clone())
+    (id.producer.clone(), id.source.clone())
 }
 
 /// GUI-side index over the correlator's [`HostEntity`] docs.
@@ -92,9 +88,7 @@ impl EntityStore {
         // stale index entries behind.
         self.drop_indexes(&id);
         for m in &e.members {
-            if let Some(key) = member_key(m) {
-                self.by_device.insert(key, id.clone());
-            }
+            self.by_device.insert(member_key(m), id.clone());
         }
         for ip in &e.ips {
             if let Ok(addr) = ip.parse::<IpAddr>() {
@@ -184,6 +178,7 @@ impl EntityStore {
 mod tests {
     use super::*;
     use zensight_common::MemberClaim;
+    use zensight_common::Protocol;
 
     fn member(sensor: &str, source: &str) -> MemberClaim {
         MemberClaim {
@@ -238,11 +233,14 @@ mod tests {
             Protocol::Historian,
         ] {
             let m = member(p.as_str(), "host1");
-            let key = member_key(&m).expect("known protocol maps");
-            assert_eq!(key, (p, "host1".to_string()));
+            assert_eq!(member_key(&m), (p.to_string(), "host1".to_string()));
         }
-        // Unknown sensor → no member key (forward-compat).
-        assert!(member_key(&member("mystery", "host1")).is_none());
+        // A sensor outside the enum is a member like any other (#1256): its
+        // device must still find its host.
+        assert_eq!(
+            member_key(&member("mystery", "host1")),
+            ("mystery".to_string(), "host1".to_string())
+        );
     }
 
     #[test]
@@ -283,12 +281,12 @@ mod tests {
 
         assert!(
             store
-                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture("sysinfo", "srv1"))
                 .is_some()
         );
         assert!(
             store
-                .entity_for_device(&DeviceId::fixture(Protocol::Netlink, "srv1"))
+                .entity_for_device(&DeviceId::fixture("netlink", "srv1"))
                 .is_some()
         );
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -312,13 +310,13 @@ mod tests {
 
         assert!(
             store
-                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture("sysinfo", "srv1"))
                 .is_some()
         );
         // Dropped member/ip no longer resolve.
         assert!(
             store
-                .entity_for_device(&DeviceId::fixture(Protocol::Netlink, "srv1"))
+                .entity_for_device(&DeviceId::fixture("netlink", "srv1"))
                 .is_none()
         );
         let old_ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -339,7 +337,7 @@ mod tests {
         assert!(store.is_empty());
         assert!(
             store
-                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture("sysinfo", "srv1"))
                 .is_none()
         );
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
@@ -388,7 +386,7 @@ mod tests {
         assert!(!store.hosts.contains_key("h_aaa"));
         assert!(
             store
-                .entity_for_device(&DeviceId::fixture(Protocol::Sysinfo, "srv1"))
+                .entity_for_device(&DeviceId::fixture("sysinfo", "srv1"))
                 .is_none()
         );
     }

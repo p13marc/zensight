@@ -10,7 +10,7 @@ use iced::{Alignment, Color, Element, Length, Theme};
 use iced_anim::widget::button;
 use iced_anim::{AnimationBuilder, Easing};
 
-use zensight_common::{DeviceStatus, HealthSnapshot, HealthStatus, Protocol, TelemetryPoint};
+use zensight_common::{DeviceStatus, HealthSnapshot, HealthStatus, TelemetryPoint};
 
 use crate::view::components::{badge, empty_state};
 
@@ -94,7 +94,20 @@ pub struct DeviceState {
     pub consecutive_failures: u32,
     /// Last error message from sensor (if any).
     pub last_error: Option<String>,
+    /// Every telemetry subject tail heard from this device, with the metric
+    /// name it carried — bounded, so a fleet sweep can re-judge them (#1256).
+    pub subjects: std::collections::BTreeMap<String, String>,
+    /// The subjects the producer's slice does not declare (#1256, gate 4).
+    pub undeclared: crate::intake::Undeclared,
+    /// Whether the last sweep held a slice for this producer: `None` before
+    /// any sweep answered, `Some(false)` when the fleet has no `introspect`
+    /// reply for it — a finding about the fleet, not the producer (#1256).
+    pub slice_known: Option<bool>,
 }
+
+/// The bound on remembered subjects per device — the same order as the
+/// metric map, which already holds one point per metric.
+const SUBJECTS_CAP: usize = 1024;
 
 impl DeviceState {
     /// Create a new device state.
@@ -110,6 +123,54 @@ impl DeviceState {
             sensor_status: DeviceStatus::Unknown,
             consecutive_failures: 0,
             last_error: None,
+            subjects: std::collections::BTreeMap::new(),
+            undeclared: Default::default(),
+            slice_known: None,
+        }
+    }
+
+    /// Remember a telemetry subject and, once a sweep has answered, judge it
+    /// against the producer's slice (#1256).
+    pub fn note_subject(
+        &mut self,
+        subject: &str,
+        metric: &str,
+        slices: &zenkey_fleet::SliceSet,
+        swept: bool,
+    ) {
+        if self.subjects.len() < SUBJECTS_CAP || self.subjects.contains_key(subject) {
+            self.subjects
+                .insert(subject.to_string(), metric.to_string());
+        }
+        if swept {
+            self.judge_subject(subject, metric, slices);
+        }
+    }
+
+    fn judge_subject(&mut self, subject: &str, metric: &str, slices: &zenkey_fleet::SliceSet) {
+        use crate::intake::Declared;
+        match crate::intake::declared(slices, &self.id.producer, "telemetry", subject) {
+            Declared::Yes => self.slice_known = Some(true),
+            Declared::No => {
+                self.slice_known = Some(true);
+                self.undeclared.insert(subject, metric);
+            }
+            Declared::NoSlice => self.slice_known = Some(false),
+        }
+    }
+
+    /// Judge every remembered subject again — after a sweep replaced the
+    /// slice set (#1256).
+    pub fn rejudge_subjects(&mut self, slices: &zenkey_fleet::SliceSet) {
+        self.undeclared = Default::default();
+        self.slice_known = None;
+        let subjects: Vec<(String, String)> = self
+            .subjects
+            .iter()
+            .map(|(s, m)| (s.clone(), m.clone()))
+            .collect();
+        for (subject, metric) in &subjects {
+            self.judge_subject(subject, metric, slices);
         }
     }
 
@@ -224,7 +285,7 @@ pub struct DashboardState {
     /// is whether anything on screen is known to be current.
     pub reconnected_at: Option<i64>,
     /// Active protocol filters (empty = show all).
-    pub protocol_filters: std::collections::HashSet<Protocol>,
+    pub producer_filters: std::collections::HashSet<String>,
     /// Search filter for device names (applied after debounce).
     pub search_filter: String,
     /// Pending search filter (user input, not yet applied).
@@ -284,7 +345,7 @@ impl Default for DashboardState {
         Self {
             devices: HashMap::new(),
             reconnected_at: None,
-            protocol_filters: std::collections::HashSet::new(),
+            producer_filters: std::collections::HashSet::new(),
             search_filter: String::new(),
             pending_search: String::new(),
             pending_search_time: 0,
@@ -355,16 +416,16 @@ impl DashboardState {
     /// deterministically, so the UI does not flicker between them — and the
     /// collision is logged. Picking a stable wrong answer beats picking a
     /// different one every frame.
-    pub fn resolve_device(&self, protocol: Protocol, source: &str) -> Option<DeviceId> {
+    pub fn resolve_device(&self, producer: &str, source: &str) -> Option<DeviceId> {
         let mut matches: Vec<&DeviceId> = self
             .devices
             .keys()
-            .filter(|id| id.protocol == protocol && id.source == source)
+            .filter(|id| id.producer == producer && id.source == source)
             .collect();
         matches.sort_by(|a, b| a.origin.cmp(&b.origin));
         if matches.len() > 1 {
             tracing::warn!(
-                %protocol,
+                producer,
                 source,
                 origins = ?matches.iter().map(|id| &id.origin).collect::<Vec<_>>(),
                 "name collision: several origins publish this name; using the lowest"
@@ -391,8 +452,8 @@ impl DashboardState {
             .values()
             .filter(|d| {
                 // Protocol filter
-                let protocol_match = self.protocol_filters.is_empty()
-                    || self.protocol_filters.contains(&d.id.protocol);
+                let protocol_match = self.producer_filters.is_empty()
+                    || self.producer_filters.contains(&d.id.producer);
 
                 // Search filter (case-insensitive match on device source name)
                 let search_match =
@@ -411,7 +472,7 @@ impl DashboardState {
         devices.sort_by(|a, b| {
             status_rank(a.effective_status())
                 .cmp(&status_rank(b.effective_status()))
-                .then_with(|| a.id.protocol.cmp(&b.id.protocol))
+                .then_with(|| a.id.producer.cmp(&b.id.producer))
                 .then_with(|| a.id.source.cmp(&b.id.source))
         });
 
@@ -493,12 +554,12 @@ impl DashboardState {
         counts
     }
 
-    /// Toggle a protocol filter.
-    pub fn toggle_filter(&mut self, protocol: Protocol) {
-        if self.protocol_filters.contains(&protocol) {
-            self.protocol_filters.remove(&protocol);
+    /// Toggle a producer filter.
+    pub fn toggle_filter(&mut self, producer: String) {
+        if self.producer_filters.contains(&producer) {
+            self.producer_filters.remove(&producer);
         } else {
-            self.protocol_filters.insert(protocol);
+            self.producer_filters.insert(producer);
         }
     }
 
@@ -579,17 +640,18 @@ impl DashboardState {
         self.current_page = 0;
     }
 
-    /// Get all protocols that have devices.
-    pub fn active_protocols(&self) -> Vec<Protocol> {
-        let mut protocols: Vec<_> = self
+    /// Every producer that has devices, in name order (#1256: a name, so the
+    /// filter row lists a producer the GUI was not compiled with too).
+    pub fn active_producers(&self) -> Vec<String> {
+        let mut producers: Vec<_> = self
             .devices
             .values()
-            .map(|d| d.id.protocol)
+            .map(|d| d.id.producer.clone())
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
-        protocols.sort();
-        protocols
+        producers.sort();
+        producers
     }
 
     /// Toggle the view mode between grid and table.
@@ -616,7 +678,7 @@ pub fn dashboard_view<'a>(
     mut sparks: crate::view::trend::DeviceSparks,
     entities: &'a EntityStore,
     firing_by_source: &'a HashMap<String, usize>,
-    firing_by_protocol: &'a HashMap<zensight_common::Protocol, usize>,
+    firing_by_protocol: &'a HashMap<String, usize>,
     group_by_host: bool,
 ) -> Element<'a, Message> {
     // Compute filtered devices once and pass through to avoid redundant work
@@ -995,9 +1057,9 @@ fn render_protocol_filters<'a>(
     state: &'a DashboardState,
     filtered: &[&DeviceState],
 ) -> Element<'a, Message> {
-    let protocols = state.active_protocols();
+    let producers = state.active_producers();
 
-    if protocols.is_empty() {
+    if producers.is_empty() {
         return empty_state("No devices yet — waiting for sensors…", None);
     }
 
@@ -1006,13 +1068,12 @@ fn render_protocol_filters<'a>(
 
     let mut filter_row = row![filter_label].spacing(10).align_y(Alignment::Center);
 
-    for protocol in protocols {
+    for producer in producers {
         let is_active =
-            state.protocol_filters.is_empty() || state.protocol_filters.contains(&protocol);
+            state.producer_filters.is_empty() || state.producer_filters.contains(&producer);
 
-        let label = format!("{}", protocol);
-        let btn = button(text(label).size(font::CAPTION))
-            .on_press(Message::ToggleProtocolFilter(protocol));
+        let btn = button(text(producer.clone()).size(font::CAPTION))
+            .on_press(Message::ToggleProducerFilter(producer));
 
         let btn = if is_active {
             btn.style(iced::widget::button::primary)
@@ -1208,13 +1269,13 @@ fn render_host_card<'a>(
         tooltip::Position::Top,
     );
 
-    let primary_icon = icons::protocol_icon(primary.id.protocol, IconSize::Medium);
+    let primary_icon = icons::for_producer(&primary.id.producer, IconSize::Medium);
 
     // Host name with a tooltip listing the sensors present on it.
     let protocols: Vec<String> = host
         .facets
         .iter()
-        .map(|f| f.id.protocol.display_name().to_string())
+        .map(|f| f.id.display_name().to_string())
         .collect();
     let host_name = tooltip(
         text(host.display_name.clone()).size(font::EMPHASIS),
@@ -1266,18 +1327,18 @@ fn render_host_card<'a>(
     // several facets (different sources correlated into one host), append the
     // facet's source so the badges stay distinguishable.
     let dup_protocols =
-        crate::view::host::duplicated_protocols(host.facets.iter().map(|f| f.id.protocol));
+        crate::view::host::duplicated_protocols(host.facets.iter().map(|f| f.id.producer.as_str()));
     let mut facet_row = iced::widget::Row::new().spacing(6);
     for facet in &host.facets {
         let fstatus = facet.effective_status();
         let mut chip_label = row![
             animated_status_indicator(fstatus, 8.0),
-            icons::protocol_icon::<Message>(facet.id.protocol, IconSize::Small),
-            text(facet.id.protocol.display_name()).size(font::DENSE),
+            icons::for_producer::<Message>(&facet.id.producer, IconSize::Small),
+            text(facet.id.display_name()).size(font::DENSE),
         ]
         .spacing(4)
         .align_y(Alignment::Center);
-        if dup_protocols.contains(&facet.id.protocol) {
+        if dup_protocols.contains(facet.id.producer.as_str()) {
             chip_label = chip_label.push(
                 text(format!("· {}", facet.id.source))
                     .size(font::DENSE)
@@ -1403,8 +1464,8 @@ fn render_device_table(devices: Vec<&DeviceState>) -> Element<'_, Message> {
         text("Protocol").size(font::CAPTION),
         |device: &DeviceState| -> Element<'_, Message> {
             row![
-                icons::protocol_icon::<Message>(device.id.protocol, IconSize::Small),
-                text(device.id.protocol.display_name()).size(font::DENSE)
+                icons::for_producer::<Message>(&device.id.producer, IconSize::Small),
+                text(device.id.display_name()).size(font::DENSE)
             ]
             .spacing(4)
             .align_y(Alignment::Center)
@@ -1628,17 +1689,36 @@ fn animated_status_indicator<'a>(status: DeviceStatus, size: f32) -> Element<'a,
 mod tests {
     use super::*;
 
+    /// The filter row lists every producer with devices, by name (#1256) —
+    /// one outside the enum included — and `resolve_device` finds it.
+    #[test]
+    fn active_producers_and_resolve_are_by_name() {
+        let mut state = DashboardState::default();
+        for (producer, source) in [("sysinfo", "web01"), ("fake-sensor", "rack7")] {
+            let id = DeviceId::new(producer, "h-0123456789ab", source);
+            state.devices.insert(id.clone(), DeviceState::new(id));
+        }
+        assert_eq!(state.active_producers(), vec!["fake-sensor", "sysinfo"]);
+        assert_eq!(
+            state
+                .resolve_device("fake-sensor", "rack7")
+                .map(|d| d.origin),
+            Some("h-0123456789ab".to_string())
+        );
+        assert!(state.resolve_device("sysinfo", "rack7").is_none());
+    }
+
     fn create_test_state_with_devices(count: usize) -> DashboardState {
         let mut state = DashboardState::default();
         for i in 0..count {
-            let id = DeviceId::fixture(Protocol::Snmp, format!("device{:03}", i));
+            let id = DeviceId::fixture("snmp", format!("device{:03}", i));
             state.devices.insert(id.clone(), DeviceState::new(id));
         }
         state
     }
 
     fn device_with_status(source: &str, status: DeviceStatus) -> DeviceState {
-        let id = DeviceId::fixture(Protocol::Sysinfo, source);
+        let id = DeviceId::fixture("sysinfo", source);
         let mut d = DeviceState::new(id);
         d.sensor_status = status;
         d
@@ -1675,9 +1755,9 @@ mod tests {
         // #128: a single physical host with two sensor facets must count ONCE,
         // taking the worst facet's status — not once per protocol.
         let mut state = DashboardState::default();
-        let mut sys = DeviceState::new(DeviceId::fixture(Protocol::Sysinfo, "host1"));
+        let mut sys = DeviceState::new(DeviceId::fixture("sysinfo", "host1"));
         sys.sensor_status = DeviceStatus::Online;
-        let mut net = DeviceState::new(DeviceId::fixture(Protocol::Netlink, "host1"));
+        let mut net = DeviceState::new(DeviceId::fixture("netlink", "host1"));
         net.sensor_status = DeviceStatus::Offline;
         state.devices.insert(sys.id.clone(), sys);
         state.devices.insert(net.id.clone(), net);
@@ -1697,7 +1777,7 @@ mod tests {
     fn a_future_stamped_device_is_still_evicted_and_still_goes_stale() {
         let mut state = DashboardState::default();
         let id = DeviceId {
-            protocol: zensight_common::Protocol::Sysinfo,
+            producer: "sysinfo".into(),
             origin: "h-aabbccddeeff".into(),
             source: "skewed01".into(),
         };

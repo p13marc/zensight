@@ -304,11 +304,11 @@ mod tests {
     fn collect_messages_reads_live_facility_severity_contract() {
         use std::collections::HashMap;
 
-        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+        use zensight_common::{TelemetryPoint, TelemetryValue};
 
         use crate::view::dashboard::DeviceState;
 
-        let id = DeviceId::fixture(Protocol::Logs, "host1");
+        let id = DeviceId::fixture("logs", "host1");
         let mut state = DeviceState::new(id.clone());
         // A live log line: key `<facility>/<severity>`, message as Text value.
         state.metrics.insert(

@@ -60,7 +60,7 @@ pub fn node_panel<'a>(
         Provenance::Monitored => node.role.label().to_string(),
     };
     let header = row![
-        icons::protocol_icon(super::model::primary_protocol(node), IconSize::Large),
+        icons::for_producer(&super::model::primary_protocol(node), IconSize::Large),
         column![
             text(&node.label).size(font::EMPHASIS),
             text(subtitle).size(font::MICRO)
@@ -207,7 +207,7 @@ pub fn node_panel<'a>(
     }
 
     // ── Listening sockets (fetched on selection, #393) ──
-    if node.protocols.contains(&zensight_common::Protocol::Netlink) {
+    if node.protocols.contains("netlink") {
         items = items.push(rule::horizontal(1));
         items = items.push(section("Listening"));
         match &state.panel.listen {
@@ -234,7 +234,7 @@ pub fn node_panel<'a>(
                 let netlink_hosts = state
                     .nodes
                     .values()
-                    .filter(|n| n.protocols.contains(&zensight_common::Protocol::Netlink))
+                    .filter(|n| n.protocols.contains("netlink"))
                     .count();
                 if netlink_hosts > 1 {
                     items = items.push(note("wildcard listeners may span hosts".to_string()));

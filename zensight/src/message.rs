@@ -55,10 +55,9 @@ impl Reading {
         }
     }
 
-    /// The device this reading belongs to — `None` while `DeviceId` still
-    /// needs a `Protocol` and the producer is outside the closed enum. #1256
-    /// makes this infallible.
-    pub fn device_id(&self) -> Option<DeviceId> {
+    /// The device this reading belongs to, off the key: producer (chunk 4),
+    /// origin (chunk 3), and the payload's `source`.
+    pub fn device_id(&self) -> DeviceId {
         DeviceId::from_reading(self)
     }
 }
@@ -404,6 +403,32 @@ pub enum Message {
     /// The sweep's outcome: one raw registry slice per (origin, producer), plus
     /// what the fan-in's reply bound refused (#745).
     FleetLoaded(Result<crate::view::fleet::FleetSweep, String>),
+
+    /// The fleet's `describe` replies, one schema set per producer (#1256) —
+    /// the schema half of the runtime registry, fetched after every sweep
+    /// for the producers not yet described.
+    SchemasLoaded(Vec<(String, zensight_common::schema::SchemaSet)>),
+
+    /// A state document the compiled registry has no type for (#1256): a
+    /// producer this build never heard of, or a registered producer's
+    /// subject the GUI maps to nothing. Wire facts only — the origin and
+    /// producer off the key, the subject tail, the value decoded
+    /// structurally. Judged at fold time against the runtime registry.
+    Document {
+        origin: String,
+        producer: String,
+        subject: String,
+        value: serde_json::Value,
+    },
+
+    /// An events-class record with no typed arm (#1256) — same shape as
+    /// [`Message::Document`], held in a bounded ring.
+    Event {
+        origin: String,
+        producer: String,
+        subject: String,
+        value: serde_json::Value,
+    },
     /// Expand/collapse one row's registry findings.
     ToggleFleetFindings(String),
     /// Sort the fleet table by column index.
@@ -1008,7 +1033,7 @@ pub enum Message {
     /// ([`crate::view::dashboard::DashboardState::resolve_device`]) rather than
     /// letting the view fabricate a handle (#474, RFC 06 §6).
     SelectDeviceNamed {
-        protocol: Protocol,
+        producer: String,
         source: String,
     },
 
@@ -1024,7 +1049,7 @@ pub enum Message {
     /// an origin. The app resolves it against the devices it has seen
     /// ([`DashboardState::resolve_device`]); a view must not invent the handle.
     InvestigateAlert {
-        protocol: Protocol,
+        producer: String,
         source: String,
         metric: Option<String>,
     },
@@ -1066,7 +1091,7 @@ pub enum Message {
     ),
 
     /// User toggled protocol filter.
-    ToggleProtocolFilter(Protocol),
+    ToggleProducerFilter(String),
 
     /// Filter the dashboard to a single device status (None = all), driven by
     /// the fleet summary chips (#34). Clicking the active chip clears it.
@@ -1505,8 +1530,8 @@ pub enum Message {
     ToggleDeviceGroup(DeviceId, u32),
 
     // Overview messages
-    /// Select a protocol for the overview section.
-    SelectOverviewProtocol(Protocol),
+    /// Select a producer tab for the overview section.
+    SelectOverviewProducer(String),
 
     /// Toggle overview section expanded/collapsed.
     ToggleOverviewExpanded,
@@ -1681,7 +1706,12 @@ pub struct CatalogSnapshot {
 /// them is the catalog's job, not this struct's.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DeviceId {
-    pub protocol: Protocol,
+    /// The producer that published this device — chunk 4 of every key it
+    /// publishes, read from the key. A **name**, not the closed `Protocol`
+    /// enum (#1256): a producer the GUI was not compiled with gets a device
+    /// like any other; the bespoke views ask [`DeviceId::protocol`] for the
+    /// enum and fall back to the generic rendering when it is not one.
+    pub producer: String,
     /// The publishing host's v1 origin (`h-<12hex>`) — chunk 3 of every key it
     /// publishes. Read from the key, never from the payload.
     pub origin: String,
@@ -1710,9 +1740,13 @@ impl DeviceId {
         zenkey::RemoteOrigin::parse(&self.origin).ok()
     }
 
-    pub fn new(protocol: Protocol, origin: impl Into<String>, source: impl Into<String>) -> Self {
+    pub fn new(
+        producer: impl Into<String>,
+        origin: impl Into<String>,
+        source: impl Into<String>,
+    ) -> Self {
         Self {
-            protocol,
+            producer: producer.into(),
             origin: origin.into(),
             source: source.into(),
         }
@@ -1720,15 +1754,15 @@ impl DeviceId {
 
     /// A device from an unspecified host — **fixtures only** (tests, mock data,
     /// the demo simulator's static environment). Every such device gets the same
-    /// placeholder origin, so `(protocol, source)` still tells them apart.
+    /// placeholder origin, so `(producer, source)` still tells them apart.
     ///
     /// Real code never calls this: the origin arrives on the key, and inventing
     /// one is the bug this type exists to prevent (#474). The placeholder is
     /// deliberately not a valid minted id, so if one ever escapes onto the wire
     /// it fails the grammar rather than quietly addressing a host that isn't
     /// there.
-    pub fn fixture(protocol: Protocol, source: impl Into<String>) -> Self {
-        Self::new(protocol, FIXTURE_ORIGIN, source)
+    pub fn fixture(producer: impl Into<String>, source: impl Into<String>) -> Self {
+        Self::new(producer, FIXTURE_ORIGIN, source)
     }
 
     /// The origin comes from the **key** (chunk 3), not the payload — a
@@ -1737,15 +1771,41 @@ impl DeviceId {
     /// It is on every sample; it was simply being thrown away at decode. So
     /// does the producer, since #1255 (chunk 4).
     ///
-    /// `None` when the producer is outside the closed `Protocol` enum — the
-    /// one place the enum still bites the GUI, and the place #1256 deletes.
-    pub fn from_reading(reading: &Reading) -> Option<Self> {
-        let protocol = reading.producer.parse::<Protocol>().ok()?;
-        Some(Self {
-            protocol,
+    /// Infallible since #1256: a producer outside the closed `Protocol` enum
+    /// is a device too. Before, it was dropped here — the first of the gates
+    /// the system-view ratchet (#1254) counts.
+    pub fn from_reading(reading: &Reading) -> Self {
+        Self {
+            producer: reading.producer.clone(),
             origin: reading.origin.clone(),
             source: reading.point.source.clone(),
-        })
+        }
+    }
+
+    /// The closed enum this producer maps to, when it is one the GUI was
+    /// compiled with. **Bespoke sites only** — a specialized view, a tab
+    /// prefetch, an icon. Everything generic keys on [`DeviceId::producer`].
+    pub fn protocol(&self) -> Option<Protocol> {
+        self.producer.parse().ok()
+    }
+
+    /// `self.protocol() == Some(p)` — for the `== Protocol::X` probes.
+    pub fn is(&self, p: Protocol) -> bool {
+        self.protocol() == Some(p)
+    }
+
+    /// The producer's human label: the enum's `display_name` for a known
+    /// producer (`Logs`, `PVE`, `BMC`), the producer name verbatim otherwise.
+    pub fn display_name(&self) -> String {
+        producer_display_name(&self.producer)
+    }
+}
+
+/// The human label for a producer name — see [`DeviceId::display_name`].
+pub fn producer_display_name(producer: &str) -> String {
+    match producer.parse::<Protocol>() {
+        Ok(p) => p.display_name().to_string(),
+        Err(()) => producer.to_string(),
     }
 }
 
@@ -1753,7 +1813,7 @@ impl std::fmt::Display for DeviceId {
     /// Human-facing: the hostname is what an operator recognises, so it stays
     /// the label. The origin is an *address*, not a name (RFC 06 §1).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}/{}", self.protocol, self.source)
+        write!(f, "{}/{}", self.producer, self.source)
     }
 }
 
@@ -1772,7 +1832,7 @@ mod origin_tests {
             zenkey::RemoteOrigin::parse(FIXTURE_ORIGIN).is_ok(),
             "{FIXTURE_ORIGIN} must parse as a real origin"
         );
-        let id = DeviceId::fixture(Protocol::Sysinfo, "web01".to_string());
+        let id = DeviceId::fixture("sysinfo", "web01".to_string());
         assert!(id.remote_origin().is_some());
     }
 
@@ -1781,7 +1841,7 @@ mod origin_tests {
     /// at nobody.
     #[test]
     fn junk_origin_is_not_addressable() {
-        let id = DeviceId::new(Protocol::Sysinfo, "not-an-origin", "web01");
+        let id = DeviceId::new("sysinfo", "not-an-origin", "web01");
         assert!(id.remote_origin().is_none());
     }
 }

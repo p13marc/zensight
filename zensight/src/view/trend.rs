@@ -134,7 +134,7 @@ pub fn build_device_sparks<'a>(
 ) -> DeviceSparks {
     let mut out = DeviceSparks::new();
     for id in devices {
-        let protocol = id.protocol.to_string();
+        let protocol = id.producer.clone();
         let mut metrics: Vec<MetricSpark> = store
             .device_hot_samples(&protocol, &id.origin, &id.source)
             .into_iter()

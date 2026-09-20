@@ -6,6 +6,7 @@ pub mod app;
 pub mod demo;
 pub mod entity;
 pub mod history;
+pub mod intake;
 pub mod message;
 pub mod mock;
 pub mod replay;

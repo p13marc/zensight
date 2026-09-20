@@ -383,10 +383,10 @@ fn status_stat<'a>(label: &'a str, count: usize, state: StatusLedState) -> Eleme
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zensight_common::{Protocol, TelemetryPoint};
+    use zensight_common::TelemetryPoint;
 
     fn dev(metrics: &[(&str, TelemetryValue)]) -> (DeviceId, DeviceState) {
-        let id = DeviceId::fixture(Protocol::Pve, "pve01");
+        let id = DeviceId::fixture("pve", "pve01");
         let mut state = DeviceState::new(id.clone());
         for (metric, v) in metrics {
             state.metrics.insert(
@@ -464,9 +464,9 @@ mod tests {
     #[test]
     fn one_node_reporting_lost_quorum_outweighs_the_others() {
         let mut a = dev(&[("cluster/quorate", TelemetryValue::Gauge(1.0))]);
-        a.0 = DeviceId::fixture(Protocol::Pve, "pve-a");
+        a.0 = DeviceId::fixture("pve", "pve-a");
         let mut b = dev(&[("cluster/quorate", TelemetryValue::Gauge(0.0))]);
-        b.0 = DeviceId::fixture(Protocol::Pve, "pve-b");
+        b.0 = DeviceId::fixture("pve", "pve-b");
         let pairs = [a, b];
         assert_eq!(aggregate(&fleet(&pairs)).quorate, Some(false));
     }

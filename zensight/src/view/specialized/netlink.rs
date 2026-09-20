@@ -2123,7 +2123,7 @@ mod tests {
     fn counter_rate_projects_history_points_and_inherits_the_reset_rule() {
         use crate::message::DeviceId;
         use std::collections::VecDeque;
-        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+        use zensight_common::{TelemetryPoint, TelemetryValue};
 
         let point = |ts: i64, v: u64| TelemetryPoint {
             timestamp: ts,
@@ -2133,7 +2133,7 @@ mod tests {
             labels: Default::default(),
             unit: None,
         };
-        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Netlink, "h"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("netlink", "h"));
         let put = |state: &mut DeviceDetailState, pts: Vec<TelemetryPoint>| {
             state.history.insert("m".to_string(), VecDeque::from(pts));
         };

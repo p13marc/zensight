@@ -190,7 +190,8 @@ pub struct Node {
     pub macs: Vec<String>,
     /// Which protocols' devices map to this host (#83). Drives the header icon
     /// and the "covered by" badges in the info panel.
-    pub protocols: std::collections::BTreeSet<zensight_common::Protocol>,
+    /// Producer names (a string since #1256).
+    pub protocols: std::collections::BTreeSet<String>,
     /// CPU usage percentage (0-100). From sysinfo.
     pub cpu_usage: Option<f64>,
     /// Memory usage percentage (0-100). From sysinfo.
@@ -1628,16 +1629,16 @@ pub fn edges_from_catalog(
 /// gNMI/SNMP/Modbus network gear are nodes; syslog (log overlay) and netring (flow
 /// overlay that supplies the *edges*) annotate existing nodes rather than adding
 /// their own.
-pub(crate) fn is_node_protocol(p: zensight_common::Protocol) -> bool {
+pub(crate) fn is_node_protocol(producer: &str) -> bool {
     use zensight_common::Protocol;
     matches!(
-        p,
-        Protocol::Sysinfo
+        producer.parse::<Protocol>(),
+        Ok(Protocol::Sysinfo
             | Protocol::Netlink
             | Protocol::Netflow
             | Protocol::Gnmi
             | Protocol::Snmp
-            | Protocol::Modbus
+            | Protocol::Modbus)
     )
 }
 
@@ -1651,18 +1652,17 @@ pub(crate) fn entity_node_label(e: &zensight_common::HostEntity) -> String {
 
 /// Pick the icon protocol for a node: prefer sysinfo (the host identity), then
 /// netlink, otherwise the first protocol that covers the host (#83).
-pub(crate) fn primary_protocol(node: &Node) -> zensight_common::Protocol {
-    use zensight_common::Protocol;
-    if node.protocols.contains(&Protocol::Sysinfo) {
-        Protocol::Sysinfo
-    } else if node.protocols.contains(&Protocol::Netlink) {
-        Protocol::Netlink
+pub(crate) fn primary_protocol(node: &Node) -> String {
+    if node.protocols.contains("sysinfo") {
+        "sysinfo".to_string()
+    } else if node.protocols.contains("netlink") {
+        "netlink".to_string()
     } else {
         node.protocols
             .iter()
             .next()
-            .copied()
-            .unwrap_or(Protocol::Sysinfo)
+            .cloned()
+            .unwrap_or_else(|| "sysinfo".to_string())
     }
 }
 
@@ -2661,12 +2661,11 @@ mod tests {
 
     #[test]
     fn test_primary_protocol_prefers_sysinfo_then_netlink() {
-        use zensight_common::Protocol;
         let mut n = Node::default();
-        assert_eq!(primary_protocol(&n), Protocol::Sysinfo); // empty -> fallback
-        n.protocols.insert(Protocol::Netlink);
-        assert_eq!(primary_protocol(&n), Protocol::Netlink);
-        n.protocols.insert(Protocol::Sysinfo);
-        assert_eq!(primary_protocol(&n), Protocol::Sysinfo);
+        assert_eq!(primary_protocol(&n), "sysinfo"); // empty -> fallback
+        n.protocols.insert("netlink".to_string());
+        assert_eq!(primary_protocol(&n), "netlink");
+        n.protocols.insert("sysinfo".to_string());
+        assert_eq!(primary_protocol(&n), "sysinfo");
     }
 }

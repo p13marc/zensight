@@ -349,10 +349,10 @@ mod tests {
     use super::*;
     use crate::message::DeviceId;
     use iced_test::simulator;
-    use zensight_common::{Protocol, TelemetryPoint};
+    use zensight_common::TelemetryPoint;
 
     fn vantage(host: &str, metrics: &[(&str, f64)]) -> DeviceDetailState {
-        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Probe, host));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("probe", host));
         for (metric, v) in metrics {
             state.metrics.insert(
                 (*metric).to_string(),

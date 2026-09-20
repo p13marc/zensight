@@ -302,6 +302,19 @@ pub fn protocol_icon<Message: 'static>(
     }
 }
 
+/// The icon for a producer **name** — chunk 4 of its keys (#1256).
+///
+/// A producer the GUI was compiled with gets its [`protocol_icon`]; any
+/// other producer gets the generic mark. This is the dispatch every generic
+/// surface (device header, facet strip, dashboard card, host list) uses, so a
+/// producer outside the closed enum renders like a sensor, not like an error.
+pub fn for_producer<Message: 'static>(producer: &str, size: IconSize) -> Element<'static, Message> {
+    match producer.parse::<zensight_common::Protocol>() {
+        Ok(p) => protocol_icon(p, size),
+        Err(()) => protocol_generic(size),
+    }
+}
+
 // ============================================================================
 // Theme Icons
 // ============================================================================
@@ -368,4 +381,21 @@ pub fn subscription<Message: 'static>(size: IconSize) -> Element<'static, Messag
 /// Tree/hierarchy icon.
 pub fn tree<Message: 'static>(size: IconSize) -> Element<'static, Message> {
     svg_icon(include_bytes!("tree.svg"), size)
+}
+
+#[cfg(test)]
+mod producer_icon_tests {
+    /// The dispatch behind [`super::for_producer`]: an enum member maps to
+    /// its own icon, everything else to the generic mark (#1256). The icon
+    /// itself is an opaque element, so the test pins the parse it keys on.
+    #[test]
+    fn a_producer_outside_the_enum_gets_the_generic_mark() {
+        assert!("sysinfo".parse::<zensight_common::Protocol>().is_ok());
+        assert!("fake-sensor".parse::<zensight_common::Protocol>().is_err());
+        // Both render — a producer outside the enum is not an error.
+        let _known: iced::Element<'static, ()> =
+            super::for_producer("sysinfo", super::IconSize::Small);
+        let _other: iced::Element<'static, ()> =
+            super::for_producer("fake-sensor", super::IconSize::Small);
+    }
 }

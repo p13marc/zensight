@@ -285,7 +285,7 @@ fn render_evidence<'a>(inc: &Incident) -> Element<'a, Message> {
      -> Element<'a, Message> {
         button(text(label.to_string()).size(font::CAPTION))
             .on_press(Message::InvestigateAlert {
-                protocol,
+                producer: protocol.to_string(),
                 source,
                 metric,
             })
