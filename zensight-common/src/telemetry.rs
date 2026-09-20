@@ -19,9 +19,12 @@ pub struct TelemetryPoint {
     /// path and in the labels, both of which already carry it.
     pub source: String,
 
-    /// Origin protocol.
-    pub protocol: Protocol,
-
+    // There is deliberately NO `protocol` here (#1255). The producer is chunk
+    // 4 of the key the point rides on (`keyexpr::producer_name`), so repeating
+    // it in the payload said nothing the key had not — and said it as a
+    // closed enum, which is what refused every producer this build was not
+    // compiled with. A `protocol` member in an older producer's payload is
+    // ignored on read.
     /// Metric name/path (e.g., "system/sysUpTime", "if/1/ifInOctets").
     pub metric: String,
 
@@ -43,14 +46,12 @@ impl TelemetryPoint {
     /// Create a new telemetry point with the current timestamp.
     pub fn new(
         source: impl Into<String>,
-        protocol: Protocol,
         metric: impl Into<String>,
         value: TelemetryValue,
     ) -> Self {
         Self {
             timestamp: current_timestamp_millis(),
             source: source.into(),
-            protocol,
             metric: metric.into(),
             value,
             labels: HashMap::new(),
@@ -311,14 +312,12 @@ mod tests {
     fn test_telemetry_point_creation() {
         let point = TelemetryPoint::new(
             "router01",
-            Protocol::Snmp,
             "system/sysUpTime",
             TelemetryValue::Counter(123456),
         )
         .with_label("oid", "1.3.6.1.2.1.1.3.0");
 
         assert_eq!(point.source, "router01");
-        assert_eq!(point.protocol, Protocol::Snmp);
         assert_eq!(point.metric, "system/sysUpTime");
         assert_eq!(point.value, TelemetryValue::Counter(123456));
         assert_eq!(
@@ -392,5 +391,25 @@ mod tests {
 
         // Zero is non-negative, becomes Counter
         assert_eq!(TelemetryValue::from(0i64), TelemetryValue::Counter(0));
+    }
+
+    /// #1255: the payload no longer carries `protocol`, and one that still
+    /// does — an older producer, or a producer outside the enum this build
+    /// knows — decodes all the same. The producer is the key's business.
+    #[test]
+    fn a_payload_that_still_carries_protocol_decodes() {
+        for protocol in ["sysinfo", "fake-sensor"] {
+            let json = format!(
+                r#"{{"timestamp":1700000000000,"source":"rack7","protocol":"{protocol}","metric":"temp/inlet/celsius","value":{{"type":"gauge","value":41.5}}}}"#
+            );
+            let point: TelemetryPoint =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{protocol}: {e}"));
+            assert_eq!(point.source, "rack7");
+            assert_eq!(point.metric, "temp/inlet/celsius");
+        }
+        // And a point serialises without one.
+        let point = TelemetryPoint::new("rack7", "temp/inlet/celsius", TelemetryValue::Gauge(41.5));
+        let json = serde_json::to_string(&point).unwrap();
+        assert!(!json.contains("protocol"), "{json}");
     }
 }

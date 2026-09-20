@@ -51,18 +51,40 @@ pub fn refine_key(key: &str) -> Option<(StructuralKey<'_>, String, AnySubject)> 
     let ClassOrPlane::Class(class) = parsed.class else {
         return None;
     };
-    let name = match parsed.producer() {
-        // The instance suffix (`netring-2`) is already stripped, so the
-        // registry lookup sees the base name.
-        Some(p) => p.name().to_string(),
-        // Service origins (`@catalog`) carry no producer chunk.
-        None => match &parsed.origin {
-            Origin::Service(s) => s.as_str().trim_start_matches('@').to_string(),
-            Origin::Host(_) => return None,
-        },
-    };
+    let name = producer_name_of(&parsed)?;
     let subject = registry::parse_subject(&name, class, &parsed.subject)?;
     Some((parsed, name, subject))
+}
+
+/// The producer (or service) **base name** a base-relative key was published
+/// under — chunk 4 of a host-origin key with its instance suffix stripped
+/// (`netring-2` → `netring`), or the service name of a service origin
+/// (`@catalog` → `catalog`) — **without** the registry lookup [`refine_key`]
+/// adds.
+///
+/// This is where a consumer learns who published a point since #1255:
+/// `TelemetryPoint` no longer carries a `protocol`, because the key already
+/// said it, as an open name rather than a closed enum. `None` when the key is
+/// not a v1 data key or a host-origin key has no producer chunk. An
+/// unregistered producer still gets its name — "does not exist" is the
+/// registry's rule for *subjects*, and a consumer that wants to show what the
+/// fleet publishes needs the name first.
+pub fn producer_name(key: &str) -> Option<String> {
+    let parsed = parse_key(key)?;
+    producer_name_of(&parsed)
+}
+
+fn producer_name_of(parsed: &StructuralKey<'_>) -> Option<String> {
+    match parsed.producer() {
+        // The instance suffix (`netring-2`) is already stripped, so the
+        // registry lookup sees the base name.
+        Some(p) => Some(p.name().to_string()),
+        // Service origins (`@catalog`) carry no producer chunk.
+        None => match &parsed.origin {
+            Origin::Service(s) => Some(s.as_str().trim_start_matches('@').to_string()),
+            Origin::Host(_) => None,
+        },
+    }
 }
 
 /// Structurally parse a **full** key as it appears on the wire, given the
@@ -1351,5 +1373,32 @@ mod tests {
                 format!("v1/{origin}/@blob/tree")
             );
         }
+    }
+
+    /// #1255: the producer comes from the key, registry or not.
+    #[test]
+    fn producer_name_is_the_base_name_off_the_key() {
+        assert_eq!(
+            producer_name("v1/h-0123456789ab/telemetry/sysinfo/cpu/usage").as_deref(),
+            Some("sysinfo")
+        );
+        // The instance suffix is not part of the name — it never was in
+        // `Protocol::as_str()` either, so series paths do not move.
+        assert_eq!(
+            producer_name("v1/h-0123456789ab/telemetry/netring-2/flows/total").as_deref(),
+            Some("netring")
+        );
+        // An unregistered producer is still named; only its subjects are unknown.
+        assert_eq!(
+            producer_name("v1/h-0123456789ab/state/fake-sensor/rack7/status").as_deref(),
+            Some("fake-sensor")
+        );
+        assert!(refine_key("v1/h-0123456789ab/state/fake-sensor/rack7/status").is_none());
+        // A service origin names the service.
+        assert_eq!(
+            producer_name("v1/@catalog/state/entity/h-0123456789ab").as_deref(),
+            Some("catalog")
+        );
+        assert_eq!(producer_name("not-a-v1-key"), None);
     }
 }

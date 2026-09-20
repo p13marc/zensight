@@ -18,13 +18,19 @@ pub const SOURCE: &str = "demo-host";
 /// Build the six points for one tick. Deterministic in `tick` (`base_ts` +
 /// `tick * interval` drives both the waveforms and the timestamps), so tests
 /// and replays are reproducible.
-pub fn points_for_tick(base_ts: i64, interval_ms: u64, tick: u64) -> Vec<TelemetryPoint> {
+pub fn points_for_tick(
+    base_ts: i64,
+    interval_ms: u64,
+    tick: u64,
+) -> Vec<(&'static str, TelemetryPoint)> {
     let ts = base_ts + (tick * interval_ms) as i64;
     let t = tick as f64 * (interval_ms as f64 / 1000.0); // seconds since start
+    // Each point rides with the producer it is published under (#1255): the
+    // key carries it, the point does not.
     let point = |protocol: Protocol, metric: &str, value: TelemetryValue| {
-        let mut p = TelemetryPoint::new(SOURCE, protocol, metric, value);
+        let mut p = TelemetryPoint::new(SOURCE, metric, value);
         p.timestamp = ts;
-        p
+        (protocol.as_str(), p)
     };
 
     // Counter with a deliberate mid-run reset (tick 20 wraps to zero) —
@@ -72,8 +78,8 @@ pub async fn run(ctx: &DemoContext, duration_secs: u64, interval_ms: u64) -> any
     let ticks = duration_secs * 1000 / interval_ms;
     let mut published = 0u64;
     for tick in 0..ticks {
-        for p in points_for_tick(base_ts, interval_ms, tick) {
-            ctx.publish_point(&p).await?;
+        for (producer, p) in points_for_tick(base_ts, interval_ms, tick) {
+            ctx.publish_point(producer, &p).await?;
             published += 1;
         }
         tokio::time::sleep(Duration::from_millis(interval_ms)).await;
@@ -87,8 +93,11 @@ mod tests {
 
     #[test]
     fn tick_points_are_deterministic_and_real_shaped() {
-        let a = points_for_tick(1_000_000, 500, 3);
-        let b = points_for_tick(1_000_000, 500, 3);
+        let unwrap = |v: Vec<(&str, TelemetryPoint)>| -> Vec<TelemetryPoint> {
+            v.into_iter().map(|(_, p)| p).collect()
+        };
+        let a = unwrap(points_for_tick(1_000_000, 500, 3));
+        let b = unwrap(points_for_tick(1_000_000, 500, 3));
         assert_eq!(a.len(), 6);
         for (x, y) in a.iter().zip(&b) {
             assert_eq!(x.timestamp, y.timestamp);
@@ -104,7 +113,7 @@ mod tests {
 
     #[test]
     fn rx_bytes_counter_resets_every_20_ticks() {
-        let v = |tick| match points_for_tick(0, 500, tick)[2].value {
+        let v = |tick| match points_for_tick(0, 500, tick)[2].1.value {
             TelemetryValue::Counter(v) => v,
             _ => panic!("rx_bytes must be a counter"),
         };

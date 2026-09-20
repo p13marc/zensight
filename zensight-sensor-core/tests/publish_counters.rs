@@ -54,12 +54,7 @@ async fn the_advanced_tier_counts_into_the_shared_set() {
         AdvancedPublisherConfig::default(),
         counters.clone(),
     );
-    let point = TelemetryPoint::new(
-        "host",
-        zensight_common::Protocol::Sysinfo,
-        "system/uptime",
-        TelemetryValue::Gauge(1.0),
-    );
+    let point = TelemetryPoint::new("host", "system/uptime", TelemetryValue::Gauge(1.0));
     registry
         .publish("system/uptime", &point)
         .await
@@ -133,12 +128,7 @@ async fn an_advanced_full_key_put_is_guarded() {
         AdvancedPublisherConfig::cache_only(1),
         Default::default(),
     );
-    let point = TelemetryPoint::new(
-        "host",
-        zensight_common::Protocol::Sysinfo,
-        "not/a/real/metric",
-        TelemetryValue::Gauge(1.0),
-    );
+    let point = TelemetryPoint::new("host", "not/a/real/metric", TelemetryValue::Gauge(1.0));
     let _ = registry
         .publish_to_key(
             "v1/h-0123456789ab/telemetry/sysinfo/not/a/real/metric",

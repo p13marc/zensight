@@ -432,7 +432,6 @@ mod tests {
                 TelemetryPoint {
                     timestamp: 0,
                     source: source.to_string(),
-                    protocol: proto,
                     metric: m.to_string(),
                     value: TelemetryValue::Gauge(*v),
                     labels: HashMap::new(),
@@ -489,7 +488,6 @@ mod tests {
                 TelemetryPoint {
                     timestamp: 0,
                     source: "r1".to_string(),
-                    protocol: Protocol::Snmp,
                     metric: m.clone(),
                     value: TelemetryValue::Gauge(*v),
                     labels: HashMap::new(),

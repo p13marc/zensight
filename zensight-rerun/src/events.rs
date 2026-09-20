@@ -144,6 +144,7 @@ impl NormalizedEvent {
 /// path). Labels become attributes; well-known labels (`peer`, `iface`,
 /// `correlation_id`) are lifted into the typed fields.
 pub fn normalize_point(
+    producer: &str,
     point: &zensight_common::telemetry::TelemetryPoint,
     kind: EventKind,
     entity_id: Option<String>,
@@ -160,8 +161,10 @@ pub fn normalize_point(
         EventSeverity::Info,
         point.source.clone(),
         message,
-    )
-    .with_protocol(point.protocol);
+    );
+    // The producer is the key's chunk 4 (#1255); `NormalizedEvent.protocol`
+    // stays the closed enum, so a producer outside it is simply `None`.
+    event.protocol = producer.parse::<Protocol>().ok();
     event.entity_id = entity_id;
     event
         .attributes
@@ -233,13 +236,17 @@ mod tests {
     fn text_point_becomes_message() {
         let point = TelemetryPoint::new(
             "host1",
-            Protocol::Netlink,
             "events/route/replace",
             TelemetryValue::Text("default via 10.0.0.1".into()),
         )
         .with_label("iface", "eth0")
         .with_label("correlation_id", "inc-1");
-        let event = normalize_point(&point, EventKind::RouteChange, Some("h_abc".into()));
+        let event = normalize_point(
+            "netlink",
+            &point,
+            EventKind::RouteChange,
+            Some("h_abc".into()),
+        );
         assert_eq!(event.message, "default via 10.0.0.1");
         assert_eq!(event.kind, EventKind::RouteChange);
         assert_eq!(event.interface.as_deref(), Some("eth0"));

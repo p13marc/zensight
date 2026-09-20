@@ -71,12 +71,7 @@ mod tests {
         let as_dyn: std::sync::Arc<dyn PointObserver> = recorder.clone();
         as_dyn.observe_point(
             "v1/h-a/telemetry/sysinfo/cpu/usage",
-            &TelemetryPoint::new(
-                "host1",
-                crate::Protocol::Sysinfo,
-                "cpu/usage",
-                crate::TelemetryValue::Gauge(1.0),
-            ),
+            &TelemetryPoint::new("host1", "cpu/usage", crate::TelemetryValue::Gauge(1.0)),
         );
         assert_eq!(recorder.0.lock().unwrap().as_slice(), ["cpu/usage"]);
     }

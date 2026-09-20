@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// A snapshot of one network interface.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -224,7 +224,7 @@ fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> Teleme
         "unregistered netlink telemetry subject {metric:?} — add it to \
          zensight-common/registry/netlink.toml (RFC 08 §5, issue #468)"
     );
-    TelemetryPoint::new(host, Protocol::Netlink, metric, value)
+    TelemetryPoint::new(host, metric, value)
 }
 
 /// Build telemetry points for one interface. Metric paths are
@@ -1515,7 +1515,6 @@ mod tests {
         // Every point is sourced + labelled with the interface index.
         for p in &pts {
             assert_eq!(p.source, "host1");
-            assert_eq!(p.protocol, Protocol::Netlink);
             assert_eq!(p.labels.get("ifindex").map(String::as_str), Some("2"));
         }
     }

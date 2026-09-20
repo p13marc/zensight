@@ -1,6 +1,6 @@
 //! Registry-checked telemetry-point construction (RFC 08 §5, issue #468).
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 /// Build one telemetry point, enforcing the subject registry.
 ///
 /// Every metric name this sensor emits funnels through here (RFC 08 §5, issue
@@ -18,7 +18,7 @@ pub(crate) fn checked_point(
         "unregistered logs telemetry subject {metric:?} — add it to \
          zensight-common/registry/logs.toml (RFC 08 §5, issue #468)"
     );
-    TelemetryPoint::new(source, Protocol::Logs, metric, value)
+    TelemetryPoint::new(source, metric, value)
 }
 
 #[cfg(test)]

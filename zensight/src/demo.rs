@@ -29,10 +29,10 @@ const DEMO_POLLER: &str = "demo-poller";
 ///
 /// The id is the mock entity id, because RFC 06 §6 says the two are the same
 /// value: a host's `host_id` *is* its origin.
-pub fn demo_origin(point: &TelemetryPoint) -> String {
-    let host = match point.protocol {
+pub fn demo_origin(producer: Protocol, source: &str) -> String {
+    let host = match producer {
         Protocol::Snmp | Protocol::Modbus | Protocol::Gnmi | Protocol::Netflow => DEMO_POLLER,
-        _ => point.source.as_str(),
+        _ => source,
     };
     crate::mock::entity_id_for(host)
 }
@@ -485,7 +485,10 @@ impl DemoSimulator {
     }
 
     /// Generate a tick of telemetry data.
-    pub fn tick(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    /// Every point rides with the producer it is published under (#1255):
+    /// on the wire that is the key's chunk 4, which the point itself does not
+    /// carry, and the demo has no wire key.
+    pub fn tick(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         self.tick += 1;
         self.process_events();
 
@@ -510,7 +513,7 @@ impl DemoSimulator {
     /// Bandwidth view's Services mode + sparklines populate in `--demo`. The
     /// Processes mode is fed separately by the demo query branch in `app.rs`
     /// (demo never serves the `@rpc/netlink/bandwidth` queryable).
-    fn generate_bandwidth(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_bandwidth(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         // (unit, rx_base bytes/s, tx_base bytes/s)
         let units = [
@@ -541,7 +544,7 @@ impl DemoSimulator {
     }
 
     /// Generate server (sysinfo) telemetry.
-    fn generate_servers(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_servers(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         let servers = ["server01", "server02", "server03", "database01"];
 
@@ -821,7 +824,7 @@ impl DemoSimulator {
         server: &str,
         cpu: f64,
         timestamp: i64,
-    ) -> Vec<TelemetryPoint> {
+    ) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         let hwmon = |chip: &str, label: &str| {
             vec![
@@ -933,7 +936,7 @@ impl DemoSimulator {
     }
 
     /// Generate network device (SNMP) telemetry.
-    fn generate_network_devices(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_network_devices(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
 
         // Router
@@ -1251,7 +1254,7 @@ impl DemoSimulator {
     }
 
     /// Generate PLC (Modbus) telemetry.
-    fn generate_plcs(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_plcs(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         let plcs = ["plc01", "plc02"];
 
@@ -1329,7 +1332,7 @@ impl DemoSimulator {
 
     /// Generate syslog messages.
     /// Uses message/{id} format with severity, facility, and app_name labels.
-    fn generate_syslog(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_syslog(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
 
         // Helper to create a log line matching the real sensor's contract (#104):
@@ -1365,24 +1368,26 @@ impl DemoSimulator {
             };
             // Mirror the sensor's `<timestamp_ms><seq>` uid shape (#104).
             let uid = format!("{:013}{:012}", ts.max(0), id);
-            TelemetryPoint {
-                timestamp: ts,
-                source: server.to_string(),
-                protocol: Protocol::Logs,
-                metric: format!("events/{uid}"),
-                value: TelemetryValue::Text(msg.to_string()),
-                labels: [
-                    ("severity".to_string(), severity_name.to_string()),
-                    ("facility".to_string(), facility.to_string()),
-                    ("app".to_string(), app_name.to_string()),
-                    ("severity_number".to_string(), sev_num.to_string()),
-                    ("severity_text".to_string(), sev_text.to_string()),
-                    ("log.record.uid".to_string(), uid.clone()),
-                ]
-                .into_iter()
-                .collect(),
-                unit: None,
-            }
+            (
+                Protocol::Logs,
+                TelemetryPoint {
+                    timestamp: ts,
+                    source: server.to_string(),
+                    metric: format!("events/{uid}"),
+                    value: TelemetryValue::Text(msg.to_string()),
+                    labels: [
+                        ("severity".to_string(), severity_name.to_string()),
+                        ("facility".to_string(), facility.to_string()),
+                        ("app".to_string(), app_name.to_string()),
+                        ("severity_number".to_string(), sev_num.to_string()),
+                        ("severity_text".to_string(), sev_text.to_string()),
+                        ("log.record.uid".to_string(), uid.clone()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    unit: None,
+                },
+            )
         };
 
         let base_id = self.tick * 100; // Unique ID base per tick
@@ -1628,7 +1633,7 @@ impl DemoSimulator {
     /// counters, TCP socket-state gauges, route/neighbor inventory and the
     /// rolled-up diagnostics, all under `Protocol::Netlink` with the host as the
     /// `source`.
-    fn generate_netlink(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_netlink(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         let hosts = ["server01", "server02", "server03", "database01"];
 
@@ -1867,7 +1872,7 @@ impl DemoSimulator {
     /// Generate netring (passive flow monitor) telemetry. One probe aggregates
     /// flow/L4/TCP/bandwidth/DNS/HTTP/TLS rollups for the whole segment, matching
     /// the real `zensight-sensor-netring` contract.
-    fn generate_netring(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_netring(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         let probe = "netprobe01";
 
@@ -2097,7 +2102,7 @@ impl DemoSimulator {
 
     /// Generate NetFlow telemetry: one byte-counter series per
     /// `{src}/{dst}/{proto}` flow, sourced from a flow exporter.
-    fn generate_netflow(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_netflow(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         let exporter = "edge-fw";
         let exporter_ip = "10.0.0.1";
@@ -2129,7 +2134,7 @@ impl DemoSimulator {
     }
 
     /// Generate gNMI telemetry: streamed YANG paths from network targets.
-    fn generate_gnmi(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    fn generate_gnmi(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         let mut points = Vec::new();
         let targets = ["router01", "switch01"];
 
@@ -2252,16 +2257,18 @@ impl DemoSimulator {
         metric: &str,
         value: TelemetryValue,
         timestamp: i64,
-    ) -> TelemetryPoint {
-        TelemetryPoint {
-            timestamp,
-            source: source.to_string(),
+    ) -> (Protocol, TelemetryPoint) {
+        (
             protocol,
-            metric: metric.to_string(),
-            value,
-            labels: HashMap::new(),
-            unit: None,
-        }
+            TelemetryPoint {
+                timestamp,
+                source: source.to_string(),
+                metric: metric.to_string(),
+                value,
+                labels: HashMap::new(),
+                unit: None,
+            },
+        )
     }
 
     /// Helper to create a telemetry point with labels.
@@ -2273,16 +2280,18 @@ impl DemoSimulator {
         value: TelemetryValue,
         timestamp: i64,
         labels: Vec<(String, String)>,
-    ) -> TelemetryPoint {
-        TelemetryPoint {
-            timestamp,
-            source: source.to_string(),
+    ) -> (Protocol, TelemetryPoint) {
+        (
             protocol,
-            metric: metric.to_string(),
-            value,
-            labels: labels.into_iter().collect(),
-            unit: None,
-        }
+            TelemetryPoint {
+                timestamp,
+                source: source.to_string(),
+                metric: metric.to_string(),
+                value,
+                labels: labels.into_iter().collect(),
+                unit: None,
+            },
+        )
     }
 
     /// Generate sensor health snapshots.
@@ -2536,7 +2545,7 @@ mod tests {
         assert!(!points.is_empty());
 
         // Check we have multiple protocols, including the network sensors.
-        let protocols: std::collections::HashSet<_> = points.iter().map(|p| p.protocol).collect();
+        let protocols: std::collections::HashSet<_> = points.iter().map(|(p, _)| *p).collect();
         assert!(protocols.contains(&Protocol::Sysinfo));
         assert!(protocols.contains(&Protocol::Snmp));
         assert!(protocols.contains(&Protocol::Modbus));
@@ -2627,8 +2636,8 @@ mod tests {
         // Log lines are probabilistic per tick; sample enough ticks.
         let mut saw_syslog = false;
         for i in 0..200 {
-            for p in sim.tick(1700000000000 + i * 600) {
-                if p.protocol == Protocol::Logs {
+            for (producer, p) in sim.tick(1700000000000 + i * 600) {
+                if producer == Protocol::Logs {
                     saw_syslog = true;
                     // Per-line event key (#104): `events/<uid>`, value is text.
                     assert!(
@@ -2676,8 +2685,8 @@ mod tests {
         // Counter values should increase
         let counter1: u64 = points1
             .iter()
-            .find(|p| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
-            .and_then(|p| match &p.value {
+            .find(|(_, p)| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
+            .and_then(|(_, p)| match &p.value {
                 TelemetryValue::Counter(v) => Some(*v),
                 _ => None,
             })
@@ -2685,8 +2694,8 @@ mod tests {
 
         let counter2: u64 = points2
             .iter()
-            .find(|p| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
-            .and_then(|p| match &p.value {
+            .find(|(_, p)| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
+            .and_then(|(_, p)| match &p.value {
                 TelemetryValue::Counter(v) => Some(*v),
                 _ => None,
             })

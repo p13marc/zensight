@@ -540,7 +540,6 @@ mod tests {
     use super::*;
     // Points are built by `checked_point`, so the lib no longer names Protocol;
     // the tests still assert on it.
-    use zensight_common::telemetry::Protocol;
 
     /// Minimal `ListUnits` row (same shape as query.rs's test helper).
     fn lu(name: &str) -> ListedUnit {
@@ -764,7 +763,6 @@ mod tests {
         assert_eq!(by["manager/n_failed_units"], &TelemetryValue::Gauge(2.0));
         assert_eq!(by["units/total"], &TelemetryValue::Gauge(300.0));
         assert!(by.contains_key("boot/total_usec"));
-        assert_eq!(pts[0].protocol, Protocol::Systemd);
         assert_eq!(pts[0].source, "host01");
         // Gating: no units, no boot → only the 4 manager scalars.
         let scalar_only = build_points("host01", &counts, None, None);

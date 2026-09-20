@@ -87,9 +87,19 @@ pub struct WorkerStats {
     pub sink_errors: u64,
 }
 
+/// One telemetry point with the producer it arrived under — the key's
+/// chunk 4, which the point itself no longer carries (#1255). The subscriber
+/// sends this rather than a bare point because the entity path
+/// (`sensors/<producer>/…`) needs it and the key is gone by then.
+#[derive(Debug, Clone)]
+pub struct TelemetryItem {
+    pub producer: String,
+    pub point: TelemetryPoint,
+}
+
 /// Drains the two bounded channels and drives a [`VisualizationSink`].
 pub struct SinkWorker {
-    rx_telemetry: mpsc::Receiver<TelemetryPoint>,
+    rx_telemetry: mpsc::Receiver<TelemetryItem>,
     rx_control: mpsc::Receiver<ControlItem>,
     sink: Box<dyn VisualizationSink>,
     index: EntityIndex,
@@ -104,7 +114,7 @@ pub struct SinkWorker {
 
 impl SinkWorker {
     pub fn new(
-        rx_telemetry: mpsc::Receiver<TelemetryPoint>,
+        rx_telemetry: mpsc::Receiver<TelemetryItem>,
         rx_control: mpsc::Receiver<ControlItem>,
         sink: Box<dyn VisualizationSink>,
         counters: CounterPolicy,
@@ -174,11 +184,12 @@ impl SinkWorker {
         self.stats
     }
 
-    fn handle_point(&mut self, point: TelemetryPoint) {
+    fn handle_point(&mut self, item: TelemetryItem) {
+        let TelemetryItem { producer, point } = item;
         match classify(&point) {
             Class::Ignore => self.stats.ignored_binary += 1,
             Class::Metric => {
-                let path = metric_entity_path(&point, &self.index);
+                let path = metric_entity_path(&producer, &point, &self.index);
                 // Sampler first, rate converter after: a sub-sampled counter
                 // series still differentiates the samples that pass, so rates
                 // stay correct over the longer window (04-live-metrics.md).
@@ -214,7 +225,7 @@ impl SinkWorker {
                 }
             }
             Class::Event(kind) => {
-                let protocol = point.protocol.as_str();
+                let protocol = producer.as_str();
                 let entity_id = self
                     .index
                     .resolve(protocol, &point.source)
@@ -232,7 +243,7 @@ impl SinkWorker {
                     self.stats.sampled_out += 1;
                     return;
                 }
-                let event = crate::events::normalize_point(&point, kind, entity_id);
+                let event = crate::events::normalize_point(&producer, &point, kind, entity_id);
                 self.publish_event(&event, &path);
                 if self.topology.apply_event(&event) {
                     self.publish_topology(event.timestamp);
@@ -401,7 +412,7 @@ mod tests {
     }
 
     async fn run_worker(
-        points: Vec<TelemetryPoint>,
+        points: Vec<TelemetryItem>,
         control: Vec<ControlItem>,
         counters: CounterPolicy,
         sampling: SamplingConfig,
@@ -426,22 +437,28 @@ mod tests {
         (captured, stats)
     }
 
-    fn gauge(metric: &str, ts: i64, v: f64) -> TelemetryPoint {
-        let mut p =
-            TelemetryPoint::new("host1", Protocol::Sysinfo, metric, TelemetryValue::Gauge(v));
+    fn item(producer: &str, mut p: TelemetryPoint, ts: i64) -> TelemetryItem {
         p.timestamp = ts;
-        p
+        TelemetryItem {
+            producer: producer.to_string(),
+            point: p,
+        }
     }
 
-    fn counter(metric: &str, ts: i64, v: u64) -> TelemetryPoint {
-        let mut p = TelemetryPoint::new(
-            "host1",
-            Protocol::Netlink,
-            metric,
-            TelemetryValue::Counter(v),
-        );
-        p.timestamp = ts;
-        p
+    fn gauge(metric: &str, ts: i64, v: f64) -> TelemetryItem {
+        item(
+            "sysinfo",
+            TelemetryPoint::new("host1", metric, TelemetryValue::Gauge(v)),
+            ts,
+        )
+    }
+
+    fn counter(metric: &str, ts: i64, v: u64) -> TelemetryItem {
+        item(
+            "netlink",
+            TelemetryPoint::new("host1", metric, TelemetryValue::Counter(v)),
+            ts,
+        )
     }
 
     #[tokio::test]
@@ -522,15 +539,16 @@ mod tests {
         assert_eq!(stats.sampled_out, 8);
     }
 
-    fn event_text(metric: &str, ts: i64) -> TelemetryPoint {
-        let mut p = TelemetryPoint::new(
-            "host1",
-            Protocol::Netlink,
-            metric,
-            TelemetryValue::Text("something happened".into()),
-        );
-        p.timestamp = ts;
-        p
+    fn event_text(metric: &str, ts: i64) -> TelemetryItem {
+        item(
+            "netlink",
+            TelemetryPoint::new(
+                "host1",
+                metric,
+                TelemetryValue::Text("something happened".into()),
+            ),
+            ts,
+        )
     }
 
     fn warning_alert(source: &str) -> zensight_common::alert::Alert {

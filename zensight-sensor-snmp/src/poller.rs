@@ -8,7 +8,7 @@ use async_snmp::{Auth, Client, EngineCache, MessageSize, Retry, UdpHandle, Value
 use bytes::Bytes;
 use zenoh::Session as ZenohSession;
 
-use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{Format, TelemetryPoint, TelemetryValue};
 
 use crate::config::{AuthProtocol, DeviceConfig, OidGroup, PrivProtocol, SnmpVersion};
 use crate::mib::MibResolver;
@@ -1050,8 +1050,8 @@ impl SnmpPoller {
         table_index: Option<&str>,
         extra: Option<(&str, String)>,
     ) {
-        let mut point = TelemetryPoint::new(&self.device.name, Protocol::Snmp, metric_name, value)
-            .with_label("oid", oid_str);
+        let mut point =
+            TelemetryPoint::new(&self.device.name, metric_name, value).with_label("oid", oid_str);
         // The table index as a LABEL (#769).
         //
         // It used to be part of the metric NAME: snmp's whole tree was a

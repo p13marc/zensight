@@ -26,7 +26,7 @@
 
 use std::time::Instant;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 use zensight_store::{MetricStore, PersistentStore, Tier};
 
 struct Args {
@@ -97,7 +97,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let point = TelemetryPoint {
                 timestamp: ts,
                 source: format!("vm-{}", i % 6),
-                protocol: Protocol::Sysinfo,
                 metric: subject.clone(),
                 // A counter: the kind that costs most to answer, since `rate`
                 // has to walk the series rather than reduce it.
@@ -105,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 labels: Default::default(),
                 unit: Some("By".into()),
             };
-            store.record(&origin, &subject, &point);
+            store.record(&origin, "sysinfo", &subject, &point);
         }
         // Flush per simulated minute, as the historian's timer would.
         if let Some((handle, batch)) = store.take_flush_batch() {

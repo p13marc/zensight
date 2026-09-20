@@ -80,13 +80,14 @@ fn ramp(t: f64, start: f64, end: f64, from: f64, to: f64) -> f64 {
 /// - Flow error ratio: 0, ramps to 0.08 over t+15..t+22, recovers t+50..t+55.
 /// - Retransmits (counter): 1/s baseline, 50/s from t+18, 1/s after t+50.
 /// - Flow-lifetime p95: 20 ms, ramps to 400 over t+22..t+30, recovers t+50..t+60.
-pub fn series_at(base_ts: i64, sec: u64) -> Vec<TelemetryPoint> {
+pub fn series_at(base_ts: i64, sec: u64) -> Vec<(&'static str, TelemetryPoint)> {
     let ts = base_ts + (sec * 1000) as i64;
     let t = sec as f64;
+    // Each point rides with the producer it is published under (#1255).
     let point = |protocol: Protocol, metric: &str, value: TelemetryValue| {
-        let mut p = TelemetryPoint::new(SOURCE, protocol, metric, value);
+        let mut p = TelemetryPoint::new(SOURCE, metric, value);
         p.timestamp = ts;
-        p
+        (protocol.as_str(), p)
     };
 
     let recovering = |v: f64, healthy: f64, rec_end: f64| ramp(t, 50.0, rec_end, v, healthy);
@@ -137,7 +138,6 @@ pub fn link_event(base_ts: i64, offset_secs: u64, up: bool) -> TelemetryPoint {
     };
     let mut p = TelemetryPoint::new(
         SOURCE,
-        Protocol::Netlink,
         format!("events/{kind}/gateway"),
         TelemetryValue::Text(message.into()),
     );
@@ -151,7 +151,6 @@ pub fn link_event(base_ts: i64, offset_secs: u64, up: bool) -> TelemetryPoint {
 pub fn route_change_event(base_ts: i64, offset_secs: u64) -> TelemetryPoint {
     let mut p = TelemetryPoint::new(
         SOURCE,
-        Protocol::Netlink,
         "events/route/replace",
         TelemetryValue::Text("default via 192.168.8.1 dev lte0 (was 10.0.0.1 dev wlan0)".into()),
     );
@@ -221,23 +220,26 @@ pub async fn run(
     ctx.publish_entity(&incident_entity(base_ts)).await?;
 
     for sec in 0..=DURATION_SECS {
-        for point in series_at(base_ts, sec) {
-            ctx.publish_point(&point).await?;
+        for (producer, point) in series_at(base_ts, sec) {
+            ctx.publish_point(producer, &point).await?;
             points += 1;
         }
         for (offset, step) in SCRIPT {
             if *offset == sec {
                 match step {
                     Step::LinkDown => {
-                        ctx.publish_point(&link_event(base_ts, sec, false)).await?;
+                        ctx.publish_point("netlink", &link_event(base_ts, sec, false))
+                            .await?;
                         events += 1;
                     }
                     Step::LinkUp => {
-                        ctx.publish_point(&link_event(base_ts, sec, true)).await?;
+                        ctx.publish_point("netlink", &link_event(base_ts, sec, true))
+                            .await?;
                         events += 1;
                     }
                     Step::RouteChange => {
-                        ctx.publish_point(&route_change_event(base_ts, sec)).await?;
+                        ctx.publish_point("netlink", &route_change_event(base_ts, sec))
+                            .await?;
                         events += 1;
                     }
                     Step::AlertFiring => {
@@ -269,9 +271,11 @@ mod tests {
     fn script_is_deterministic_in_base_ts() {
         let a: Vec<_> = (0..=DURATION_SECS)
             .flat_map(|s| series_at(1_000_000, s))
+            .map(|(_, p)| p)
             .collect();
         let b: Vec<_> = (0..=DURATION_SECS)
             .flat_map(|s| series_at(1_000_000, s))
+            .map(|(_, p)| p)
             .collect();
         assert_eq!(a.len(), b.len());
         for (x, y) in a.iter().zip(&b) {
@@ -284,7 +288,7 @@ mod tests {
 
     #[test]
     fn ramps_hit_the_scripted_plateaus() {
-        let g = |sec: u64, idx: usize| match &series_at(0, sec)[idx].value {
+        let g = |sec: u64, idx: usize| match &series_at(0, sec)[idx].1.value {
             TelemetryValue::Gauge(v) => *v,
             TelemetryValue::Counter(v) => *v as f64,
             other => panic!("unexpected value {other:?}"),

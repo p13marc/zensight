@@ -1791,10 +1791,12 @@ pub struct StoredLog {
 
 impl StoredLog {
     /// Build a record from a per-line log-event [`TelemetryPoint`] (the
-    /// `events/<uid>` shape from #104). Returns `None` if the point isn't a Logs
-    /// text event. The label reads mirror `syslog_message_from_point`.
-    pub fn from_point(point: &TelemetryPoint) -> Option<StoredLog> {
-        if point.protocol != zensight_common::Protocol::Logs {
+    /// `events/<uid>` shape from #104). Returns `None` if the point isn't a
+    /// text event from the `logs` producer — `producer` is the key's chunk 4,
+    /// which the point no longer carries (#1255). The label reads mirror
+    /// `syslog_message_from_point`.
+    pub fn from_point(producer: &str, point: &TelemetryPoint) -> Option<StoredLog> {
+        if producer != "logs" {
             return None;
         }
         let TelemetryValue::Text(message) = &point.value else {
@@ -1845,7 +1847,6 @@ impl StoredLog {
         TelemetryPoint {
             timestamp: self.ts,
             source: self.host.clone(),
-            protocol: zensight_common::Protocol::Logs,
             metric: format!("events/{}", self.uid),
             value: TelemetryValue::Text(self.message.clone()),
             labels,
@@ -2039,10 +2040,13 @@ impl MetricStore {
 
     /// The series path for a point published by `origin` on `subject`:
     /// `"<origin>/<producer>/<subject>"` — see [`series_path`]. The producer
-    /// is the point's protocol, which is the producer chunk of the key it
-    /// arrived on.
-    fn metric_key(origin: &str, subject: &str, point: &TelemetryPoint) -> String {
-        series_path(origin, &point.protocol.to_string(), subject)
+    /// is chunk 4 of the key the point arrived on (`keyexpr::producer_name`);
+    /// since #1255 the payload does not repeat it. The path is byte-identical
+    /// to what `point.protocol.to_string()` produced: `Protocol::as_str()` was
+    /// the producer name without its instance suffix, which is what the key's
+    /// base name is.
+    fn metric_key(origin: &str, producer: &str, subject: &str) -> String {
+        series_path(origin, producer, subject)
     }
 
     /// The device-index key for a device — see [`device_prefix`].
@@ -2060,12 +2064,19 @@ impl MetricStore {
     /// for a proxy producer the wire subject is `{device}/{metric...}` while
     /// [`TelemetryPoint::metric`] is only the `{metric...}` half, so a store
     /// that reconstructed the path from the payload would be un-slugging a
-    /// device chunk and guessing. Both callers already hold the parsed key.
-    pub fn record(&mut self, origin: &str, subject: &str, point: &TelemetryPoint) -> Pushed {
+    /// device chunk and guessing. Both callers already hold the parsed key —
+    /// which is also where `producer` comes from (#1255).
+    pub fn record(
+        &mut self,
+        origin: &str,
+        producer: &str,
+        subject: &str,
+        point: &TelemetryPoint,
+    ) -> Pushed {
         let Some(value) = SampleValue::from_telemetry(&point.value) else {
             return Pushed::Dropped;
         };
-        let key = Self::metric_key(origin, subject, point);
+        let key = Self::metric_key(origin, producer, subject);
         // The cap applies to a *new* series only (#1115): one already held
         // keeps recording, so a store at its ceiling still serves the chart
         // somebody is looking at.
@@ -2510,7 +2521,6 @@ impl MetricStore {
 mod tests {
     use super::*;
     use std::collections::HashMap as Map;
-    use zensight_common::Protocol;
 
     const ORIGIN: &str = "h-0123456789ab";
 
@@ -2534,7 +2544,6 @@ mod tests {
         TelemetryPoint {
             timestamp: ts,
             source: "dev1".to_string(),
-            protocol: Protocol::Sysinfo,
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(value),
             labels: Map::new(),
@@ -2580,7 +2589,12 @@ mod tests {
     fn a_thousand_idle_series_are_reaped() {
         let mut store = MetricStore::new(3_600, None);
         for i in 0..1_000 {
-            store.record(ORIGIN, &format!("ephemeral{i}"), &point("m", 1.0, 1_000));
+            store.record(
+                ORIGIN,
+                "sysinfo",
+                &format!("ephemeral{i}"),
+                &point("m", 1.0, 1_000),
+            );
         }
         assert_eq!(store.series_count(), 1_000);
 
@@ -2604,9 +2618,14 @@ mod tests {
     fn a_live_series_survives_the_sweep_that_reaps_its_neighbours() {
         let mut store = MetricStore::new(3_600, None);
         for i in 0..10 {
-            store.record(ORIGIN, &format!("old{i}"), &point("m", 1.0, 1_000));
+            store.record(
+                ORIGIN,
+                "sysinfo",
+                &format!("old{i}"),
+                &point("m", 1.0, 1_000),
+            );
         }
-        store.record(ORIGIN, "live", &point("m", 1.0, 3_600_000));
+        store.record(ORIGIN, "sysinfo", "live", &point("m", 1.0, 3_600_000));
 
         let dropped = store.evict_idle_series(3_600_000, 60_000);
         assert_eq!(dropped, 10, "the ten stale ones");
@@ -2627,8 +2646,8 @@ mod tests {
         let mut other = point("m", 1.0, 1_000);
         other.source = "dev2".to_string();
         for i in 0..5 {
-            store.record(ORIGIN, &format!("a{i}"), &point("m", 1.0, 1_000));
-            store.record(ORIGIN, &format!("b{i}"), &other);
+            store.record(ORIGIN, "sysinfo", &format!("a{i}"), &point("m", 1.0, 1_000));
+            store.record(ORIGIN, "sysinfo", &format!("b{i}"), &other);
         }
         assert_eq!(store.series_count(), 10);
 
@@ -2655,7 +2674,7 @@ mod tests {
         store.set_max_series(Some(3));
         for i in 0..3 {
             assert_ne!(
-                store.record(ORIGIN, &format!("s{i}"), &point("m", 1.0, 1_000)),
+                store.record(ORIGIN, "sysinfo", &format!("s{i}"), &point("m", 1.0, 1_000)),
                 Pushed::Dropped
             );
         }
@@ -2663,7 +2682,7 @@ mod tests {
         assert_eq!(store.refused_series(), 0);
 
         assert_eq!(
-            store.record(ORIGIN, "s3", &point("m", 1.0, 1_000)),
+            store.record(ORIGIN, "sysinfo", "s3", &point("m", 1.0, 1_000)),
             Pushed::Dropped,
             "a new series past the cap is refused"
         );
@@ -2672,14 +2691,14 @@ mod tests {
 
         // An existing series keeps recording.
         assert_eq!(
-            store.record(ORIGIN, "s0", &point("m", 2.0, 2_000)),
+            store.record(ORIGIN, "sysinfo", "s0", &point("m", 2.0, 2_000)),
             Pushed::Appended
         );
 
         // And eviction frees a slot, which is the mechanism the cap backstops.
         store.evict_idle_series(3_600_000, 60_000);
         assert_eq!(
-            store.record(ORIGIN, "s3", &point("m", 1.0, 3_600_000)),
+            store.record(ORIGIN, "sysinfo", "s3", &point("m", 1.0, 3_600_000)),
             Pushed::Appended,
             "a freed slot is usable"
         );
@@ -2843,10 +2862,10 @@ mod tests {
     #[test]
     fn store_records_only_numeric() {
         let mut store = MetricStore::new(10, None);
-        store.record(ORIGIN, "cpu", &point("cpu", 50.0, 1_000));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 50.0, 1_000));
         let mut p = point("name", 0.0, 2_000);
         p.value = TelemetryValue::Text("hello".into());
-        store.record(ORIGIN, "name", &p);
+        store.record(ORIGIN, "sysinfo", "name", &p);
         // Only the numeric metric is tracked.
         assert_eq!(store.hot_samples(&series("cpu")).len(), 1);
         assert_eq!(store.hot_samples(&series("name")).len(), 0);
@@ -2855,9 +2874,9 @@ mod tests {
     #[test]
     fn store_hot_samples_and_device_ids() {
         let mut store = MetricStore::new(10, None);
-        store.record(ORIGIN, "cpu", &point("cpu", 50.0, 1_000));
-        store.record(ORIGIN, "cpu", &point("cpu", 55.0, 2_000));
-        store.record(ORIGIN, "mem", &point("mem", 10.0, 1_500));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 50.0, 1_000));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 55.0, 2_000));
+        store.record(ORIGIN, "sysinfo", "mem", &point("mem", 10.0, 1_500));
         let cpu = store.hot_samples(&series("cpu"));
         assert_eq!(cpu.len(), 2);
         assert_eq!(cpu[1].value, 55.0);
@@ -2870,7 +2889,7 @@ mod tests {
     #[test]
     fn store_no_persistence_no_flush() {
         let mut store = MetricStore::new(10, None);
-        store.record(ORIGIN, "cpu", &point("cpu", 1.0, 1_000));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 1.0, 1_000));
         // No persistent handle => nothing buffered for a flush that can never
         // happen (it used to buffer every sample forever), and no batch.
         assert!(!store.has_pending());
@@ -3043,7 +3062,7 @@ mod tests {
         );
         // StoredLog -> point -> StoredLog is lossless for the persisted fields.
         let point = log.to_point();
-        let back = StoredLog::from_point(&point).unwrap();
+        let back = StoredLog::from_point("logs", &point).unwrap();
         assert_eq!(back, log);
         assert_eq!(point.metric, "events/0001700000000000000000042");
     }
@@ -3248,16 +3267,16 @@ mod tests {
 
         // Two series, in order.
         for i in 0..4i64 {
-            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 1_000));
-            store.record(ORIGIN, "mem", &point("mem", i as f64, i * 1_000));
+            store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", i as f64, i * 1_000));
+            store.record(ORIGIN, "sysinfo", "mem", &point("mem", i as f64, i * 1_000));
         }
         assert_eq!(store.pending_sample_count(), walk(&store));
         assert_eq!(store.pending_sample_count(), 8);
         assert!(store.has_pending());
 
         // Out of order, and old enough to fall out of a 4-deep ring.
-        store.record(ORIGIN, "cpu", &point("cpu", 9.0, 1_500));
-        store.record(ORIGIN, "cpu", &point("cpu", 9.0, -100_000));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 9.0, 1_500));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 9.0, -100_000));
         assert_eq!(
             store.pending_sample_count(),
             walk(&store),
@@ -3267,7 +3286,7 @@ mod tests {
         // A text value is not a series at all.
         let mut text = point("cpu", 0.0, 5_000);
         text.value = TelemetryValue::Text("hello".into());
-        store.record(ORIGIN, "cpu", &text);
+        store.record(ORIGIN, "sysinfo", "cpu", &text);
         assert_eq!(store.pending_sample_count(), walk(&store));
 
         // The drain zeroes it.
@@ -3277,7 +3296,7 @@ mod tests {
         assert!(!store.has_pending());
 
         // And it climbs again from zero.
-        store.record(ORIGIN, "cpu", &point("cpu", 1.0, 500_000));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 1.0, 500_000));
         assert_eq!(store.pending_sample_count(), walk(&store));
         assert_eq!(store.pending_sample_count(), 1);
 
@@ -3290,7 +3309,7 @@ mod tests {
     fn nothing_is_pending_without_a_persistent_store() {
         let mut store = MetricStore::new(10, None);
         for i in 0..50i64 {
-            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 1_000));
+            store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", i as f64, i * 1_000));
         }
         assert_eq!(store.pending_sample_count(), 0);
         assert!(!store.has_pending());
@@ -3309,8 +3328,8 @@ mod tests {
         let path = temp_db_path("flush");
         let persistent = PersistentStore::open(&path).expect("open");
         let mut store = MetricStore::new(10, Some(persistent.clone()));
-        store.record(ORIGIN, "cpu", &point("cpu", 42.0, 60_000));
-        store.record(ORIGIN, "cpu", &point("cpu", 43.0, 90_000));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 42.0, 60_000));
+        store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 43.0, 90_000));
         let (handle, batch) = store.take_flush_batch().expect("batch");
         assert!(!batch.rows.is_empty());
         assert_eq!(
@@ -3358,8 +3377,8 @@ mod tests {
         let path = temp_db_path("restart-ids");
         let persistent = PersistentStore::open(&path).expect("open");
         let mut first = MetricStore::new(10, Some(persistent.clone()));
-        first.record(ORIGIN, "cpu", &point("cpu", 1.0, 60_000));
-        first.record(ORIGIN, "mem", &point("mem", 2.0, 60_000));
+        first.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 1.0, 60_000));
+        first.record(ORIGIN, "sysinfo", "mem", &point("mem", 2.0, 60_000));
         let (handle, batch) = first.take_flush_batch().expect("batch");
         handle.write_batch(&batch).unwrap();
         let cpu_id = first
@@ -3371,8 +3390,8 @@ mod tests {
 
         // Second launch, opposite arrival order.
         let mut second = MetricStore::new(10, Some(persistent.clone()));
-        second.record(ORIGIN, "mem", &point("mem", 3.0, 120_000));
-        second.record(ORIGIN, "cpu", &point("cpu", 4.0, 120_000));
+        second.record(ORIGIN, "sysinfo", "mem", &point("mem", 3.0, 120_000));
+        second.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 4.0, 120_000));
         let ids = second.device_metric_ids("sysinfo", ORIGIN, "dev1");
         let cpu_again = ids
             .iter()
@@ -3384,7 +3403,7 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].value, 1.0, "and reads back its OWN history");
         // A brand-new metric mints an id past every persisted one.
-        second.record(ORIGIN, "disk", &point("disk", 5.0, 120_000));
+        second.record(ORIGIN, "sysinfo", "disk", &point("disk", 5.0, 120_000));
         let (_, batch) = second.take_flush_batch().expect("batch");
         assert_eq!(batch.paths.len(), 1);
         assert!(batch.paths[0].1 >= 2);
@@ -3579,8 +3598,8 @@ mod tests {
             let mut counter = point("if/eth0/rx_bytes", 0.0, 60_000);
             counter.value = TelemetryValue::Counter(1_000);
             counter.unit = Some("By".to_string());
-            m.record(ORIGIN, "if/eth0/rx_bytes", &counter);
-            m.record(ORIGIN, "cpu", &point("cpu", 42.0, 60_000));
+            m.record(ORIGIN, "sysinfo", "if/eth0/rx_bytes", &counter);
+            m.record(ORIGIN, "sysinfo", "cpu", &point("cpu", 42.0, 60_000));
             let (handle, batch) = m.take_flush_batch().expect("batch");
             handle.write_batch(&batch).unwrap();
         }
@@ -3875,7 +3894,12 @@ mod tests {
         // hot_secs: 60, a series publishing every 10 s.
         let mut store = MetricStore::new(60, None).with_hot_window(60);
         for i in 0..30i64 {
-            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 10_000));
+            store.record(
+                ORIGIN,
+                "sysinfo",
+                "cpu",
+                &point("cpu", i as f64, i * 10_000),
+            );
         }
         let held = store.hot_samples(&format!("{ORIGIN}/sysinfo/cpu"));
         assert!(
@@ -3896,7 +3920,7 @@ mod tests {
     fn a_fast_series_is_still_bounded_by_the_element_ceiling() {
         let mut store = MetricStore::new(10, None).with_hot_window(60);
         for i in 0..100i64 {
-            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 100));
+            store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", i as f64, i * 100));
         }
         assert_eq!(
             store.hot_samples(&format!("{ORIGIN}/sysinfo/cpu")).len(),
@@ -3911,7 +3935,7 @@ mod tests {
     fn halving_moves_the_window_as_well_as_the_capacity() {
         let mut store = MetricStore::new(600, None).with_hot_window(600);
         for i in 0..300i64 {
-            store.record(ORIGIN, "cpu", &point("cpu", i as f64, i * 1_000));
+            store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", i as f64, i * 1_000));
         }
         assert_eq!(store.hot_window_secs(), Some(600));
         assert_eq!(
@@ -3936,8 +3960,18 @@ mod tests {
     fn halving_the_hot_ring_drops_the_oldest_samples_of_every_series() {
         let mut store = MetricStore::new(8, None);
         for ts in 0..8 {
-            store.record(ORIGIN, "cpu", &point("cpu", ts as f64, ts * 1_000));
-            store.record(ORIGIN, "mem", &point("mem", ts as f64, ts * 1_000));
+            store.record(
+                ORIGIN,
+                "sysinfo",
+                "cpu",
+                &point("cpu", ts as f64, ts * 1_000),
+            );
+            store.record(
+                ORIGIN,
+                "sysinfo",
+                "mem",
+                &point("mem", ts as f64, ts * 1_000),
+            );
         }
         assert_eq!(store.hot_sample_count(), 16);
         assert_eq!(store.hot_capacity(), 8);
@@ -3956,7 +3990,7 @@ mod tests {
         assert_eq!(cpu.last().map(|s| s.ts), Some(7_000));
 
         // New capacity applies to a series interned afterwards too.
-        store.record(ORIGIN, "disk", &point("disk", 1.0, 9_000));
+        store.record(ORIGIN, "sysinfo", "disk", &point("disk", 1.0, 9_000));
         assert_eq!(store.hot_samples(&series("disk")).len(), 1);
 
         // It floors at 1 rather than 0: a ring of zero silently stops
@@ -4055,7 +4089,7 @@ mod tests {
         // pattern, and the bench's.
         for minute in 0..3i64 {
             let ts = 1_700_000_000_000 + minute * 60_000;
-            store.record(ORIGIN, "cpu", &point("cpu", minute as f64, ts));
+            store.record(ORIGIN, "sysinfo", "cpu", &point("cpu", minute as f64, ts));
             let (handle, batch) = store.take_flush_batch().expect("a batch");
             handle.write_batch(&batch).unwrap();
         }
@@ -4094,7 +4128,7 @@ mod tests {
             MetricStore::new(64, Some(p2.clone())).persist_tiers(&[Tier::Minute, Tier::Hour]);
         for minute in 0..3i64 {
             let ts = 1_700_000_000_000 + minute * 60_000;
-            store2.record(ORIGIN, "cpu", &point("cpu", minute as f64, ts));
+            store2.record(ORIGIN, "sysinfo", "cpu", &point("cpu", minute as f64, ts));
             let (handle, batch) = store2.take_flush_batch().expect("a batch");
             handle.write_batch(&batch).unwrap();
         }

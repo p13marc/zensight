@@ -1971,7 +1971,6 @@ mod tests {
             let point = TelemetryPoint {
                 timestamp: 1,
                 source: "host01".into(),
-                protocol: Protocol::Logs,
                 metric: "daemon/info".into(),
                 value: TelemetryValue::Text("hi".into()),
                 labels,
@@ -2013,7 +2012,6 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 9,
             source: "host01".into(),
-            protocol: Protocol::Logs,
             metric: "daemon/crit".into(),
             value: TelemetryValue::Text("segfault".into()),
             labels,
@@ -2057,7 +2055,6 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 9,
             source: "host01".into(),
-            protocol: Protocol::Logs,
             metric: "events/0000000000009000000000042".into(),
             value: TelemetryValue::Text("login failed".into()),
             labels,
@@ -2078,7 +2075,6 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1,
             source: "host01".into(),
-            protocol: Protocol::Logs,
             metric: "kern/warning".into(),
             value: TelemetryValue::Text("low mem".into()),
             labels: HashMap::new(),
@@ -2102,7 +2098,6 @@ mod tests {
             let point = TelemetryPoint {
                 timestamp: ts,
                 source: "h".into(),
-                protocol: Protocol::Logs,
                 metric: "daemon/info".into(),
                 value: TelemetryValue::Text("x".into()),
                 labels,
@@ -2150,7 +2145,6 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1,
             source: "10.0.0.9".into(),
-            protocol: Protocol::Logs,
             metric: "daemon/info".into(),
             value: TelemetryValue::Text("hi".into()),
             labels: HashMap::new(),

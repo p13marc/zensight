@@ -234,8 +234,8 @@ impl Sampler {
 /// Build the Rerun entity path for a metric series: correlated sources land
 /// under `hosts/<entity_id>/…`, everything else under `sensors/…`
 /// (02-mapping.md §1).
-pub fn metric_entity_path(point: &TelemetryPoint, index: &EntityIndex) -> String {
-    let protocol = point.protocol.as_str();
+pub fn metric_entity_path(producer: &str, point: &TelemetryPoint, index: &EntityIndex) -> String {
+    let protocol = producer;
     match index.resolve(protocol, &point.source) {
         Some(entity_id) => format!("hosts/{entity_id}/{protocol}/{}", point.metric),
         None => format!("sensors/{protocol}/{}/{}", point.source, point.metric),
@@ -279,7 +279,7 @@ mod tests {
     use zensight_common::telemetry::Protocol;
 
     fn point(metric: &str, value: TelemetryValue) -> TelemetryPoint {
-        TelemetryPoint::new("host1", Protocol::Sysinfo, metric, value)
+        TelemetryPoint::new("host1", metric, value)
     }
 
     #[test]
@@ -352,14 +352,14 @@ mod tests {
 
         // Uncorrelated → sensors/ fallback.
         assert_eq!(
-            metric_entity_path(&p, &index),
+            metric_entity_path("sysinfo", &p, &index),
             "sensors/sysinfo/host1/cpu/usage"
         );
 
         // Correlated → hosts/<entity_id>.
         index.upsert(&entity("h_0123456789ab", &[], &[("sysinfo", "host1")]));
         assert_eq!(
-            metric_entity_path(&p, &index),
+            metric_entity_path("sysinfo", &p, &index),
             "hosts/h_0123456789ab/sysinfo/cpu/usage"
         );
         assert_eq!(
@@ -513,6 +513,22 @@ mod tests {
         assert_eq!(
             severity_from_alert(AlertSeverity::Critical),
             EventSeverity::Critical
+        );
+    }
+
+    /// #1255: the entity path names the producer the channel carried — the
+    /// key's chunk 4 — because the point itself no longer says.
+    #[test]
+    fn metric_entity_path_uses_the_channel_producer() {
+        let index = EntityIndex::default();
+        let p = point("cpu/usage", TelemetryValue::Gauge(1.0));
+        assert_eq!(
+            metric_entity_path("netlink", &p, &index),
+            "sensors/netlink/host1/cpu/usage"
+        );
+        assert_eq!(
+            metric_entity_path("sysinfo", &p, &index),
+            "sensors/sysinfo/host1/cpu/usage"
         );
     }
 }

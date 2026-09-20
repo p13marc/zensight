@@ -15,12 +15,11 @@ use zensight_exporter_otel::metrics::{
 /// Helper to create a telemetry point with labels.
 fn make_point(
     source: &str,
-    protocol: Protocol,
     metric: &str,
     value: TelemetryValue,
     labels: HashMap<String, String>,
 ) -> TelemetryPoint {
-    let mut point = TelemetryPoint::new(source, protocol, metric, value);
+    let mut point = TelemetryPoint::new(source, metric, value);
     point.labels = labels;
     point
 }
@@ -33,7 +32,6 @@ fn make_point(
 fn test_counter_to_otel_metric() {
     let point = make_point(
         "router01",
-        Protocol::Snmp,
         "if/1/ifInOctets",
         TelemetryValue::Counter(1_000_000),
         HashMap::new(),
@@ -51,7 +49,6 @@ fn test_counter_to_otel_metric() {
 fn test_gauge_to_otel_metric() {
     let point = make_point(
         "server01",
-        Protocol::Sysinfo,
         "cpu/usage",
         TelemetryValue::Gauge(75.5),
         HashMap::new(),
@@ -69,14 +66,12 @@ fn test_gauge_to_otel_metric() {
 fn test_boolean_to_otel_metric() {
     let point_true = make_point(
         "router01",
-        Protocol::Snmp,
         "if/1/ifOperStatus",
         TelemetryValue::Boolean(true),
         HashMap::new(),
     );
     let point_false = make_point(
         "router01",
-        Protocol::Snmp,
         "if/1/ifOperStatus",
         TelemetryValue::Boolean(false),
         HashMap::new(),
@@ -96,7 +91,6 @@ fn test_boolean_to_otel_metric() {
 fn test_text_not_metric_exportable() {
     let point = make_point(
         "router01",
-        Protocol::Snmp,
         "sysDescr",
         TelemetryValue::Text("Cisco IOS".to_string()),
         HashMap::new(),
@@ -113,7 +107,6 @@ fn test_text_not_metric_exportable() {
 fn test_binary_not_metric_exportable() {
     let point = make_point(
         "server01",
-        Protocol::Snmp,
         "data",
         TelemetryValue::Binary(vec![1, 2, 3, 4]),
         HashMap::new(),
@@ -144,7 +137,6 @@ fn test_binary_not_metric_exportable() {
 fn test_syslog_to_otel_log() {
     let point = make_point(
         "server01",
-        Protocol::Logs,
         "daemon/warning",
         TelemetryValue::Text("Connection timeout".to_string()),
         [
@@ -156,9 +148,9 @@ fn test_syslog_to_otel_log() {
         .collect(),
     );
 
-    assert!(is_log_exportable(&point.value, point.protocol));
+    assert!(is_log_exportable(&point.value, "logs"));
 
-    let log_record = LogRecord::from_telemetry(&point);
+    let log_record = LogRecord::from_telemetry("logs", &point);
     assert!(log_record.is_some());
 
     let record = log_record.unwrap();
@@ -173,14 +165,13 @@ fn test_syslog_to_otel_log() {
 fn test_non_syslog_not_log_exportable() {
     let point = make_point(
         "router01",
-        Protocol::Snmp,
         "sysDescr",
         TelemetryValue::Text("Cisco IOS".to_string()),
         HashMap::new(),
     );
 
     // SNMP text is not a log
-    assert!(!is_log_exportable(&point.value, point.protocol));
+    assert!(!is_log_exportable(&point.value, "snmp"));
 }
 
 #[test]
@@ -245,29 +236,26 @@ fn test_filter_include_protocols() {
 
     let snmp_point = make_point(
         "router01",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
     let sysinfo_point = make_point(
         "server01",
-        Protocol::Sysinfo,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
     let modbus_point = make_point(
         "plc01",
-        Protocol::Modbus,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&snmp_point));
-    assert!(filter.should_include(&sysinfo_point));
-    assert!(!filter.should_include(&modbus_point));
+    assert!(filter.should_include("snmp", &snmp_point));
+    assert!(filter.should_include("sysinfo", &sysinfo_point));
+    assert!(!filter.should_include("modbus", &modbus_point));
 }
 
 #[test]
@@ -282,21 +270,19 @@ fn test_filter_exclude_protocols() {
 
     let snmp_point = make_point(
         "router01",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
     let syslog_point = make_point(
         "server01",
-        Protocol::Logs,
         "message",
         TelemetryValue::Text("log".to_string()),
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&snmp_point));
-    assert!(!filter.should_include(&syslog_point));
+    assert!(filter.should_include("snmp", &snmp_point));
+    assert!(!filter.should_include("logs", &syslog_point));
 }
 
 #[test]
@@ -311,29 +297,26 @@ fn test_filter_include_sources() {
 
     let point1 = make_point(
         "router01",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
     let point2 = make_point(
         "router02",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
     let point3 = make_point(
         "router03",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&point1));
-    assert!(filter.should_include(&point2));
-    assert!(!filter.should_include(&point3));
+    assert!(filter.should_include("snmp", &point1));
+    assert!(filter.should_include("snmp", &point2));
+    assert!(!filter.should_include("snmp", &point3));
 }
 
 #[test]
@@ -348,21 +331,19 @@ fn test_filter_exclude_sources() {
 
     let point1 = make_point(
         "test-device",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
     let point2 = make_point(
         "prod-device",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
 
-    assert!(!filter.should_include(&point1));
-    assert!(filter.should_include(&point2));
+    assert!(!filter.should_include("snmp", &point1));
+    assert!(filter.should_include("snmp", &point2));
 }
 
 #[test]
@@ -379,7 +360,6 @@ fn test_filter_combined() {
     // SNMP from prod-router: should pass
     let point1 = make_point(
         "prod-router",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
@@ -388,7 +368,6 @@ fn test_filter_combined() {
     // SNMP from test-router: should fail (excluded source)
     let point2 = make_point(
         "test-router",
-        Protocol::Snmp,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
@@ -397,15 +376,14 @@ fn test_filter_combined() {
     // Sysinfo from prod-server: should fail (wrong protocol)
     let point3 = make_point(
         "prod-server",
-        Protocol::Sysinfo,
         "metric",
         TelemetryValue::Gauge(1.0),
         HashMap::new(),
     );
 
-    assert!(filter.should_include(&point1));
-    assert!(!filter.should_include(&point2));
-    assert!(!filter.should_include(&point3));
+    assert!(filter.should_include("snmp", &point1));
+    assert!(!filter.should_include("snmp", &point2));
+    assert!(!filter.should_include("sysinfo", &point3));
 }
 
 #[test]
@@ -418,21 +396,18 @@ fn test_filter_empty_allows_all() {
     let points = vec![
         make_point(
             "router01",
-            Protocol::Snmp,
             "metric",
             TelemetryValue::Gauge(1.0),
             HashMap::new(),
         ),
         make_point(
             "server01",
-            Protocol::Sysinfo,
             "metric",
             TelemetryValue::Gauge(1.0),
             HashMap::new(),
         ),
         make_point(
             "server01",
-            Protocol::Logs,
             "message",
             TelemetryValue::Text("log".to_string()),
             HashMap::new(),
@@ -441,9 +416,9 @@ fn test_filter_empty_allows_all() {
 
     for point in points {
         assert!(
-            filter.should_include(&point),
+            filter.should_include("snmp", &point),
             "Empty filter should allow {:?}",
-            point.protocol
+            point.metric
         );
     }
 }
@@ -489,7 +464,7 @@ fn test_multiple_protocols_classification() {
             value
         );
         assert_eq!(
-            is_log_exportable(&value, protocol),
+            is_log_exportable(&value, protocol.as_str()),
             expected_log,
             "Protocol {:?} with value {:?} log exportable mismatch",
             protocol,
@@ -509,18 +484,17 @@ fn test_full_syslog_flow() {
 
     let point = make_point(
         "server01",
-        Protocol::Logs,
         "auth/error",
         TelemetryValue::Text("Failed password for invalid user admin".to_string()),
         labels,
     );
 
     // Should be log exportable
-    assert!(is_log_exportable(&point.value, point.protocol));
+    assert!(is_log_exportable(&point.value, "logs"));
     assert!(!is_metric_exportable(&point.value));
 
     // Should produce valid log record
-    let record = LogRecord::from_telemetry(&point).expect("Should create log record");
+    let record = LogRecord::from_telemetry("logs", &point).expect("Should create log record");
 
     assert_eq!(record.hostname, "server01");
     assert_eq!(record.body, "Failed password for invalid user admin");

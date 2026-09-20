@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use tokio::sync::watch;
 use zensight_common::pipeline_health::PipelineHealth;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 use zensight_exporter_prometheus::{ExporterConfig, HttpServer, MetricCollector, SharedCollector};
 
 /// Helper to create a collector with default config.
@@ -30,8 +30,7 @@ fn create_collector() -> SharedCollector {
 /// builds a `TelemetryPoint` exercises nothing the exporter actually does.
 /// snmp/modbus/gnmi/netflow register a rest-var catch-all `<device>/<metric...>`,
 /// so their keys carry a device chunk `point.metric` does not.
-fn key_for(point: &TelemetryPoint) -> String {
-    let producer = point.protocol.as_str();
+fn key_for(producer: &str, point: &TelemetryPoint) -> String {
     if matches!(producer, "snmp" | "modbus" | "gnmi" | "netflow") {
         format!(
             "v1/h-0123456789ab/telemetry/{producer}/{}/{}",
@@ -44,18 +43,17 @@ fn key_for(point: &TelemetryPoint) -> String {
 
 /// Record a point under its wire key. Same arity as the old
 /// `rec(&collector, make_point(..))`, so the call sites stay readable.
-fn rec(collector: &MetricCollector, point: TelemetryPoint) {
-    collector.record(&key_for(&point), &point);
+fn rec(collector: &MetricCollector, producer: &str, point: TelemetryPoint) {
+    collector.record(&key_for(producer, &point), &point);
 }
 
 fn make_point(
     source: &str,
-    protocol: Protocol,
     metric: &str,
     value: TelemetryValue,
     labels: HashMap<String, String>,
 ) -> TelemetryPoint {
-    let mut point = TelemetryPoint::new(source, protocol, metric, value);
+    let mut point = TelemetryPoint::new(source, metric, value);
     point.labels = labels;
     point
 }
@@ -91,29 +89,26 @@ async fn test_full_flow_gauge_metrics() {
     // Record multiple gauge metrics from different sources
     let point1 = make_point(
         "server01",
-        Protocol::Sysinfo,
         "cpu/usage",
         TelemetryValue::Gauge(75.5),
         HashMap::new(),
     );
     let point2 = make_point(
         "server02",
-        Protocol::Sysinfo,
         "cpu/usage",
         TelemetryValue::Gauge(42.0),
         HashMap::new(),
     );
     let point3 = make_point(
         "server01",
-        Protocol::Sysinfo,
         "memory/used",
         TelemetryValue::Gauge(8_000_000_000.0),
         HashMap::new(),
     );
 
-    collector.record(&key_for(&point1), &point1);
-    collector.record(&key_for(&point2), &point2);
-    collector.record(&key_for(&point3), &point3);
+    collector.record(&key_for("sysinfo", &point1), &point1);
+    collector.record(&key_for("sysinfo", &point2), &point2);
+    collector.record(&key_for("sysinfo", &point3), &point3);
 
     // Render metrics
     let output = collector.render();
@@ -146,7 +141,6 @@ async fn test_full_flow_counter_metrics() {
     // Record counter metrics (e.g., network bytes)
     let point = make_point(
         "router01",
-        Protocol::Snmp,
         "if/1/in_octets",
         TelemetryValue::Counter(1_000_000),
         [
@@ -159,7 +153,7 @@ async fn test_full_flow_counter_metrics() {
         .collect(),
     );
 
-    collector.record(&key_for(&point), &point);
+    collector.record(&key_for("snmp", &point), &point);
 
     let output = collector.render();
 
@@ -220,16 +214,17 @@ async fn container_cumulative_counters_are_scraped_as_counters() {
     ] {
         rec(
             &collector,
-            make_point("host01", Protocol::Container, metric, value, labels.clone()),
+            "container",
+            make_point("host01", metric, value, labels.clone()),
         );
     }
     // A level from the same sensor, so the assertion is that the two are told
     // apart rather than that everything became a counter.
     rec(
         &collector,
+        "container",
         make_point(
             "host01",
-            Protocol::Container,
             "caddy/memory_bytes",
             TelemetryValue::Gauge(4096.0),
             labels.clone(),
@@ -276,13 +271,12 @@ async fn text_points_are_info_style_gauges_not_the_openmetrics_info_type() {
 
     let point = make_point(
         "router01",
-        Protocol::Snmp,
         "system/sysdescr",
         TelemetryValue::Text("Cisco IOS XE Software".to_string()),
         HashMap::new(),
     );
 
-    collector.record(&key_for(&point), &point);
+    collector.record(&key_for("snmp", &point), &point);
     let output = collector.render();
 
     assert!(
@@ -316,9 +310,9 @@ async fn a_semconv_attribute_and_a_point_label_never_duplicate() {
 
     rec(
         &collector,
+        "sysinfo",
         make_point(
             "host01",
-            Protocol::Sysinfo,
             "disk/sda/io/read_bytes",
             TelemetryValue::Counter(12_345),
             labels,
@@ -362,9 +356,9 @@ async fn no_series_carries_a_duplicate_label_name() {
 
     rec(
         &collector,
+        "sysinfo",
         make_point(
             "host01",
-            Protocol::Sysinfo,
             "disk/sda/io/read_bytes",
             TelemetryValue::Counter(1),
             hostile,
@@ -411,7 +405,8 @@ async fn every_type_token_is_legal_in_the_text_format() {
     for (metric, value) in cases {
         rec(
             &collector,
-            make_point("router01", Protocol::Snmp, metric, value, HashMap::new()),
+            "snmp",
+            make_point("router01", metric, value, HashMap::new()),
         );
     }
 
@@ -435,29 +430,26 @@ async fn test_full_flow_multiple_protocols() {
     // Record metrics from different protocols
     let snmp_point = make_point(
         "router01",
-        Protocol::Snmp,
         "sysuptime",
         TelemetryValue::Counter(123456),
         HashMap::new(),
     );
     let sysinfo_point = make_point(
         "server01",
-        Protocol::Sysinfo,
         "cpu/usage",
         TelemetryValue::Gauge(55.0),
         HashMap::new(),
     );
     let modbus_point = make_point(
         "plc01",
-        Protocol::Modbus,
         "holding/temperature",
         TelemetryValue::Gauge(23.5),
         HashMap::new(),
     );
 
-    collector.record(&key_for(&snmp_point), &snmp_point);
-    collector.record(&key_for(&sysinfo_point), &sysinfo_point);
-    collector.record(&key_for(&modbus_point), &modbus_point);
+    collector.record(&key_for("snmp", &snmp_point), &snmp_point);
+    collector.record(&key_for("sysinfo", &sysinfo_point), &sysinfo_point);
+    collector.record(&key_for("modbus", &modbus_point), &modbus_point);
 
     let output = collector.render();
 
@@ -483,22 +475,20 @@ async fn test_metric_updates_preserve_latest_value() {
     // Record initial value
     let point1 = make_point(
         "server01",
-        Protocol::Sysinfo,
         "cpu/usage",
         TelemetryValue::Gauge(50.0),
         HashMap::new(),
     );
-    collector.record(&key_for(&point1), &point1);
+    collector.record(&key_for("sysinfo", &point1), &point1);
 
     // Update with new value
     let point2 = make_point(
         "server01",
-        Protocol::Sysinfo,
         "cpu/usage",
         TelemetryValue::Gauge(75.0),
         HashMap::new(),
     );
-    collector.record(&key_for(&point2), &point2);
+    collector.record(&key_for("sysinfo", &point2), &point2);
 
     let output = collector.render();
 
@@ -526,12 +516,11 @@ async fn test_collector_stats() {
     for i in 0..5 {
         let point = make_point(
             &format!("server{:02}", i),
-            Protocol::Sysinfo,
             "cpu/usage",
             TelemetryValue::Gauge(i as f64 * 10.0),
             HashMap::new(),
         );
-        collector.record(&key_for(&point), &point);
+        collector.record(&key_for("sysinfo", &point), &point);
     }
 
     let stats = collector.stats();
@@ -553,12 +542,11 @@ async fn test_http_server_metrics_endpoint() {
     // asserting against an empty body.
     let point = make_point(
         "test",
-        Protocol::Sysinfo,
         "memory/usage_percent",
         TelemetryValue::Gauge(42.0),
         HashMap::new(),
     );
-    collector.record(&key_for(&point), &point);
+    collector.record(&key_for("sysinfo", &point), &point);
 
     // Start HTTP server on random port
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
@@ -622,21 +610,19 @@ async fn test_special_characters_in_metric_names() {
     // Metric names with special characters that need sanitization
     let point1 = make_point(
         "router01",
-        Protocol::Snmp,
         "if/1/in-octets",
         TelemetryValue::Counter(1000),
         HashMap::new(),
     );
     let point2 = make_point(
         "router01",
-        Protocol::Gnmi,
         "interfaces/interface[name=eth0]/state/counters",
         TelemetryValue::Gauge(500.0),
         HashMap::new(),
     );
 
-    collector.record(&key_for(&point1), &point1);
-    collector.record(&key_for(&point2), &point2);
+    collector.record(&key_for("sysinfo", &point1), &point1);
+    collector.record(&key_for("sysinfo", &point2), &point2);
 
     let output = collector.render();
 
@@ -686,12 +672,11 @@ async fn test_high_cardinality_protection() {
     for i in 0..20 {
         let point = make_point(
             &format!("server{:02}", i),
-            Protocol::Sysinfo,
             "cpu/usage",
             TelemetryValue::Gauge(i as f64),
             HashMap::new(),
         );
-        collector.record(&key_for(&point), &point);
+        collector.record(&key_for("sysinfo", &point), &point);
     }
 
     // Should be capped at max_series
@@ -708,21 +693,19 @@ async fn test_boolean_metrics() {
 
     let point_true = make_point(
         "router01",
-        Protocol::Snmp,
         "if/1/oper_status",
         TelemetryValue::Boolean(true),
         HashMap::new(),
     );
     let point_false = make_point(
         "router02",
-        Protocol::Snmp,
         "if/1/oper_status",
         TelemetryValue::Boolean(false),
         HashMap::new(),
     );
 
-    collector.record(&key_for(&point_true), &point_true);
-    collector.record(&key_for(&point_false), &point_false);
+    collector.record(&key_for("snmp", &point_true), &point_true);
+    collector.record(&key_for("snmp", &point_false), &point_false);
 
     let output = collector.render();
 
@@ -772,12 +755,11 @@ async fn test_concurrent_recording() {
                 for j in 0..100 {
                     let point = make_point(
                         &format!("server{:02}", i),
-                        Protocol::Sysinfo,
                         &format!("metric_{}", j),
                         TelemetryValue::Gauge((i * 100 + j) as f64),
                         HashMap::new(),
                     );
-                    collector.record(&key_for(&point), &point);
+                    collector.record(&key_for("snmp", &point), &point);
                 }
             })
         })

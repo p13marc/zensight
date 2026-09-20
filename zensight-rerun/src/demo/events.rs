@@ -14,12 +14,7 @@ use super::DemoContext;
 pub const SOURCE: &str = super::metrics::SOURCE;
 
 fn event_point(metric: &str, message: &str, ts: i64) -> TelemetryPoint {
-    let mut p = TelemetryPoint::new(
-        SOURCE,
-        Protocol::Netlink,
-        metric,
-        TelemetryValue::Text(message.to_string()),
-    );
+    let mut p = TelemetryPoint::new(SOURCE, metric, TelemetryValue::Text(message.to_string()));
     p.timestamp = ts;
     p
 }
@@ -103,7 +98,7 @@ pub async fn run(ctx: &DemoContext, burst: u64) -> anyhow::Result<(u64, u64, u64
     // Steady sequence, paced (real wall-clock pacing keeps the live viewer
     // readable; timestamps are the scripted domain times regardless).
     for point in steady_sequence(base_ts) {
-        ctx.publish_point(&point).await?;
+        ctx.publish_point("netlink", &point).await?;
         events += 1;
         tokio::time::sleep(Duration::from_millis(300)).await;
     }
@@ -131,7 +126,7 @@ pub async fn run(ctx: &DemoContext, burst: u64) -> anyhow::Result<(u64, u64, u64
         )
         .with_label("peer", "10.0.0.99")
         .with_label("seq", i.to_string());
-        ctx.publish_point(&point).await?;
+        ctx.publish_point("netlink", &point).await?;
         events += 1;
     }
 

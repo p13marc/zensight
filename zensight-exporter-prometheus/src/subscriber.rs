@@ -391,7 +391,6 @@ impl TelemetrySubscriber {
                                     self.stats.samples_decoded.fetch_add(1, Ordering::Relaxed);
                                     trace!(
                                         source = %point.source,
-                                        protocol = %point.protocol,
                                         metric = %point.metric,
                                         "Received telemetry point"
                                     );

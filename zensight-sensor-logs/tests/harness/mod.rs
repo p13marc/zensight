@@ -275,7 +275,7 @@ async fn intake_loop(
                 .labels
                 .insert("repeat_count".to_string(), count.to_string());
         }
-        if let Some(record) = LogRecord::from_point(&point) {
+        if let Some(record) = LogRecord::from_point("logs", &point) {
             ring.push(record);
         }
     };

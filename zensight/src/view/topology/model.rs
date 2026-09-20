@@ -1756,12 +1756,11 @@ mod tests {
     #[test]
     fn test_node_extracts_netlink_summary() {
         use std::collections::HashMap;
-        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+        use zensight_common::{TelemetryPoint, TelemetryValue};
 
         let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
             timestamp: 0,
             source: "h".to_string(),
-            protocol: Protocol::Netlink,
             metric: metric.to_string(),
             value: v,
             labels: HashMap::new(),
@@ -1805,12 +1804,11 @@ mod tests {
     #[test]
     fn node_extracts_sysinfo_network_counters() {
         use std::collections::HashMap;
-        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+        use zensight_common::{TelemetryPoint, TelemetryValue};
 
         let mk = |metric: &str, v: TelemetryValue| TelemetryPoint {
             timestamp: 0,
             source: "h".to_string(),
-            protocol: Protocol::Sysinfo,
             metric: metric.to_string(),
             value: v,
             labels: HashMap::new(),

@@ -85,7 +85,11 @@ zensight/v1/@desired/state/<host>/<producer>/<topic>     fleet desired state (#8
   plain `fs` volume keeps the whole log rather than a latest-per-key view, and
   the GUI's own redb cold store is *additive* to it: records are immutable and
   ULID-identified, so the union needs no precedence rule.
-- Telemetry payloads (`TelemetryPoint`) carry an optional UCUM-style `unit`
+- Telemetry payloads (`TelemetryPoint`) carry **no producer** (#1255): a
+  consumer names a series from the key's `(origin, producer, subject)` —
+  `keyexpr::producer_name` reads chunk 4, instance suffix stripped — never from
+  the point. A `protocol` member from an older producer is ignored on read.
+- Telemetry payloads carry an optional UCUM-style `unit`
   field (serde-defaulted, absent when unknown). Proxy pollers with counter
   metrics (today: `snmp`, #527) publish a derived per-second sibling under
   `<metric>.rate` (a `Gauge`; `By/s` for octet counters, else `1/s`) next to

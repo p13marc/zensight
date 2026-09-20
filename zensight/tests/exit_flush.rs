@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 use zensight_store::{MetricStore, PersistentStore};
 
 const ORIGIN: &str = "h-aabbccddeeff";
@@ -22,7 +22,6 @@ fn point(value: f64, ts: i64) -> TelemetryPoint {
     TelemetryPoint {
         timestamp: ts,
         source: "dev1".to_string(),
-        protocol: Protocol::Sysinfo,
         metric: "cpu/usage".to_string(),
         value: TelemetryValue::Gauge(value),
         labels: Default::default(),
@@ -40,7 +39,12 @@ fn a_sample_recorded_before_close_is_in_the_file() {
     let written = {
         let db = PersistentStore::open(&path).expect("open");
         let mut store = MetricStore::new(3_600, Some(db));
-        store.record(ORIGIN, "cpu/usage", &point(42.0, 1_700_000_000_000));
+        store.record(
+            ORIGIN,
+            "sysinfo",
+            "cpu/usage",
+            &point(42.0, 1_700_000_000_000),
+        );
         assert!(
             store.has_pending(),
             "the sample is buffered, not yet on disk — which is the whole problem"
@@ -79,7 +83,12 @@ fn closing_with_nothing_pending_writes_nothing_and_says_so() {
 #[test]
 fn closing_without_a_persistent_store_is_a_no_op() {
     let mut store = MetricStore::new(3_600, None);
-    store.record(ORIGIN, "cpu/usage", &point(42.0, 1_700_000_000_000));
+    store.record(
+        ORIGIN,
+        "sysinfo",
+        "cpu/usage",
+        &point(42.0, 1_700_000_000_000),
+    );
     assert_eq!(
         zensight::app::exit_flush(&mut store, BUDGET),
         0,

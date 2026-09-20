@@ -991,9 +991,11 @@ const LOG_RECORD_TYPED_LABELS: &[&str] = &[
 impl LogRecord {
     /// Build a record from a per-line log-event [`TelemetryPoint`] (the
     /// `events/<uid>` shape from #104). Returns `None` for anything that
-    /// isn't a `Protocol::Logs` Text event.
-    pub fn from_point(point: &crate::TelemetryPoint) -> Option<LogRecord> {
-        if point.protocol != crate::Protocol::Logs {
+    /// isn't a Text event from the `logs` producer — `producer` is the key's
+    /// chunk 4 (`keyexpr::producer_name`), which the point no longer carries
+    /// (#1255).
+    pub fn from_point(producer: &str, point: &crate::TelemetryPoint) -> Option<LogRecord> {
+        if producer != "logs" {
             return None;
         }
         let crate::TelemetryValue::Text(message) = &point.value else {
@@ -1049,7 +1051,6 @@ impl LogRecord {
         crate::TelemetryPoint {
             timestamp: self.ts,
             source: self.host.clone(),
-            protocol: crate::Protocol::Logs,
             metric: format!("events/{}", self.uid),
             value: crate::TelemetryValue::Text(self.message.clone()),
             labels,
@@ -1223,14 +1224,13 @@ mod tests {
         let point = crate::TelemetryPoint {
             timestamp: 1_719_999_000_000,
             source: "web01".to_string(),
-            protocol: crate::Protocol::Logs,
             metric: "events/0000001719999000000000000042".to_string(),
             value: crate::TelemetryValue::Text("Failed password for root".to_string()),
             labels,
             unit: None,
         };
 
-        let rec = LogRecord::from_point(&point).expect("log line converts");
+        let rec = LogRecord::from_point("logs", &point).expect("log line converts");
         assert_eq!(rec.uid, "0000001719999000000000000042");
         assert_eq!(rec.host, "web01");
         assert_eq!(rec.severity_number, 17);
@@ -1266,12 +1266,18 @@ mod tests {
         let point = crate::TelemetryPoint {
             timestamp: 1,
             source: "web01".to_string(),
-            protocol: crate::Protocol::Logs,
             metric: "logs/errors_total".to_string(),
             value: crate::TelemetryValue::Counter(5),
             labels: Default::default(),
             unit: None,
         };
-        assert!(LogRecord::from_point(&point).is_none());
+        assert!(
+            LogRecord::from_point("logs", &point).is_none(),
+            "not a Text event"
+        );
+        assert!(
+            LogRecord::from_point("snmp", &point).is_none(),
+            "not the logs producer"
+        );
     }
 }

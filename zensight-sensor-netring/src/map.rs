@@ -192,7 +192,7 @@ fn point(sensor_id: &str, metric: impl Into<String>, value: TelemetryValue) -> T
         "unregistered netring telemetry subject {metric:?} — add it to \
          zensight-common/registry/netring.toml (RFC 08 §5, issue #468)"
     );
-    TelemetryPoint::new(sensor_id, Protocol::Netring, metric, value)
+    TelemetryPoint::new(sensor_id, metric, value)
 }
 
 pub fn focus_points(sensor_id: &str, packets: u64, bytes: u64) -> Vec<TelemetryPoint> {
@@ -2377,7 +2377,6 @@ mod tests {
         assert_eq!(detector_chunk("port_unreachable"), "port_unreachable");
         assert_eq!(p.value, TelemetryValue::Counter(7));
         assert_eq!(p.source, "host01");
-        assert_eq!(p.protocol, Protocol::Netring);
     }
 
     #[test]

@@ -11,7 +11,6 @@ The single unit of telemetry every sensor emits (`telemetry.rs`):
 pub struct TelemetryPoint {
     pub timestamp: i64,               // Unix epoch milliseconds
     pub source: String,               // device/host identifier
-    pub protocol: Protocol,           // origin protocol
     pub metric: String,               // metric name/path, e.g. "cpu/usage"
     pub value: TelemetryValue,        // the measured value
     pub labels: HashMap<String, String>, // extra context (skipped on the wire when empty)
@@ -19,9 +18,17 @@ pub struct TelemetryPoint {
 }
 ```
 
-Build one with `TelemetryPoint::new(source, protocol, metric, value)` (stamps the
-current timestamp) and chain `.with_label(k, v)` / `.with_labels(map)` /
-`.with_unit(u)`. `current_timestamp_millis()` is the shared clock helper.
+Build one with `TelemetryPoint::new(source, metric, value)` (stamps the current
+timestamp) and chain `.with_label(k, v)` / `.with_labels(map)` / `.with_unit(u)`.
+`current_timestamp_millis()` is the shared clock helper.
+
+**The producer is not in the payload** (#1255). It is chunk 4 of the key the
+point rides on — `v1/<origin>/telemetry/<producer>/…` — and a consumer reads it
+there with `keyexpr::producer_name(key)`, which strips the instance suffix
+(`netring-2` → `netring`) and names an unregistered producer as readily as a
+registered one. The point used to repeat it as `protocol: Protocol`, a closed
+enum, which is what refused every producer a consumer had not been compiled
+with. A `protocol` member in an older producer's payload is ignored on read.
 The `unit` field is serde-defaulted in both directions (JSON and CBOR), so
 old and new consumers interoperate; the OTel exporter forwards it as the
 instrument unit.

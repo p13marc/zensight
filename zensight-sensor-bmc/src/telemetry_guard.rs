@@ -1,6 +1,6 @@
 //! Registry-checked telemetry-point construction (RFC 08 §5, issue #468).
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// Build one telemetry point, enforcing the subject registry.
 ///
@@ -23,7 +23,7 @@ pub(crate) fn checked_point(
     // `source` is the REPORTING HOST, never the chassis (#883). A managed
     // chassis is a facet of the vantage point that polls it; the chassis rides
     // in the key and in the labels.
-    TelemetryPoint::new(source, Protocol::Bmc, metric, value)
+    TelemetryPoint::new(source, metric, value)
 }
 
 #[cfg(test)]

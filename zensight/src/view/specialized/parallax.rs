@@ -536,7 +536,6 @@ mod tests {
                     .map(|n| {
                         TelemetryPoint::new(
                             "cam-host",
-                            Protocol::Parallax,
                             "cam0/stats/rc_drops",
                             TelemetryValue::Counter(*n),
                         )

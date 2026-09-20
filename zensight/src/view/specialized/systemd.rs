@@ -1125,7 +1125,7 @@ mod tests {
         for (m, v) in metrics {
             s.metrics.insert(
                 (*m).to_string(),
-                TelemetryPoint::new("server01", Protocol::Systemd, *m, TelemetryValue::Gauge(*v)),
+                TelemetryPoint::new("server01", *m, TelemetryValue::Gauge(*v)),
             );
         }
         s

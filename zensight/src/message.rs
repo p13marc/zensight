@@ -22,6 +22,11 @@ pub struct Reading {
     pub point: TelemetryPoint,
     /// The publishing host's origin (`h-<12hex>`), read from the key.
     pub origin: String,
+    /// The producer base name — chunk 4 of the key with its instance suffix
+    /// stripped (`keyexpr::producer_name`). Since #1255 the point no longer
+    /// repeats it, and it is a **name**, not an enum: a producer this build
+    /// was not compiled with still has one.
+    pub producer: String,
     /// The key's subject tail, `/`-joined — everything after the producer
     /// chunk.
     ///
@@ -39,17 +44,22 @@ impl Reading {
     pub fn new(
         point: TelemetryPoint,
         origin: impl Into<String>,
+        producer: impl Into<String>,
         subject: impl Into<String>,
     ) -> Self {
         Self {
             point,
             origin: origin.into(),
+            producer: producer.into(),
             subject: subject.into(),
         }
     }
 
-    pub fn device_id(&self) -> DeviceId {
-        DeviceId::from_telemetry(&self.point, &self.origin)
+    /// The device this reading belongs to — `None` while `DeviceId` still
+    /// needs a `Protocol` and the producer is outside the closed enum. #1256
+    /// makes this infallible.
+    pub fn device_id(&self) -> Option<DeviceId> {
+        DeviceId::from_reading(self)
     }
 }
 
@@ -1724,13 +1734,18 @@ impl DeviceId {
     /// The origin comes from the **key** (chunk 3), not the payload — a
     /// `TelemetryPoint` has never carried one, which is exactly why the GUI used
     /// to need a `source -> origin` side map fed out-of-band from health docs.
-    /// It is on every sample; it was simply being thrown away at decode.
-    pub fn from_telemetry(point: &TelemetryPoint, origin: impl Into<String>) -> Self {
-        Self {
-            protocol: point.protocol,
-            origin: origin.into(),
-            source: point.source.clone(),
-        }
+    /// It is on every sample; it was simply being thrown away at decode. So
+    /// does the producer, since #1255 (chunk 4).
+    ///
+    /// `None` when the producer is outside the closed `Protocol` enum — the
+    /// one place the enum still bites the GUI, and the place #1256 deletes.
+    pub fn from_reading(reading: &Reading) -> Option<Self> {
+        let protocol = reading.producer.parse::<Protocol>().ok()?;
+        Some(Self {
+            protocol,
+            origin: reading.origin.clone(),
+            source: reading.point.source.clone(),
+        })
     }
 }
 

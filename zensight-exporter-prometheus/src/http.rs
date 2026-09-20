@@ -211,18 +211,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_ready_endpoint_ready() {
-        use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+        use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
         let collector = make_collector();
 
         // Record a point to make it ready
-        let point =
-            TelemetryPoint::new("test", Protocol::Snmp, "metric", TelemetryValue::Gauge(1.0));
-        let key = format!(
-            "v1/h-0123456789ab/telemetry/{}/{}",
-            point.protocol.as_str(),
-            point.metric
-        );
+        let point = TelemetryPoint::new("test", "metric", TelemetryValue::Gauge(1.0));
+        let key = format!("v1/h-0123456789ab/telemetry/{}/{}", "snmp", point.metric);
         collector.record(&key, &point);
 
         let router = create_router(collector, "/metrics", PipelineHealth::new());

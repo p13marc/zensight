@@ -197,7 +197,7 @@ pub fn record_point(
         return;
     }
 
-    let Some((origin, subject)) = series_of(key) else {
+    let Some((origin, producer, subject)) = series_of(key) else {
         // The class guard passed, so this is a v1 telemetry key whose origin
         // or subject we could not name — structurally impossible today, and
         // worth a counter rather than a panic if the grammar ever widens.
@@ -209,7 +209,7 @@ pub fn record_point(
     // in-memory structure with no invariant a panic can half-break, so
     // recovering beats losing every subsequent sample.
     let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
-    match s.record(&origin, &subject, point) {
+    match s.record(&origin, &producer, &subject, point) {
         zensight_store::Pushed::Appended => {}
         zensight_store::Pushed::Reordered => {
             counters.reordered.fetch_add(1, Ordering::Relaxed);
@@ -244,18 +244,21 @@ pub struct BatchTrigger {
     pub notify: Arc<tokio::sync::Notify>,
 }
 
-/// `(origin, subject)` for a telemetry key, from the key alone.
+/// `(origin, producer, subject)` for a telemetry key, from the key alone.
 ///
-/// The producer is not returned: it is `point.protocol`, which the store takes
-/// from the payload, and the two agree by construction — the producer chunk is
-/// what the sensor's own `V1Context` built the key from.
-fn series_of(key: &str) -> Option<(String, String)> {
+/// The producer is the key's chunk 4 with its instance suffix stripped
+/// (`keyexpr::producer_name`) — since #1255 the payload does not repeat it.
+/// This used to return only `(origin, subject)` and let the store read the
+/// producer off `point.protocol`; the two agreed by construction, and now
+/// there is only one.
+fn series_of(key: &str) -> Option<(String, String, String)> {
     let parsed = zensight_common::keyexpr::parse_key(key)?;
     let origin = parsed.origin.chunk().to_string();
     if parsed.subject.is_empty() {
         return None;
     }
-    Some((origin, parsed.subject.join("/")))
+    let producer = zensight_common::keyexpr::producer_name(key)?;
+    Some((origin, producer, parsed.subject.join("/")))
 }
 
 /// Flush pending samples to disk on an interval — or early, when ingest says
@@ -422,7 +425,7 @@ pub async fn prune_loop(
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
-    use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+    use zensight_common::{TelemetryPoint, TelemetryValue};
 
     /// A trigger no test reaches: `usize::MAX` means the depth is never met,
     /// so an early flush cannot fire and the test is measuring what it says.
@@ -437,11 +440,10 @@ mod tests {
         Arc::new(std::sync::Mutex::new(MetricStore::new(64, None)))
     }
 
-    fn point(protocol: Protocol, metric: &str, value: TelemetryValue) -> TelemetryPoint {
+    fn point(metric: &str, value: TelemetryValue) -> TelemetryPoint {
         TelemetryPoint {
             timestamp: 1_000,
             source: "dev1".to_string(),
-            protocol,
             metric: metric.to_string(),
             value,
             labels: Default::default(),
@@ -463,11 +465,7 @@ mod tests {
 
         record_point(
             "v1/h-0123456789ab/telemetry/snmp/sw1/if/3/in_octets",
-            &point(
-                Protocol::Snmp,
-                "if/3/in_octets",
-                TelemetryValue::Counter(10),
-            ),
+            &point("if/3/in_octets", TelemetryValue::Counter(10)),
             &s,
             &c,
             &shed,
@@ -515,7 +513,7 @@ mod tests {
         ] {
             record_point(
                 &format!("{base}/{subject}"),
-                &point(Protocol::Sysinfo, subject, value),
+                &point(subject, value),
                 &s,
                 &c,
                 &shed,
@@ -545,7 +543,7 @@ mod tests {
 
         record_point(
             key,
-            &point(Protocol::Logs, "line", TelemetryValue::Text("hello".into())),
+            &point("line", TelemetryValue::Text("hello".into())),
             &s,
             &c,
             &shed,
@@ -553,7 +551,7 @@ mod tests {
         );
         record_point(
             key,
-            &point(Protocol::Logs, "line", TelemetryValue::Binary(vec![1, 2])),
+            &point("line", TelemetryValue::Binary(vec![1, 2])),
             &s,
             &c,
             &shed,
@@ -581,11 +579,7 @@ mod tests {
 
         record_point(
             &format!("{base}/network/eth0/carrier"),
-            &point(
-                Protocol::Sysinfo,
-                "network/eth0/carrier",
-                TelemetryValue::Boolean(true),
-            ),
+            &point("network/eth0/carrier", TelemetryValue::Boolean(true)),
             &s,
             &c,
             &shed,
@@ -593,7 +587,7 @@ mod tests {
         );
         record_point(
             &format!("{base}/system/load"),
-            &point(Protocol::Sysinfo, "system/load", TelemetryValue::Gauge(0.5)),
+            &point("system/load", TelemetryValue::Gauge(0.5)),
             &s,
             &c,
             &shed,
@@ -612,11 +606,7 @@ mod tests {
         shed.store(false, Ordering::Relaxed);
         record_point(
             &format!("{base}/network/eth0/carrier"),
-            &point(
-                Protocol::Sysinfo,
-                "network/eth0/carrier",
-                TelemetryValue::Boolean(false),
-            ),
+            &point("network/eth0/carrier", TelemetryValue::Boolean(false)),
             &s,
             &c,
             &shed,
@@ -633,7 +623,22 @@ mod tests {
     fn a_non_telemetry_key_is_refused_by_the_name_parse() {
         assert_eq!(
             series_of("v1/h-0123456789ab/telemetry/sysinfo/system/load"),
-            Some(("h-0123456789ab".to_string(), "system/load".to_string()))
+            Some((
+                "h-0123456789ab".to_string(),
+                "sysinfo".to_string(),
+                "system/load".to_string()
+            ))
+        );
+        // The producer comes from the key and drops the instance suffix
+        // (#1255) — exactly what `point.protocol.to_string()` gave, so the
+        // series path an existing historian file holds does not move.
+        assert_eq!(
+            series_of("v1/h-0123456789ab/telemetry/netring-2/flows/total"),
+            Some((
+                "h-0123456789ab".to_string(),
+                "netring".to_string(),
+                "flows/total".to_string()
+            ))
         );
         assert_eq!(series_of("not a key at all"), None);
         // A telemetry key with no subject names no series.
@@ -700,11 +705,7 @@ mod tests {
 
         let key = "v1/h-0123456789ab/telemetry/sysinfo/cpu/usage";
         for ts in 0..9i64 {
-            let mut p = point(
-                Protocol::Sysinfo,
-                "cpu/usage",
-                TelemetryValue::Gauge(ts as f64),
-            );
+            let mut p = point("cpu/usage", TelemetryValue::Gauge(ts as f64));
             p.timestamp = ts * 1_000;
             record_point(key, &p, &st, &c, &shedding, &batch);
         }
@@ -715,11 +716,7 @@ mod tests {
         );
 
         for ts in 9..11i64 {
-            let mut p = point(
-                Protocol::Sysinfo,
-                "cpu/usage",
-                TelemetryValue::Gauge(ts as f64),
-            );
+            let mut p = point("cpu/usage", TelemetryValue::Gauge(ts as f64));
             p.timestamp = ts * 1_000;
             record_point(key, &p, &st, &c, &shedding, &batch);
         }
@@ -742,11 +739,7 @@ mod tests {
         let shedding = AtomicBool::new(false);
         let key = "v1/h-0123456789ab/telemetry/sysinfo/cpu/usage";
         for ts in [1_000i64, 3_000, 2_000] {
-            let mut p = point(
-                Protocol::Sysinfo,
-                "cpu/usage",
-                TelemetryValue::Counter(ts as u64),
-            );
+            let mut p = point("cpu/usage", TelemetryValue::Counter(ts as u64));
             p.timestamp = ts;
             record_point(key, &p, &st, &c, &shedding, &no_batch());
         }

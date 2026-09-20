@@ -356,12 +356,7 @@ mod tests {
         for (metric, v) in metrics {
             state.metrics.insert(
                 (*metric).to_string(),
-                TelemetryPoint::new(
-                    host,
-                    Protocol::Probe,
-                    (*metric).to_string(),
-                    TelemetryValue::Gauge(*v),
-                ),
+                TelemetryPoint::new(host, (*metric).to_string(), TelemetryValue::Gauge(*v)),
             );
         }
         state

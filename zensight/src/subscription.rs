@@ -1002,9 +1002,12 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
     // alone cannot reconstruct it for a proxy producer.
     if matches!(parsed.class, ClassOrPlane::Class(Class::Telemetry)) {
         let subject = parsed.subject.join("/");
+        // The producer is chunk 4 of the key (#1255): a name, read here for
+        // every point, registered or not.
+        let producer = parsed.producer()?.name().to_string();
         return match decode_auto::<TelemetryPoint>(payload) {
             Ok(point) => Some(Message::TelemetryReceived(Reading::new(
-                point, origin, subject,
+                point, origin, producer, subject,
             ))),
             Err(e) => {
                 tracing::warn!(error = %e, key = %key, "Failed to decode TelemetryPoint");
@@ -1251,8 +1254,8 @@ pub fn demo_subscription() -> Subscription<Message> {
                 let mut gnmi_count = 0u64;
 
                 // Yield all telemetry points
-                for point in points {
-                    match point.protocol {
+                for (producer, point) in points {
+                    match producer {
                         zensight_common::Protocol::Sysinfo => sysinfo_count += 1,
                         zensight_common::Protocol::Snmp => snmp_count += 1,
                         zensight_common::Protocol::Modbus => modbus_count += 1,
@@ -1263,13 +1266,18 @@ pub fn demo_subscription() -> Subscription<Message> {
                         zensight_common::Protocol::Gnmi => gnmi_count += 1,
                         _ => {}
                     }
-                    let origin = crate::demo::demo_origin(&point);
+                    let origin = crate::demo::demo_origin(producer, &point.source);
                     // Demo mode has no wire key. Every demo producer is a host
                     // sensor, so its subject IS the metric name — the proxy
                     // case (`{device}/{metric...}`) is the one that differs,
                     // and the simulator does not model it.
                     let subject = point.metric.clone();
-                    yield Message::TelemetryReceived(Reading::new(point, origin, subject));
+                    yield Message::TelemetryReceived(Reading::new(
+                        point,
+                        origin,
+                        producer.as_str(),
+                        subject,
+                    ));
                 }
 
                 // Update metrics counts

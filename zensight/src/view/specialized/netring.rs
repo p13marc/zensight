@@ -2255,7 +2255,7 @@ mod tests {
         ] {
             state.metrics.insert(
                 metric.to_string(),
-                TelemetryPoint::new("host01", Protocol::Netring, metric.to_string(), value),
+                TelemetryPoint::new("host01", metric.to_string(), value),
             );
         }
         state.netring_detail.captures = Fetch::Ready(vec![
