@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The system-view test — a producer the GUI was not compiled with, stated as
+  a test the tree can run** (#1254, the decision gate of #1253). `fake-sensor`
+  is not a `Protocol` variant and has no registry TOML; the fixture in
+  `zensight/tests/fixtures/fake-sensor/` is what the bus would give any
+  consumer — an `introspect` slice, a `describe` schema set, a `views`
+  definition with Rhai in it, and samples on real `v1/<origin>/<class>/fake-sensor/…`
+  keys. The test feeds the app the slice through the seam the fleet fetch
+  already uses and asserts six gates in order: intake, model, default view,
+  honesty, definition + scripts, derived subscription.
+
+  Today it fails at the first gate, and that failure is the finding:
+  `TelemetryPoint` carries a closed `protocol` enum in every payload, so a
+  producer outside it is dropped at decode before any view exists — telemetry
+  never even reaches `refine_key`; a state document from the same producer is
+  refused there. The test runs on every CI run as a **ratchet**
+  (`#[should_panic(expected = "GATE 1/intake")]`): the expected string is the
+  epic's status, each phase advances it one gate, and drift in either
+  direction is red. A green companion pins each of today's gates by name. See
+  `zensight/docs/testing.md`, "The one system-view test".
+
 ## [0.14.0] - 2026-09-20
 
 ### Changed — BREAKING

@@ -89,6 +89,9 @@ tempfile = { workspace = true }
 # Pre-main WGPU_BACKEND=gl guard in the test binaries (#687, #829): parallel
 # tests each creating a Vulkan/lavapipe device segfault on GPU-less hosts.
 ctor = "1.0"
+# The system-view fixture's `views.toml` (#1254) has no parser until #1259; the
+# test only asserts it is TOML.
+toml = { workspace = true }
 
 # =============================================================================
 # Package metadata for cargo-deb

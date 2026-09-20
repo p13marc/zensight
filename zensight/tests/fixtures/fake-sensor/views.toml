@@ -1,0 +1,34 @@
+# The `views` reply of the fictional producer (#1254) — the design's §6.1
+# vocabulary and nothing outside it. Every conditional is a Rhai value; `grade`
+# names fields only; the `note` is the honesty rule *no limit → say so*
+# expressed in the document, not in Rust. Nothing here is a colour, a size or a
+# widget. It has no parser yet (#1259); today the fixture only has to be TOML.
+[view]
+version  = "1"
+producer = "fake-sensor"
+title    = "Fake sensor"
+group_by = "{unit}"
+
+[[panel]]
+kind   = "table"
+title  = "Temperatures"
+scope  = "{unit}/temp/{sensor}"
+fields = ["celsius", "upper_critical_c"]
+label  = { rhai = "`${sensor} @ ${unit}`" }
+sort   = { rhai = "-row.celsius" }
+note   = { rhai = "if row.upper_critical_c == () { \"no limit published — not graded\" }" }
+[panel.grade]
+reading  = "celsius"
+critical = "upper_critical_c"
+
+[[panel]]
+kind   = "facts"
+title  = "Uplink"
+scope  = "{unit}/uplink"
+fields = ["rx_bytes"]
+
+[[panel]]
+kind   = "document"
+title  = "Status"
+scope  = "{unit}/status"
+schema = "FakeUnitStatus"
