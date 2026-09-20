@@ -3530,6 +3530,35 @@ impl ZenSight {
                 let refs = self.alerts.refs_for_source(&source);
                 return self.ack_refs(refs, format!("Acknowledged {source}"));
             }
+            Message::MergeTargetChanged(target) => {
+                if let Some(d) = self.selected_device.as_mut() {
+                    d.merge_target = target;
+                }
+            }
+            Message::LinkHosts { old, new } => {
+                // The catalog validates both origins again and refuses a link
+                // while `allow_operator_assertions` is off; the refusal comes
+                // back named (#866). Clearing the field on success would hide
+                // what was just asserted, so it stays until the operator moves.
+                return self.call_catalog_write::<()>(
+                    "link",
+                    &[("old", &old), ("new", &new)],
+                    None,
+                    format!(
+                        "Linked {old} into {new} — the catalog will fuse them on its next pass"
+                    ),
+                );
+            }
+            Message::UnlinkHosts { old, new } => {
+                return self.call_catalog_write::<()>(
+                    "unlink",
+                    &[("old", &old), ("new", &new)],
+                    None,
+                    format!(
+                        "Unlinked {old} from {new} — the catalog will split them on its next pass"
+                    ),
+                );
+            }
             Message::AcknowledgeAllExternal => {
                 let refs = self.alerts.all_refs();
                 let n = refs.len();
@@ -5739,7 +5768,7 @@ impl ZenSight {
         if !self.alerts.can_write() {
             return Task::done(Message::CommandFeedback {
                 success: false,
-                message: "catalog offline — cannot acknowledge or silence".to_string(),
+                message: "catalog offline — nothing can record this".to_string(),
             });
         }
         let mut key = zensight_common::catalog_rpc_key(procedure);

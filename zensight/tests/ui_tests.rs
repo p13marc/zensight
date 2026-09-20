@@ -8240,3 +8240,105 @@ mod catalog_projection_ui {
         assert!(ui.find("acknowledged by marc — restarting it").is_ok());
     }
 }
+
+/// #1129: the write side of the identity workflow. `@catalog`'s `link`/`unlink`
+/// had no caller anywhere; the identity panel now offers one "Split off" per
+/// non-canonical origin and a "Merge into" field, each an assertion naming
+/// **origins**.
+mod host_link_unlink {
+    use super::*;
+
+    fn entity_with_origins(origins: &[&str]) -> HostEntity {
+        let mut e = test_entity("h_web01", "web-01", &[("sysinfo", "web-01")]);
+        e.origins = origins.iter().map(|o| (*o).to_string()).collect();
+        e.host_id = origins.first().map(|o| (*o).to_string());
+        e
+    }
+
+    fn view(entity: &HostEntity, merge_target: &str) -> iced_test::Simulator<'static, Message> {
+        let id = DeviceId::fixture(Protocol::Sysinfo, "web-01".to_string());
+        let mut state = DeviceDetailState::new(id.clone());
+        state.merge_target = merge_target.to_string();
+        let facets = vec![FacetTab::live(
+            id,
+            zensight_common::DeviceStatus::Online,
+            true,
+        )];
+        let syslog_filter = SyslogFilterState::default();
+        // Leak the state so the simulator's element can borrow it for the
+        // test's lifetime — the pattern the other host-detail tests use.
+        let state: &'static DeviceDetailState = Box::leak(Box::new(state));
+        let facets: &'static Vec<FacetTab> = Box::leak(Box::new(facets));
+        let syslog_filter: &'static SyslogFilterState = Box::leak(Box::new(syslog_filter));
+        let entity: &'static HostEntity = Box::leak(Box::new(entity.clone()));
+        simulator(host_detail_view(DeviceViewCtx {
+            state,
+            syslog_filter,
+            host_logs: &[],
+            facets,
+            entity: Some(entity),
+            identity_expanded: true,
+            artifact: None,
+            history_source: Default::default(),
+        }))
+    }
+
+    /// Two fused origins: one "Split off" for the non-canonical one, and
+    /// pressing it asks the catalog to `unlink` exactly that pair.
+    #[test]
+    fn a_fused_entity_offers_to_split_the_other_origin() {
+        let entity = entity_with_origins(&["h-0123456789ab", "h-fedcba987654"]);
+        let mut ui = view(&entity, "");
+        assert!(ui.find("Origins").is_ok());
+        assert!(ui.find("h-fedcba987654").is_ok());
+        let _ = ui.click("Split off");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::UnlinkHosts { old, new }
+                    if old == "h-fedcba987654" && new == "h-0123456789ab"
+            )),
+            "{msgs:?}"
+        );
+    }
+
+    /// A single-origin entity has nothing to split: no button, no section.
+    #[test]
+    fn a_single_origin_entity_has_nothing_to_split() {
+        let entity = entity_with_origins(&["h-0123456789ab"]);
+        let mut ui = view(&entity, "");
+        assert!(ui.find("Split off").is_err());
+        assert!(ui.find("Origins").is_err());
+        assert!(ui.find("Merge into").is_ok(), "merging is always offered");
+    }
+
+    /// The merge button enables only for a well-formed origin that is not
+    /// this entity's own; pressing it asks the catalog to `link` this
+    /// entity's canonical origin into the target.
+    #[test]
+    fn merge_into_names_the_typed_origin() {
+        let entity = entity_with_origins(&["h-0123456789ab"]);
+        let mut ui = view(&entity, "h-fedcba987654");
+        let _ = ui.click("Merge into");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::LinkHosts { old, new }
+                    if old == "h-0123456789ab" && new == "h-fedcba987654"
+            )),
+            "{msgs:?}"
+        );
+        // Not an origin: the button stays disabled, no message.
+        let mut ui = view(&entity, "web-02");
+        let _ = ui.click("Merge into");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(!msgs.iter().any(|m| matches!(m, Message::LinkHosts { .. })));
+        // Its own origin: nothing to assert.
+        let mut ui = view(&entity, "h-0123456789ab");
+        let _ = ui.click("Merge into");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(!msgs.iter().any(|m| matches!(m, Message::LinkHosts { .. })));
+    }
+}

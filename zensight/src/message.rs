@@ -1286,6 +1286,21 @@ pub enum Message {
     /// Silence (mute) a source for the given duration in ms (#26).
     SilenceSource(String, i64),
 
+    /// The identity panel's "merge into" field changed (#1129).
+    MergeTargetChanged(String),
+    /// `@catalog` `link?old=…;new=…` (#1129): fuse the host at origin `old`
+    /// into the one at `new`. Both are `h-<12hex>` origins, never entity ids.
+    LinkHosts {
+        old: String,
+        new: String,
+    },
+    /// `@catalog` `unlink?old=…;new=…` (#1129): retract the link that fuses
+    /// `old` into `new`, so the catalog stops merging them.
+    UnlinkHosts {
+        old: String,
+        new: String,
+    },
+
     /// Toggle the opt-in desktop-notifications setting (#26) and persist it.
     ToggleDesktopNotifications,
     /// Lift a silence on a source (#26).
