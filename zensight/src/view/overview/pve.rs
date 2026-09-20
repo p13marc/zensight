@@ -391,7 +391,7 @@ mod tests {
         for (metric, v) in metrics {
             state.metrics.insert(
                 (*metric).to_string(),
-                TelemetryPoint::new("pve01", Protocol::Pve, (*metric).to_string(), v.clone()),
+                TelemetryPoint::new("pve01", (*metric).to_string(), v.clone()),
             );
         }
         (id, state)

@@ -13,7 +13,7 @@ use sysinfo::{Disks, Networks, System};
 use tracing::{debug, warn};
 use zenoh::Session;
 use zensight_common::serialization::Format;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 #[cfg(target_os = "linux")]
 use crate::linux::LinuxMetrics;
@@ -1666,7 +1666,6 @@ impl SystemCollector {
         let point = TelemetryPoint {
             timestamp,
             source: self.source.clone(),
-            protocol: Protocol::Sysinfo,
             metric: metric.to_string(),
             value,
             labels,

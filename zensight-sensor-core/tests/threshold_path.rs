@@ -58,12 +58,7 @@ fn rules() -> ThresholdsConfig {
 }
 
 fn point(source: &str, value: f64) -> TelemetryPoint {
-    TelemetryPoint::new(
-        source,
-        Protocol::Sysinfo,
-        "cpu/usage",
-        TelemetryValue::Gauge(value),
-    )
+    TelemetryPoint::new(source, "cpu/usage", TelemetryValue::Gauge(value))
 }
 
 async fn next_alert(

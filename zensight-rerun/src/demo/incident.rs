@@ -85,7 +85,7 @@ pub fn series_at(base_ts: i64, sec: u64) -> Vec<(&'static str, TelemetryPoint)> 
     let t = sec as f64;
     // Each point rides with the producer it is published under (#1255).
     let point = |protocol: Protocol, metric: &str, value: TelemetryValue| {
-        let mut p = TelemetryPoint::new(SOURCE, protocol, metric, value);
+        let mut p = TelemetryPoint::new(SOURCE, metric, value);
         p.timestamp = ts;
         (protocol.as_str(), p)
     };
@@ -138,7 +138,6 @@ pub fn link_event(base_ts: i64, offset_secs: u64, up: bool) -> TelemetryPoint {
     };
     let mut p = TelemetryPoint::new(
         SOURCE,
-        Protocol::Netlink,
         format!("events/{kind}/gateway"),
         TelemetryValue::Text(message.into()),
     );
@@ -152,7 +151,6 @@ pub fn link_event(base_ts: i64, offset_secs: u64, up: bool) -> TelemetryPoint {
 pub fn route_change_event(base_ts: i64, offset_secs: u64) -> TelemetryPoint {
     let mut p = TelemetryPoint::new(
         SOURCE,
-        Protocol::Netlink,
         "events/route/replace",
         TelemetryValue::Text("default via 192.168.8.1 dev lte0 (was 10.0.0.1 dev wlan0)".into()),
     );

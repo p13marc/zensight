@@ -8,7 +8,7 @@ use tonic::Request;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, warn};
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 use crate::config::{GnmiTarget, SerializationFormat, Subscription, SubscriptionMode};
 use crate::gnmi::{
@@ -339,7 +339,6 @@ impl GnmiSubscriber {
                 let point = TelemetryPoint {
                     timestamp,
                     source: self.target.name.clone(),
-                    protocol: Protocol::Gnmi,
                     metric: full_path.clone(),
                     value,
                     labels: HashMap::new(),

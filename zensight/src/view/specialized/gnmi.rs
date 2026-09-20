@@ -337,13 +337,11 @@ mod tests {
         use zensight_common::TelemetryPoint;
         state.update(TelemetryPoint::new(
             "spine01",
-            Protocol::Gnmi,
             "interfaces/interface/state/name",
             TelemetryValue::Text("eth0".to_string()),
         ));
         state.update(TelemetryPoint::new(
             "spine01",
-            Protocol::Gnmi,
             "interfaces/interface/state/counters/in-octets",
             TelemetryValue::Counter(1234567),
         ));

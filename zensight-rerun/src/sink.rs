@@ -448,7 +448,7 @@ mod tests {
     fn gauge(metric: &str, ts: i64, v: f64) -> TelemetryItem {
         item(
             "sysinfo",
-            TelemetryPoint::new("host1", Protocol::Sysinfo, metric, TelemetryValue::Gauge(v)),
+            TelemetryPoint::new("host1", metric, TelemetryValue::Gauge(v)),
             ts,
         )
     }
@@ -456,12 +456,7 @@ mod tests {
     fn counter(metric: &str, ts: i64, v: u64) -> TelemetryItem {
         item(
             "netlink",
-            TelemetryPoint::new(
-                "host1",
-                Protocol::Netlink,
-                metric,
-                TelemetryValue::Counter(v),
-            ),
+            TelemetryPoint::new("host1", metric, TelemetryValue::Counter(v)),
             ts,
         )
     }
@@ -549,7 +544,6 @@ mod tests {
             "netlink",
             TelemetryPoint::new(
                 "host1",
-                Protocol::Netlink,
                 metric,
                 TelemetryValue::Text("something happened".into()),
             ),

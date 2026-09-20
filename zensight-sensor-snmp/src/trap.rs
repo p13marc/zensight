@@ -411,12 +411,7 @@ impl TrapReceiver {
             *entry
         };
         let metric = format!("trap/{trap_id}");
-        let point = TelemetryPoint::new(
-            device,
-            Protocol::Snmp,
-            &metric,
-            TelemetryValue::Counter(count),
-        );
+        let point = TelemetryPoint::new(device, &metric, TelemetryValue::Counter(count));
         // #559: through the generated builder — slugs device and trap-id
         // chunks so a resolved trap name can never trip the metric guard.
         let key = zensight_common::registry::snmp::key(

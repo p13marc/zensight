@@ -1579,12 +1579,7 @@ mod tests {
         ] {
             state.metrics.insert(
                 metric.to_string(),
-                TelemetryPoint::new(
-                    "server01",
-                    Protocol::Sysinfo,
-                    metric.to_string(),
-                    TelemetryValue::Gauge(v),
-                ),
+                TelemetryPoint::new("server01", metric.to_string(), TelemetryValue::Gauge(v)),
             );
         }
 

@@ -492,7 +492,7 @@ mod tests {
     use crate::config::{AggregationConfig, FilterConfig, PrometheusConfig};
     use std::collections::HashMap;
     use std::sync::Arc;
-    use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+    use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
     fn make_collector() -> SharedCollector {
         Arc::new(MetricCollector::new(
@@ -531,7 +531,6 @@ mod tests {
             &TelemetryPoint {
                 timestamp,
                 source: source.to_string(),
-                protocol: Protocol::Snmp,
                 metric: metric.to_string(),
                 value,
                 labels: HashMap::new(),

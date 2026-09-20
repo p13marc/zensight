@@ -1,6 +1,6 @@
 //! Registry-checked telemetry-point construction (RFC 08 §5, issue #468).
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// Build one telemetry point, enforcing the subject registry.
 ///
@@ -21,7 +21,7 @@ pub(crate) fn checked_point(
         "unregistered hostspec telemetry subject {metric:?} — add it to \
          zensight-common/registry/hostspec.toml (RFC 08 §5, issue #468)"
     );
-    TelemetryPoint::new(source, Protocol::Hostspec, metric, value)
+    TelemetryPoint::new(source, metric, value)
 }
 
 #[cfg(test)]

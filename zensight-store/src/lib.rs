@@ -1847,7 +1847,6 @@ impl StoredLog {
         TelemetryPoint {
             timestamp: self.ts,
             source: self.host.clone(),
-            protocol: zensight_common::Protocol::Logs,
             metric: format!("events/{}", self.uid),
             value: TelemetryValue::Text(self.message.clone()),
             labels,
@@ -2522,7 +2521,6 @@ impl MetricStore {
 mod tests {
     use super::*;
     use std::collections::HashMap as Map;
-    use zensight_common::Protocol;
 
     const ORIGIN: &str = "h-0123456789ab";
 
@@ -2546,7 +2544,6 @@ mod tests {
         TelemetryPoint {
             timestamp: ts,
             source: "dev1".to_string(),
-            protocol: Protocol::Sysinfo,
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(value),
             labels: Map::new(),

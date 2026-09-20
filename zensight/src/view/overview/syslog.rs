@@ -315,7 +315,6 @@ mod tests {
             "auth/err".to_string(),
             TelemetryPoint::new(
                 "host1",
-                Protocol::Logs,
                 "auth/err",
                 TelemetryValue::Text("authentication failure".into()),
             )
@@ -324,12 +323,7 @@ mod tests {
         // A derived rollup counter — must be ignored.
         state.metrics.insert(
             "errors_total".to_string(),
-            TelemetryPoint::new(
-                "host1",
-                Protocol::Logs,
-                "errors_total",
-                TelemetryValue::Counter(5),
-            ),
+            TelemetryPoint::new("host1", "errors_total", TelemetryValue::Counter(5)),
         );
 
         let mut devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();

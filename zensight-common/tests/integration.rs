@@ -11,7 +11,6 @@ fn test_full_telemetry_workflow() {
     // Create a telemetry point
     let point = TelemetryPoint::new(
         "router01",
-        Protocol::Snmp,
         "system/sysUpTime",
         TelemetryValue::Counter(123456789),
     )
@@ -25,7 +24,6 @@ fn test_full_telemetry_workflow() {
     // Decode from JSON
     let decoded: TelemetryPoint = decode(&json_bytes, Format::Json).expect("JSON decode failed");
     assert_eq!(decoded.source, "router01");
-    assert_eq!(decoded.protocol, Protocol::Snmp);
     assert_eq!(decoded.metric, "system/sysUpTime");
     assert_eq!(decoded.value, TelemetryValue::Counter(123456789));
     assert_eq!(
@@ -94,7 +92,7 @@ fn test_all_telemetry_value_types() {
     ];
 
     for (value, _type_name) in values {
-        let point = TelemetryPoint::new("test", Protocol::Snmp, "metric", value.clone());
+        let point = TelemetryPoint::new("test", "metric", value.clone());
 
         // Roundtrip through JSON
         let encoded = encode(&point, Format::Json).unwrap();
@@ -115,13 +113,8 @@ fn test_telemetry_with_many_labels() {
         labels.insert(format!("key_{}", i), format!("value_{}", i));
     }
 
-    let point = TelemetryPoint::new(
-        "device",
-        Protocol::Snmp,
-        "metric",
-        TelemetryValue::Gauge(1.0),
-    )
-    .with_labels(labels.clone());
+    let point = TelemetryPoint::new("device", "metric", TelemetryValue::Gauge(1.0))
+        .with_labels(labels.clone());
 
     assert_eq!(point.labels.len(), 100);
 
@@ -152,12 +145,7 @@ fn test_protocol_ordering() {
 
 #[test]
 fn test_large_counter_values() {
-    let point = TelemetryPoint::new(
-        "device",
-        Protocol::Snmp,
-        "ifInOctets",
-        TelemetryValue::Counter(u64::MAX),
-    );
+    let point = TelemetryPoint::new("device", "ifInOctets", TelemetryValue::Counter(u64::MAX));
 
     // JSON roundtrip
     let encoded = encode(&point, Format::Json).unwrap();

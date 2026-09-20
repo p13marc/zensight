@@ -256,7 +256,6 @@ impl LogRecord {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use zensight_common::telemetry::Protocol;
 
     #[test]
     fn test_syslog_severity_from_str() {
@@ -307,14 +306,13 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1234567890000,
             source: "server01".to_string(),
-            protocol: Protocol::Logs,
             metric: "message".to_string(),
             value: TelemetryValue::Text("Connection refused".to_string()),
             labels,
             unit: None,
         };
 
-        let record = LogRecord::from_telemetry(point.protocol.as_str(), &point).unwrap();
+        let record = LogRecord::from_telemetry("logs", &point).unwrap();
 
         assert_eq!(record.body, "Connection refused");
         assert_eq!(record.severity, SyslogSeverity::Warning);
@@ -333,14 +331,13 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1234567890000,
             source: "router01".to_string(),
-            protocol: Protocol::Snmp,
             metric: "sysDescr".to_string(),
             value: TelemetryValue::Text("Cisco Router".to_string()),
             labels: HashMap::new(),
             unit: None,
         };
 
-        assert!(LogRecord::from_telemetry(point.protocol.as_str(), &point).is_none());
+        assert!(LogRecord::from_telemetry("snmp", &point).is_none());
     }
 
     #[test]
@@ -348,13 +345,12 @@ mod tests {
         let point = TelemetryPoint {
             timestamp: 1234567890000,
             source: "server01".to_string(),
-            protocol: Protocol::Logs,
             metric: "count".to_string(),
             value: TelemetryValue::Counter(100),
             labels: HashMap::new(),
             unit: None,
         };
 
-        assert!(LogRecord::from_telemetry(point.protocol.as_str(), &point).is_none());
+        assert!(LogRecord::from_telemetry("logs", &point).is_none());
     }
 }

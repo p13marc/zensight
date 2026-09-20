@@ -1051,7 +1051,6 @@ impl LogRecord {
         crate::TelemetryPoint {
             timestamp: self.ts,
             source: self.host.clone(),
-            protocol: crate::Protocol::Logs,
             metric: format!("events/{}", self.uid),
             value: crate::TelemetryValue::Text(self.message.clone()),
             labels,
@@ -1225,7 +1224,6 @@ mod tests {
         let point = crate::TelemetryPoint {
             timestamp: 1_719_999_000_000,
             source: "web01".to_string(),
-            protocol: crate::Protocol::Logs,
             metric: "events/0000001719999000000000000042".to_string(),
             value: crate::TelemetryValue::Text("Failed password for root".to_string()),
             labels,
@@ -1268,7 +1266,6 @@ mod tests {
         let point = crate::TelemetryPoint {
             timestamp: 1,
             source: "web01".to_string(),
-            protocol: crate::Protocol::Logs,
             metric: "logs/errors_total".to_string(),
             value: crate::TelemetryValue::Counter(5),
             labels: Default::default(),

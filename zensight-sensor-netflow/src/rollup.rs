@@ -11,7 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use zensight_common::page::Page;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::ring::BoundedRing;
 
 use crate::fields::MAX_EXPORTERS;
@@ -201,7 +201,6 @@ impl Rollups {
             let point = |metric: String, value: u64| TelemetryPoint {
                 timestamp,
                 source: exporter.clone(),
-                protocol: Protocol::Netflow,
                 metric,
                 value: TelemetryValue::Counter(value),
                 labels: HashMap::new(),

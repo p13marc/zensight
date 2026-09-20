@@ -25,7 +25,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// One default-route transition, served via `@rpc/netlink/route_changes`.
 ///
@@ -154,7 +154,6 @@ impl RouteHistory {
     pub fn flap_points(&self, host: &str) -> Vec<TelemetryPoint> {
         vec![TelemetryPoint::new(
             host,
-            Protocol::Netlink,
             "routes/default_v4_flaps_total".to_string(),
             TelemetryValue::Counter(self.inner.flaps_v4.load(Ordering::Relaxed)),
         )]

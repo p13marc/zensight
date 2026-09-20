@@ -28,7 +28,7 @@ pub fn points_for_tick(
     // Each point rides with the producer it is published under (#1255): the
     // key carries it, the point does not.
     let point = |protocol: Protocol, metric: &str, value: TelemetryValue| {
-        let mut p = TelemetryPoint::new(SOURCE, protocol, metric, value);
+        let mut p = TelemetryPoint::new(SOURCE, metric, value);
         p.timestamp = ts;
         (protocol.as_str(), p)
     };

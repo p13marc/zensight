@@ -14,12 +14,7 @@ use super::DemoContext;
 pub const SOURCE: &str = super::metrics::SOURCE;
 
 fn event_point(metric: &str, message: &str, ts: i64) -> TelemetryPoint {
-    let mut p = TelemetryPoint::new(
-        SOURCE,
-        Protocol::Netlink,
-        metric,
-        TelemetryValue::Text(message.to_string()),
-    );
+    let mut p = TelemetryPoint::new(SOURCE, metric, TelemetryValue::Text(message.to_string()));
     p.timestamp = ts;
     p
 }

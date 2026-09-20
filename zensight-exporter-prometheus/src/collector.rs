@@ -898,15 +898,13 @@ fn format_labels(labels: &[(String, String)]) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use zensight_common::telemetry::Protocol;
 
     /// A base-relative telemetry key for a point, as the wire carries it.
     ///
     /// Naming now flows from the KEY through the registry (#764), so a test
     /// that only builds a `TelemetryPoint` is testing nothing the exporter
     /// does. This mints the matching key.
-    fn key_for(point: &TelemetryPoint) -> String {
-        let producer = point.protocol.as_str();
+    fn key_for(producer: &str, point: &TelemetryPoint) -> String {
         // snmp/modbus/gnmi/netflow register a rest-var catch-all
         // `<device>/<metric...>`, so their key carries the device chunk that
         // `point.metric` does not.
@@ -922,9 +920,9 @@ mod tests {
     }
 
     /// Resolve a point to its identity exactly as `record` does.
-    fn identity_of(point: &TelemetryPoint) -> MetricIdentity {
+    fn identity_of(producer: &str, point: &TelemetryPoint) -> MetricIdentity {
         identify(
-            &key_for(point),
+            &key_for(producer, point),
             point,
             &HashMap::new(),
             crate::mapping::sanitize_label_name,
@@ -932,16 +930,10 @@ mod tests {
         .unwrap_or_else(|e| panic!("{} did not refine: {:?}", point.metric, e.reason()))
     }
 
-    fn make_point(
-        source: &str,
-        protocol: Protocol,
-        metric: &str,
-        value: TelemetryValue,
-    ) -> TelemetryPoint {
+    fn make_point(source: &str, metric: &str, value: TelemetryValue) -> TelemetryPoint {
         TelemetryPoint {
             timestamp: 1234567890000,
             source: source.to_string(),
-            protocol,
             metric: metric.to_string(),
             value,
             labels: HashMap::new(),
@@ -962,12 +954,11 @@ mod tests {
     fn per_line_log_events_do_not_refine() {
         let event = make_point(
             "host01",
-            Protocol::Logs,
             "events/0000000000009000000000042",
             TelemetryValue::Text("login failed".into()),
         );
         let err = identify(
-            &key_for(&event),
+            &key_for("logs", &event),
             &event,
             &HashMap::new(),
             crate::mapping::sanitize_label_name,
@@ -976,13 +967,10 @@ mod tests {
         assert_eq!(err.reason(), "subject_not_registered");
 
         // A registered Logs metric still exports.
-        let real = make_point(
-            "host01",
-            Protocol::Logs,
-            "errors_total",
-            TelemetryValue::Counter(2),
+        let real = make_point("host01", "errors_total", TelemetryValue::Counter(2));
+        assert!(
+            StoredMetric::from_identity(&identity_of("logs", &real), &real, "zensight").is_some()
         );
-        assert!(StoredMetric::from_identity(&identity_of(&real), &real, "zensight").is_some());
     }
 
     #[test]
@@ -990,13 +978,8 @@ mod tests {
         // Lowercase because the WIRE is lowercase: a key chunk must be
         // `[a-z0-9]`-bounded, which is why the SNMP poller slugs at the publish
         // boundary (#559).
-        let point = make_point(
-            "router01",
-            Protocol::Snmp,
-            "sysuptime",
-            TelemetryValue::Counter(100),
-        );
-        let key = SeriesKey::from_identity(&identity_of(&point), "zensight");
+        let point = make_point("router01", "sysuptime", TelemetryValue::Counter(100));
+        let key = SeriesKey::from_identity(&identity_of("snmp", &point), "zensight");
 
         // `_total` is the counter convention (#767), applied idempotently.
         assert_eq!(key.name, "zensight_snmp_sysuptime_total");
@@ -1028,14 +1011,13 @@ mod tests {
         // `unit` label isn't duplicated.
         let mut point = make_point(
             "host01",
-            Protocol::Systemd,
             "unit/sshd.service/active",
             TelemetryValue::Boolean(true),
         );
         point
             .labels
             .insert("unit".to_string(), "sshd.service".to_string());
-        let key = SeriesKey::from_identity(&identity_of(&point), "zensight");
+        let key = SeriesKey::from_identity(&identity_of("snmp", &point), "zensight");
 
         assert_eq!(key.name, "zensight_systemd_unit_active");
         let unit_labels: Vec<_> = key.labels.iter().filter(|(k, _)| k == "unit").collect();
@@ -1045,17 +1027,12 @@ mod tests {
 
     #[test]
     fn test_series_key_with_default_labels() {
-        let point = make_point(
-            "server01",
-            Protocol::Sysinfo,
-            "cpu/usage",
-            TelemetryValue::Gauge(45.5),
-        );
+        let point = make_point("server01", "cpu/usage", TelemetryValue::Gauge(45.5));
         let mut defaults = HashMap::new();
         defaults.insert("env".to_string(), "prod".to_string());
 
         let identity = identify(
-            &key_for(&point),
+            &key_for("snmp", &point),
             &point,
             &defaults,
             crate::mapping::sanitize_label_name,
@@ -1081,13 +1058,8 @@ mod tests {
 
     #[test]
     fn test_stored_metric_from_telemetry() {
-        let point = make_point(
-            "router01",
-            Protocol::Snmp,
-            "if/1/in_octets",
-            TelemetryValue::Counter(1000),
-        );
-        let stored = StoredMetric::from_identity(&identity_of(&point), &point, "zensight");
+        let point = make_point("router01", "if/1/in_octets", TelemetryValue::Counter(1000));
+        let stored = StoredMetric::from_identity(&identity_of("snmp", &point), &point, "zensight");
 
         assert!(stored.is_some());
         let stored = stored.unwrap();
@@ -1107,28 +1079,18 @@ mod tests {
     #[test]
     fn interface_columns_aggregate_across_indices() {
         let if1 = {
-            let mut p = make_point(
-                "router01",
-                Protocol::Snmp,
-                "if/1/in_octets",
-                TelemetryValue::Counter(1000),
-            );
+            let mut p = make_point("router01", "if/1/in_octets", TelemetryValue::Counter(1000));
             p.labels.insert("index".to_string(), "1".to_string());
             p
         };
         let if2 = {
-            let mut p = make_point(
-                "router01",
-                Protocol::Snmp,
-                "if/2/in_octets",
-                TelemetryValue::Counter(2000),
-            );
+            let mut p = make_point("router01", "if/2/in_octets", TelemetryValue::Counter(2000));
             p.labels.insert("index".to_string(), "2".to_string());
             p
         };
 
-        let k1 = SeriesKey::from_identity(&identity_of(&if1), "zensight");
-        let k2 = SeriesKey::from_identity(&identity_of(&if2), "zensight");
+        let k1 = SeriesKey::from_identity(&identity_of("snmp", &if1), "zensight");
+        let k2 = SeriesKey::from_identity(&identity_of("snmp", &if2), "zensight");
 
         assert_eq!(
             k1.name, "zensight_snmp_if_in_octets_total",
@@ -1158,21 +1120,11 @@ mod tests {
     /// class #752 fixed.
     #[test]
     fn interface_columns_are_not_collapsed_into_one_family() {
-        let octets = make_point(
-            "router01",
-            Protocol::Snmp,
-            "if/1/in_octets",
-            TelemetryValue::Counter(1000),
-        );
-        let mtu = make_point(
-            "router01",
-            Protocol::Snmp,
-            "if/1/mtu",
-            TelemetryValue::Gauge(1500.0),
-        );
+        let octets = make_point("router01", "if/1/in_octets", TelemetryValue::Counter(1000));
+        let mtu = make_point("router01", "if/1/mtu", TelemetryValue::Gauge(1500.0));
 
-        let k_octets = SeriesKey::from_identity(&identity_of(&octets), "zensight");
-        let k_mtu = SeriesKey::from_identity(&identity_of(&mtu), "zensight");
+        let k_octets = SeriesKey::from_identity(&identity_of("snmp", &octets), "zensight");
+        let k_mtu = SeriesKey::from_identity(&identity_of("snmp", &mtu), "zensight");
 
         assert_eq!(k_octets.name, "zensight_snmp_if_in_octets_total");
         assert_eq!(k_mtu.name, "zensight_snmp_if_mtu");
@@ -1189,13 +1141,12 @@ mod tests {
     fn the_derived_rate_sibling_aggregates_too() {
         let mut p = make_point(
             "router01",
-            Protocol::Snmp,
             "if/1/in_octets.rate",
             TelemetryValue::Gauge(12.5),
         );
         p.labels.insert("index".to_string(), "1".to_string());
 
-        let key = SeriesKey::from_identity(&identity_of(&p), "zensight");
+        let key = SeriesKey::from_identity(&identity_of("snmp", &p), "zensight");
         assert!(
             !key.name.contains("_1_"),
             "the index must not be in the name: {}",
@@ -1220,9 +1171,9 @@ mod tests {
     #[test]
     fn cpu_ip_and_storage_columns_aggregate_across_indices() {
         let indexed = |metric: &str, index: &str, value: TelemetryValue| {
-            let mut p = make_point("router01", Protocol::Snmp, metric, value);
+            let mut p = make_point("router01", metric, value);
             p.labels.insert("index".to_string(), index.to_string());
-            SeriesKey::from_identity(&identity_of(&p), "zensight")
+            SeriesKey::from_identity(&identity_of("snmp", &p), "zensight")
         };
 
         for (a, b, expected) in [
@@ -1253,21 +1204,15 @@ mod tests {
     /// row's `descr` (a string) can never collide with its `size` (a gauge).
     #[test]
     fn storage_columns_are_not_collapsed_into_one_family() {
-        let size = make_point(
-            "router01",
-            Protocol::Snmp,
-            "storage/1/size",
-            TelemetryValue::Gauge(1024.0),
-        );
+        let size = make_point("router01", "storage/1/size", TelemetryValue::Gauge(1024.0));
         let descr = make_point(
             "router01",
-            Protocol::Snmp,
             "storage/1/descr",
             TelemetryValue::Text("/dev/sda1".into()),
         );
 
-        let k_size = SeriesKey::from_identity(&identity_of(&size), "zensight");
-        let k_descr = SeriesKey::from_identity(&identity_of(&descr), "zensight");
+        let k_size = SeriesKey::from_identity(&identity_of("snmp", &size), "zensight");
+        let k_descr = SeriesKey::from_identity(&identity_of("snmp", &descr), "zensight");
 
         assert_eq!(k_size.name, "zensight_snmp_storage_size");
         assert_ne!(
@@ -1287,13 +1232,8 @@ mod tests {
             ("ip/forwarding", "zensight_snmp_ip_forwarding"),
             ("ip/default_ttl", "zensight_snmp_ip_default_ttl"),
         ] {
-            let p = make_point(
-                "router01",
-                Protocol::Snmp,
-                metric,
-                TelemetryValue::Gauge(1.0),
-            );
-            let key = SeriesKey::from_identity(&identity_of(&p), "zensight");
+            let p = make_point("router01", metric, TelemetryValue::Gauge(1.0));
+            let key = SeriesKey::from_identity(&identity_of("snmp", &p), "zensight");
             assert_eq!(key.name, expected, "scalar {metric} took an indexed name");
             assert!(
                 !key.labels.iter().any(|(n, _)| n == "index"),
@@ -1304,13 +1244,8 @@ mod tests {
 
     #[test]
     fn test_stored_metric_binary_not_exportable() {
-        let point = make_point(
-            "server",
-            Protocol::Snmp,
-            "data",
-            TelemetryValue::Binary(vec![1, 2, 3]),
-        );
-        let stored = StoredMetric::from_identity(&identity_of(&point), &point, "zensight");
+        let point = make_point("server", "data", TelemetryValue::Binary(vec![1, 2, 3]));
+        let stored = StoredMetric::from_identity(&identity_of("snmp", &point), &point, "zensight");
 
         assert!(stored.is_none());
     }
@@ -1323,11 +1258,11 @@ mod tests {
         };
         let filter = MetricFilter::new(&config);
 
-        let snmp_point = make_point("r1", Protocol::Snmp, "m", TelemetryValue::Gauge(1.0));
-        let sysinfo_point = make_point("s1", Protocol::Sysinfo, "m", TelemetryValue::Gauge(1.0));
+        let snmp_point = make_point("r1", "m", TelemetryValue::Gauge(1.0));
+        let sysinfo_point = make_point("s1", "m", TelemetryValue::Gauge(1.0));
 
-        assert!(filter.should_include(snmp_point.protocol.as_str(), &snmp_point));
-        assert!(!filter.should_include(sysinfo_point.protocol.as_str(), &sysinfo_point));
+        assert!(filter.should_include("snmp", &snmp_point));
+        assert!(!filter.should_include("sysinfo", &sysinfo_point));
     }
 
     #[test]
@@ -1338,21 +1273,11 @@ mod tests {
         };
         let filter = MetricFilter::new(&config);
 
-        let point1 = make_point(
-            "test-device",
-            Protocol::Snmp,
-            "m",
-            TelemetryValue::Gauge(1.0),
-        );
-        let point2 = make_point(
-            "prod-device",
-            Protocol::Snmp,
-            "m",
-            TelemetryValue::Gauge(1.0),
-        );
+        let point1 = make_point("test-device", "m", TelemetryValue::Gauge(1.0));
+        let point2 = make_point("prod-device", "m", TelemetryValue::Gauge(1.0));
 
-        assert!(!filter.should_include(point1.protocol.as_str(), &point1));
-        assert!(filter.should_include(point2.protocol.as_str(), &point2));
+        assert!(!filter.should_include("snmp", &point1));
+        assert!(filter.should_include("snmp", &point2));
     }
 
     #[test]
@@ -1363,21 +1288,11 @@ mod tests {
         };
         let filter = MetricFilter::new(&config);
 
-        let point1 = make_point(
-            "s",
-            Protocol::Snmp,
-            "system/debug/trace",
-            TelemetryValue::Gauge(1.0),
-        );
-        let point2 = make_point(
-            "s",
-            Protocol::Snmp,
-            "system/uptime",
-            TelemetryValue::Gauge(1.0),
-        );
+        let point1 = make_point("s", "system/debug/trace", TelemetryValue::Gauge(1.0));
+        let point2 = make_point("s", "system/uptime", TelemetryValue::Gauge(1.0));
 
-        assert!(!filter.should_include(point1.protocol.as_str(), &point1));
-        assert!(filter.should_include(point2.protocol.as_str(), &point2));
+        assert!(!filter.should_include("snmp", &point1));
+        assert!(filter.should_include("snmp", &point2));
     }
 
     #[test]
@@ -1388,13 +1303,8 @@ mod tests {
             FilterConfig::default(),
         );
 
-        let point = make_point(
-            "router01",
-            Protocol::Snmp,
-            "sysuptime",
-            TelemetryValue::Counter(12345),
-        );
-        collector.record(&key_for(&point), &point);
+        let point = make_point("router01", "sysuptime", TelemetryValue::Counter(12345));
+        collector.record(&key_for("snmp", &point), &point);
 
         assert_eq!(collector.series_count(), 1);
 
@@ -1419,11 +1329,10 @@ mod tests {
         for i in 0..5 {
             let point = make_point(
                 &format!("device{}", i),
-                Protocol::Snmp,
                 "metric",
                 TelemetryValue::Gauge(i as f64),
             );
-            collector.record(&key_for(&point), &point);
+            collector.record(&key_for("snmp", &point), &point);
         }
 
         assert_eq!(collector.series_count(), 2);
@@ -1454,20 +1363,15 @@ mod tests {
         // snmp/modbus/gnmi/netflow are the producers with a rest-var
         // catch-all, so any metric name resolves — which is what this test
         // needs, since it is about counting and not about naming.
-        let p = make_point("sw1", Protocol::Snmp, "load", TelemetryValue::Gauge(1.0));
-        collector.record(&key_for(&p), &p);
+        let p = make_point("sw1", "load", TelemetryValue::Gauge(1.0));
+        collector.record(&key_for("snmp", &p), &p);
         assert_eq!(collector.series_count(), 1, "the innocent series landed");
 
         // The leaker: a fresh label value every time, which is how this
         // happens in the field.
         for i in 0..50 {
-            let p = make_point(
-                &format!("req{i}"),
-                Protocol::Netflow,
-                "flows",
-                TelemetryValue::Gauge(i as f64),
-            );
-            collector.record(&key_for(&p), &p);
+            let p = make_point(&format!("req{i}"), "flows", TelemetryValue::Gauge(i as f64));
+            collector.record(&key_for("snmp", &p), &p);
         }
 
         let held_by_leaker = collector
@@ -1487,13 +1391,8 @@ mod tests {
         );
 
         // THE POINT: a host that joins afterwards still exports.
-        let late = make_point(
-            "plc1",
-            Protocol::Modbus,
-            "holding/1",
-            TelemetryValue::Gauge(0.0),
-        );
-        collector.record(&key_for(&late), &late);
+        let late = make_point("plc1", "holding/1", TelemetryValue::Gauge(0.0));
+        collector.record(&key_for("modbus", &late), &late);
         assert!(
             collector
                 .metrics
@@ -1532,11 +1431,10 @@ mod tests {
         for i in 0..5 {
             let p = make_point(
                 &format!("dev{i}"),
-                Protocol::Snmp,
                 "metric",
                 TelemetryValue::Gauge(i as f64),
             );
-            collector.record(&key_for(&p), &p);
+            collector.record(&key_for("snmp", &p), &p);
         }
         assert_eq!(collector.series_count(), 5, "no capacity lost");
         assert!(collector.stats().series_refused_by_producer.is_empty());

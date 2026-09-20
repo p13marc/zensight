@@ -164,7 +164,6 @@ async fn legacy_bus_is_silent_and_v1_carries_everything() {
 
     let point = zensight_common::TelemetryPoint::new(
         "cutover-host",
-        zensight_common::Protocol::Netlink,
         "iface/eth0/rx_bytes",
         zensight_common::TelemetryValue::Counter(1),
     );

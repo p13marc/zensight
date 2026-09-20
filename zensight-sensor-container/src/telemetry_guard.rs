@@ -1,6 +1,6 @@
 //! Registry-checked telemetry-point construction (RFC 08 §5, issue #468).
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// Build one telemetry point, enforcing the subject registry.
 ///
@@ -27,7 +27,7 @@ pub(crate) fn checked_point(
     if let Err(e) = zensight_common::registry::kind_matches("container", &metric, &value) {
         debug_assert!(false, "{e}");
     }
-    TelemetryPoint::new(source, Protocol::Container, metric, value)
+    TelemetryPoint::new(source, metric, value)
 }
 
 #[cfg(test)]

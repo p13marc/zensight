@@ -12,7 +12,7 @@ use tokio_modbus::prelude::*;
 use tracing::{debug, error, info, warn};
 use zenoh::Session;
 use zensight_common::serialization::Format;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 /// Error type for polling operations.
 #[derive(Debug, thiserror::Error)]
@@ -474,7 +474,6 @@ impl ModbusPoller {
         let point = TelemetryPoint {
             timestamp: chrono::Utc::now().timestamp_millis(),
             source: self.device.name.clone(),
-            protocol: Protocol::Modbus,
             metric: metric_name,
             value,
             labels,

@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 use zensight_store::{MetricStore, PersistentStore};
 
 const ORIGIN: &str = "h-aabbccddeeff";
@@ -22,7 +22,6 @@ fn point(value: f64, ts: i64) -> TelemetryPoint {
     TelemetryPoint {
         timestamp: ts,
         source: "dev1".to_string(),
-        protocol: Protocol::Sysinfo,
         metric: "cpu/usage".to_string(),
         value: TelemetryValue::Gauge(value),
         labels: Default::default(),

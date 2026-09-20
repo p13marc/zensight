@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use nlink::netlink::events::NetworkEvent;
 use nlink::netlink::neigh::State as NeighborState;
 
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// The event families we track for counting. The RTNETLINK families
 /// (link/addr/route/neighbor + rule/nexthop/mdb/nsid, #323) come off the event
@@ -451,7 +451,6 @@ impl EventState {
                 let v = self.inner.counters[family.index()][action.index()].load(Ordering::Relaxed);
                 out.push(TelemetryPoint::new(
                     host,
-                    Protocol::Netlink,
                     format!("events/{}/{}_total", family.label(), action.label()),
                     TelemetryValue::Counter(v),
                 ));

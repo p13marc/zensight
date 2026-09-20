@@ -27,7 +27,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
-use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, decode_auto, encode};
+use zensight_common::{Format, TelemetryPoint, TelemetryValue, decode_auto, encode};
 
 /// A Zenoh config that cannot find another peer: multicast scouting and gossip
 /// both off, and no endpoints (#785).
@@ -77,12 +77,7 @@ async fn test_zenoh_pubsub_telemetry() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Create and publish a telemetry point
-    let point = TelemetryPoint::new(
-        "test-device",
-        Protocol::Snmp,
-        "test/metric",
-        TelemetryValue::Counter(42),
-    );
+    let point = TelemetryPoint::new("test-device", "test/metric", TelemetryValue::Counter(42));
 
     let publish_key = format!("{}/snmp/test-device/test/metric", prefix);
     let encoded = encode(&point, Format::Json).expect("Failed to encode");
@@ -103,7 +98,6 @@ async fn test_zenoh_pubsub_telemetry() {
     let decoded: TelemetryPoint = decode_auto(&payload).expect("Failed to decode");
 
     assert_eq!(decoded.source, "test-device");
-    assert_eq!(decoded.protocol, Protocol::Snmp);
     assert_eq!(decoded.metric, "test/metric");
     assert_eq!(decoded.value, TelemetryValue::Counter(42));
 
@@ -130,12 +124,7 @@ async fn test_zenoh_cbor_encoding() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish CBOR-encoded telemetry
-    let point = TelemetryPoint::new(
-        "cbor-device",
-        Protocol::Snmp,
-        "cbor/metric",
-        TelemetryValue::Gauge(2.5),
-    );
+    let point = TelemetryPoint::new("cbor-device", "cbor/metric", TelemetryValue::Gauge(2.5));
 
     let publish_key = format!("{}/snmp/cbor-device/cbor/metric", prefix);
     let encoded = encode(&point, Format::Cbor).expect("Failed to encode CBOR");
@@ -184,12 +173,7 @@ async fn test_zenoh_protocol_wildcard() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     // Publish SNMP telemetry (should be received)
-    let snmp_point = TelemetryPoint::new(
-        "snmp-device",
-        Protocol::Snmp,
-        "metric",
-        TelemetryValue::Counter(1),
-    );
+    let snmp_point = TelemetryPoint::new("snmp-device", "metric", TelemetryValue::Counter(1));
     let snmp_key = format!("{}/snmp/snmp-device/metric", prefix);
     let encoded = encode(&snmp_point, Format::Json).unwrap();
     session.put(&snmp_key, encoded).await.unwrap();
@@ -201,8 +185,7 @@ async fn test_zenoh_protocol_wildcard() {
         .unwrap();
 
     let payload = received.payload().to_bytes();
-    let decoded: TelemetryPoint = decode_auto(&payload).unwrap();
-    assert_eq!(decoded.protocol, Protocol::Snmp);
+    let _decoded: TelemetryPoint = decode_auto(&payload).unwrap();
 
     drop(subscriber);
     session.close().await.expect("Failed to close session");
@@ -230,12 +213,7 @@ async fn test_zenoh_multiple_publishers() {
     // Publish from multiple "devices"
     let devices = ["device1", "device2", "device3"];
     for device in &devices {
-        let point = TelemetryPoint::new(
-            *device,
-            Protocol::Snmp,
-            "metric",
-            TelemetryValue::Counter(1),
-        );
+        let point = TelemetryPoint::new(*device, "metric", TelemetryValue::Counter(1));
         let key = format!("{}/snmp/{}/metric", prefix, device);
         let encoded = encode(&point, Format::Json).unwrap();
         session.put(&key, encoded).await.unwrap();

@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use zenoh_ext::{AdvancedSubscriberBuilderExt, HistoryConfig, RecoveryConfig};
-use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{Format, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry};
 
 /// A `MakeWriter` that accumulates log output so the test can assert on it.
@@ -114,12 +114,7 @@ async fn late_publisher_detection_does_not_warn() {
     );
 
     for metric in ["tls/pq_ratio", "bandwidth/ntp/bytes_per_sec"] {
-        let point = TelemetryPoint::new(
-            "h-9706b31ddad3",
-            Protocol::Netring,
-            metric,
-            TelemetryValue::Gauge(1.0),
-        );
+        let point = TelemetryPoint::new("h-9706b31ddad3", metric, TelemetryValue::Gauge(1.0));
         registry.publish(metric, &point).await.expect("publish");
     }
     tokio::time::sleep(Duration::from_secs(2)).await;

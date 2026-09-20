@@ -18,7 +18,7 @@ use std::time::Instant;
 use tokio::net::{TcpListener, UdpSocket, UnixListener};
 use tokio::sync::mpsc;
 use tokio::time::Duration;
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 /// Received syslog message with source information.
 #[derive(Debug)]
@@ -857,7 +857,6 @@ pub fn to_telemetry_point(
     TelemetryPoint {
         timestamp,
         source: received.resolved_hostname.clone(),
-        protocol: Protocol::Logs,
         // Per-line event key (#104): unique uid kills last-writer-wins so every
         // line survives. Facility/severity now travel in labels, not the metric.
         metric: format!("events/{uid}"),

@@ -35,7 +35,7 @@ Rerun entity paths are the viewer's tree; they carry the correlation story.
 
 ## 2. `TelemetryPoint` → time series
 
-`TelemetryPoint { timestamp: i64 ms, source, protocol, metric, value, labels }`
+`TelemetryPoint { timestamp: i64 ms, source, metric, value, labels }` — the producer is the key's chunk 4, carried beside the point as `TelemetryItem.producer` (#1255)
 (`zensight-common/src/telemetry.rs`).
 
 | `TelemetryValue` | Mapping |

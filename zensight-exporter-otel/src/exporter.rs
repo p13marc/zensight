@@ -1718,17 +1718,11 @@ mod tests {
         };
         let filter = TelemetryFilter::new(&config);
 
-        let snmp_point =
-            TelemetryPoint::new("r1", Protocol::Snmp, "metric", TelemetryValue::Gauge(1.0));
-        let sysinfo_point = TelemetryPoint::new(
-            "s1",
-            Protocol::Sysinfo,
-            "metric",
-            TelemetryValue::Gauge(1.0),
-        );
+        let snmp_point = TelemetryPoint::new("r1", "metric", TelemetryValue::Gauge(1.0));
+        let sysinfo_point = TelemetryPoint::new("s1", "metric", TelemetryValue::Gauge(1.0));
 
-        assert!(filter.should_include(snmp_point.protocol.as_str(), &snmp_point));
-        assert!(!filter.should_include(sysinfo_point.protocol.as_str(), &sysinfo_point));
+        assert!(filter.should_include("snmp", &snmp_point));
+        assert!(!filter.should_include("sysinfo", &sysinfo_point));
     }
 
     #[test]
@@ -1739,21 +1733,11 @@ mod tests {
         };
         let filter = TelemetryFilter::new(&config);
 
-        let point1 = TelemetryPoint::new(
-            "test-device",
-            Protocol::Snmp,
-            "m",
-            TelemetryValue::Gauge(1.0),
-        );
-        let point2 = TelemetryPoint::new(
-            "prod-device",
-            Protocol::Snmp,
-            "m",
-            TelemetryValue::Gauge(1.0),
-        );
+        let point1 = TelemetryPoint::new("test-device", "m", TelemetryValue::Gauge(1.0));
+        let point2 = TelemetryPoint::new("prod-device", "m", TelemetryValue::Gauge(1.0));
 
-        assert!(!filter.should_include(point1.protocol.as_str(), &point1));
-        assert!(filter.should_include(point2.protocol.as_str(), &point2));
+        assert!(!filter.should_include("snmp", &point1));
+        assert!(filter.should_include("snmp", &point2));
     }
 
     // ---- OTLP wire assertions (#754) --------------------------------------
@@ -1776,7 +1760,6 @@ mod tests {
         TelemetryPoint {
             timestamp: 1_700_000_000_000,
             source: source.to_string(),
-            protocol: Protocol::Snmp,
             metric: metric.to_string(),
             value,
             labels: std::collections::HashMap::new(),

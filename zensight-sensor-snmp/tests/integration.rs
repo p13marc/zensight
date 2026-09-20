@@ -1,6 +1,6 @@
 //! Integration tests for zensight-sensor-snmp.
 
-use zensight_common::{Format, Protocol, TelemetryPoint, TelemetryValue, decode_auto, encode};
+use zensight_common::{Format, TelemetryPoint, TelemetryValue, decode_auto, encode};
 
 /// Test that we can encode telemetry and it would be decodable by the frontend.
 #[test]
@@ -8,7 +8,6 @@ fn test_snmp_telemetry_encoding() {
     // Simulate what the SNMP sensor produces
     let point = TelemetryPoint::new(
         "router01",
-        Protocol::Snmp,
         "system/sysUpTime",
         TelemetryValue::Counter(123456),
     )
@@ -41,27 +40,17 @@ fn test_snmp_key_expressions() {
 #[test]
 fn test_snmp_value_types() {
     // Counter32/Counter64 -> Counter
-    let counter_point = TelemetryPoint::new(
-        "device",
-        Protocol::Snmp,
-        "ifInOctets",
-        TelemetryValue::Counter(1234567890),
-    );
+    let counter_point =
+        TelemetryPoint::new("device", "ifInOctets", TelemetryValue::Counter(1234567890));
     assert!(matches!(counter_point.value, TelemetryValue::Counter(_)));
 
     // Gauge32 -> Gauge
-    let gauge_point = TelemetryPoint::new(
-        "device",
-        Protocol::Snmp,
-        "tcpCurrEstab",
-        TelemetryValue::Gauge(42.0),
-    );
+    let gauge_point = TelemetryPoint::new("device", "tcpCurrEstab", TelemetryValue::Gauge(42.0));
     assert!(matches!(gauge_point.value, TelemetryValue::Gauge(_)));
 
     // DisplayString -> Text
     let text_point = TelemetryPoint::new(
         "device",
-        Protocol::Snmp,
         "sysDescr",
         TelemetryValue::Text("Cisco IOS Software".to_string()),
     );
@@ -70,7 +59,6 @@ fn test_snmp_value_types() {
     // TimeTicks -> Counter (as centiseconds)
     let timeticks_point = TelemetryPoint::new(
         "device",
-        Protocol::Snmp,
         "sysUpTime",
         TelemetryValue::Counter(123456789), // centiseconds
     );

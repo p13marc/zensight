@@ -2128,7 +2128,6 @@ mod tests {
         let point = |ts: i64, v: u64| TelemetryPoint {
             timestamp: ts,
             source: "h".into(),
-            protocol: Protocol::Netlink,
             metric: "if/eth0/rx_bytes".into(),
             value: TelemetryValue::Counter(v),
             labels: Default::default(),

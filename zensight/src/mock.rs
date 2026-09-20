@@ -8,16 +8,10 @@ use std::collections::HashMap;
 use zensight_common::{HostEntity, MemberClaim, Protocol, TelemetryPoint, TelemetryValue};
 
 /// Generate a mock telemetry point.
-pub fn telemetry_point(
-    protocol: Protocol,
-    source: &str,
-    metric: &str,
-    value: TelemetryValue,
-) -> TelemetryPoint {
+pub fn telemetry_point(source: &str, metric: &str, value: TelemetryValue) -> TelemetryPoint {
     TelemetryPoint {
         timestamp: now_ms(),
         source: source.to_string(),
-        protocol,
         metric: metric.to_string(),
         value,
         labels: HashMap::new(),
@@ -27,7 +21,6 @@ pub fn telemetry_point(
 
 /// Generate a mock telemetry point with labels.
 pub fn telemetry_point_with_labels(
-    protocol: Protocol,
     source: &str,
     metric: &str,
     value: TelemetryValue,
@@ -36,7 +29,6 @@ pub fn telemetry_point_with_labels(
     TelemetryPoint {
         timestamp: now_ms(),
         source: source.to_string(),
-        protocol,
         metric: metric.to_string(),
         value,
         labels,
@@ -153,43 +145,28 @@ pub mod snmp {
     pub fn router(name: &str) -> Vec<TelemetryPoint> {
         vec![
             telemetry_point(
-                Protocol::Snmp,
                 name,
                 "system/uptime",
                 TelemetryValue::Gauge(86_400.0), // 1 day, seconds (#527)
             ),
+            telemetry_point(name, "system/name", TelemetryValue::Text(name.to_string())),
             telemetry_point(
-                Protocol::Snmp,
-                name,
-                "system/name",
-                TelemetryValue::Text(name.to_string()),
-            ),
-            telemetry_point(
-                Protocol::Snmp,
                 name,
                 "if/1/in_octets",
                 TelemetryValue::Counter(1_234_567_890),
             ),
             telemetry_point(
-                Protocol::Snmp,
                 name,
                 "if/1/out_octets",
                 TelemetryValue::Counter(987_654_321),
             ),
             telemetry_point(
-                Protocol::Snmp,
                 name,
                 "if/1/oper_status",
                 TelemetryValue::Gauge(1.0), // up
             ),
+            telemetry_point(name, "if/2/in_octets", TelemetryValue::Counter(555_666_777)),
             telemetry_point(
-                Protocol::Snmp,
-                name,
-                "if/2/in_octets",
-                TelemetryValue::Counter(555_666_777),
-            ),
-            telemetry_point(
-                Protocol::Snmp,
                 name,
                 "if/2/out_octets",
                 TelemetryValue::Counter(111_222_333),
@@ -200,7 +177,6 @@ pub mod snmp {
     /// Generate mock switch telemetry.
     pub fn switch(name: &str, port_count: u32) -> Vec<TelemetryPoint> {
         let mut points = vec![telemetry_point(
-            Protocol::Snmp,
             name,
             "system/uptime",
             TelemetryValue::Gauge(172_800.0), // 2 days, seconds (#527)
@@ -208,13 +184,11 @@ pub mod snmp {
 
         for port in 1..=port_count {
             points.push(telemetry_point(
-                Protocol::Snmp,
                 name,
                 &format!("if/{}/in_octets", port),
                 TelemetryValue::Counter((port as u64) * 1_000_000),
             ));
             points.push(telemetry_point(
-                Protocol::Snmp,
                 name,
                 &format!("if/{}/out_octets", port),
                 TelemetryValue::Counter((port as u64) * 500_000),
@@ -232,62 +206,36 @@ pub mod sysinfo {
     /// Generate mock host telemetry.
     pub fn host(name: &str) -> Vec<TelemetryPoint> {
         vec![
+            telemetry_point(name, "cpu/usage", TelemetryValue::Gauge(45.5)),
+            telemetry_point(name, "cpu/0/usage", TelemetryValue::Gauge(52.3)),
+            telemetry_point(name, "cpu/1/usage", TelemetryValue::Gauge(38.7)),
             telemetry_point(
-                Protocol::Sysinfo,
-                name,
-                "cpu/usage",
-                TelemetryValue::Gauge(45.5),
-            ),
-            telemetry_point(
-                Protocol::Sysinfo,
-                name,
-                "cpu/0/usage",
-                TelemetryValue::Gauge(52.3),
-            ),
-            telemetry_point(
-                Protocol::Sysinfo,
-                name,
-                "cpu/1/usage",
-                TelemetryValue::Gauge(38.7),
-            ),
-            telemetry_point(
-                Protocol::Sysinfo,
                 name,
                 "memory/used_bytes",
                 TelemetryValue::Gauge(8_589_934_592.0), // 8 GB
             ),
             telemetry_point(
-                Protocol::Sysinfo,
                 name,
                 "memory/total_bytes",
                 TelemetryValue::Gauge(17_179_869_184.0), // 16 GB
             ),
+            telemetry_point(name, "memory/usage_percent", TelemetryValue::Gauge(50.0)),
             telemetry_point(
-                Protocol::Sysinfo,
-                name,
-                "memory/usage_percent",
-                TelemetryValue::Gauge(50.0),
-            ),
-            telemetry_point(
-                Protocol::Sysinfo,
                 name,
                 "disk/root/used_bytes",
                 TelemetryValue::Gauge(107_374_182_400.0), // 100 GB
             ),
             telemetry_point(
-                Protocol::Sysinfo,
                 name,
                 "disk/root/total_bytes",
                 TelemetryValue::Gauge(536_870_912_000.0), // 500 GB
             ),
             telemetry_point(
-                Protocol::Sysinfo,
                 name,
                 "network/eth0/rx_bytes",
                 TelemetryValue::Counter(1_073_741_824), // 1 GB
             ),
             telemetry_point(
-                Protocol::Sysinfo,
                 name,
                 "network/eth0/tx_bytes",
                 TelemetryValue::Counter(536_870_912), // 512 MB
@@ -322,7 +270,6 @@ pub mod syslog {
             let uid = format!("{:013}{:012}", 0, seq);
             labels.insert("log.record.uid".to_string(), uid.clone());
             telemetry_point_with_labels(
-                Protocol::Logs,
                 name,
                 &format!("events/{uid}"),
                 TelemetryValue::Text(msg.to_string()),
@@ -359,64 +306,43 @@ pub mod netlink {
         labels.insert("ifindex".to_string(), "2".to_string());
         vec![
             telemetry_point_with_labels(
-                Protocol::Netlink,
                 name,
                 "iface/eth0/rx_bytes",
                 TelemetryValue::Counter(1_073_741_824),
                 labels.clone(),
             ),
             telemetry_point_with_labels(
-                Protocol::Netlink,
                 name,
                 "iface/eth0/tx_bytes",
                 TelemetryValue::Counter(536_870_912),
                 labels.clone(),
             ),
             telemetry_point_with_labels(
-                Protocol::Netlink,
                 name,
                 "iface/eth0/up",
                 TelemetryValue::Boolean(true),
                 labels,
             ),
             telemetry_point(
-                Protocol::Netlink,
                 name,
                 "sockets/tcp/established",
                 TelemetryValue::Gauge(120.0),
             ),
-            telemetry_point(
-                Protocol::Netlink,
-                name,
-                "sockets/tcp/listen",
-                TelemetryValue::Gauge(12.0),
-            ),
-            telemetry_point(
-                Protocol::Netlink,
-                name,
-                "routes/total",
-                TelemetryValue::Gauge(20.0),
-            ),
+            telemetry_point(name, "sockets/tcp/listen", TelemetryValue::Gauge(12.0)),
+            telemetry_point(name, "routes/total", TelemetryValue::Gauge(20.0)),
             // Default gateway (#391): drives the topology's Gateway edges +
             // wire-only router node in --demo.
             telemetry_point(
-                Protocol::Netlink,
                 name,
                 "routes/default_v4_present",
                 TelemetryValue::Boolean(true),
             ),
             telemetry_point(
-                Protocol::Netlink,
                 name,
                 "routes/default_v4_gw",
                 TelemetryValue::Text("10.0.0.254".to_string()),
             ),
-            telemetry_point(
-                Protocol::Netlink,
-                name,
-                "neighbors/total",
-                TelemetryValue::Gauge(18.0),
-            ),
+            telemetry_point(name, "neighbors/total", TelemetryValue::Gauge(18.0)),
         ]
     }
 }
@@ -538,76 +464,41 @@ pub mod netring {
         let mut bw_labels = HashMap::new();
         bw_labels.insert("app".to_string(), "https".to_string());
         vec![
+            telemetry_point(name, "flow/active", TelemetryValue::Gauge(240.0)),
             telemetry_point(
-                Protocol::Netring,
-                name,
-                "flow/active",
-                TelemetryValue::Gauge(240.0),
-            ),
-            telemetry_point(
-                Protocol::Netring,
                 name,
                 "flow/bytes_total",
                 TelemetryValue::Counter(12_884_901_888),
             ),
             telemetry_point(
-                Protocol::Netring,
                 name,
                 "flow/by_l4/tcp/flows_total",
                 TelemetryValue::Counter(4_096),
             ),
             telemetry_point_with_labels(
-                Protocol::Netring,
                 name,
                 "bandwidth/https/bytes_per_sec",
                 TelemetryValue::Gauge(6_000_000.0),
                 bw_labels,
             ),
-            telemetry_point(
-                Protocol::Netring,
-                name,
-                "dns/queries_total",
-                TelemetryValue::Counter(8_192),
-            ),
-            telemetry_point(
-                Protocol::Netring,
-                name,
-                "tls/handshakes_total",
-                TelemetryValue::Counter(2_048),
-            ),
+            telemetry_point(name, "dns/queries_total", TelemetryValue::Counter(8_192)),
+            telemetry_point(name, "tls/handshakes_total", TelemetryValue::Counter(2_048)),
             // Capture self-health (#227/#224): resolved backend + a per-NIC leg
             // with a light, non-overload drop rate so the GUI's capture panel and
             // backend badge render in demo mode.
             telemetry_point(
-                Protocol::Netring,
                 name,
                 "capture/backend",
                 TelemetryValue::Text("af_packet".to_string()),
             ),
             telemetry_point(
-                Protocol::Netring,
                 name,
                 "capture/0/packets",
                 TelemetryValue::Counter(1_048_576),
             ),
-            telemetry_point(
-                Protocol::Netring,
-                name,
-                "capture/0/drops",
-                TelemetryValue::Counter(2_100),
-            ),
-            telemetry_point(
-                Protocol::Netring,
-                name,
-                "capture/0/drop_rate",
-                TelemetryValue::Gauge(0.002),
-            ),
-            telemetry_point(
-                Protocol::Netring,
-                name,
-                "capture/focus/packets",
-                TelemetryValue::Counter(512),
-            ),
+            telemetry_point(name, "capture/0/drops", TelemetryValue::Counter(2_100)),
+            telemetry_point(name, "capture/0/drop_rate", TelemetryValue::Gauge(0.002)),
+            telemetry_point(name, "capture/focus/packets", TelemetryValue::Counter(512)),
         ]
     }
 }
@@ -624,14 +515,12 @@ pub mod netflow {
         labels.insert("protocol".to_string(), "tcp".to_string());
         vec![
             telemetry_point_with_labels(
-                Protocol::Netflow,
                 name,
                 "10.0.0.50/93.184.216.34/tcp",
                 TelemetryValue::Counter(2_500_000),
                 labels.clone(),
             ),
             telemetry_point_with_labels(
-                Protocol::Netflow,
                 name,
                 "10.0.0.52/10.0.0.20/tcp",
                 TelemetryValue::Counter(1_200_000),
@@ -649,13 +538,11 @@ pub mod gnmi {
     pub fn target(name: &str) -> Vec<TelemetryPoint> {
         vec![
             telemetry_point(
-                Protocol::Gnmi,
                 name,
                 "interfaces/interface[name=eth0]/state/counters/in-octets",
                 TelemetryValue::Counter(1_073_741_824),
             ),
             telemetry_point(
-                Protocol::Gnmi,
                 name,
                 "interfaces/interface[name=eth0]/state/oper-status",
                 TelemetryValue::Text("UP".to_string()),
@@ -741,30 +628,10 @@ pub mod parallax {
     /// demo mode (mirrors the sensor's stats ticker keys).
     pub fn host(name: &str) -> Vec<TelemetryPoint> {
         vec![
-            telemetry_point(
-                Protocol::Parallax,
-                name,
-                "streams/advertised",
-                TelemetryValue::Gauge(3.0),
-            ),
-            telemetry_point(
-                Protocol::Parallax,
-                name,
-                "door/stats/fps",
-                TelemetryValue::Gauge(15.2),
-            ),
-            telemetry_point(
-                Protocol::Parallax,
-                name,
-                "door/stats/kbps",
-                TelemetryValue::Gauge(1850.0),
-            ),
-            telemetry_point(
-                Protocol::Parallax,
-                name,
-                "door/stats/viewers",
-                TelemetryValue::Gauge(1.0),
-            ),
+            telemetry_point(name, "streams/advertised", TelemetryValue::Gauge(3.0)),
+            telemetry_point(name, "door/stats/fps", TelemetryValue::Gauge(15.2)),
+            telemetry_point(name, "door/stats/kbps", TelemetryValue::Gauge(1850.0)),
+            telemetry_point(name, "door/stats/viewers", TelemetryValue::Gauge(1.0)),
         ]
     }
 }
@@ -775,36 +642,11 @@ pub mod modbus {
     /// Generate mock PLC telemetry.
     pub fn plc(name: &str) -> Vec<TelemetryPoint> {
         vec![
-            telemetry_point(
-                Protocol::Modbus,
-                name,
-                "holding/0",
-                TelemetryValue::Gauge(1234.0),
-            ),
-            telemetry_point(
-                Protocol::Modbus,
-                name,
-                "holding/1",
-                TelemetryValue::Gauge(5678.0),
-            ),
-            telemetry_point(
-                Protocol::Modbus,
-                name,
-                "coil/0",
-                TelemetryValue::Boolean(true),
-            ),
-            telemetry_point(
-                Protocol::Modbus,
-                name,
-                "coil/1",
-                TelemetryValue::Boolean(false),
-            ),
-            telemetry_point(
-                Protocol::Modbus,
-                name,
-                "input/0",
-                TelemetryValue::Gauge(42.0),
-            ),
+            telemetry_point(name, "holding/0", TelemetryValue::Gauge(1234.0)),
+            telemetry_point(name, "holding/1", TelemetryValue::Gauge(5678.0)),
+            telemetry_point(name, "coil/0", TelemetryValue::Boolean(true)),
+            telemetry_point(name, "coil/1", TelemetryValue::Boolean(false)),
+            telemetry_point(name, "input/0", TelemetryValue::Gauge(42.0)),
         ]
     }
 }
@@ -1035,36 +877,40 @@ pub fn host_entities() -> Vec<HostEntity> {
 /// Every point rides with the producer it is published under (#1255) — on
 /// the wire that is the key's chunk 4, which the point itself does not carry.
 pub fn mock_environment() -> Vec<(Protocol, TelemetryPoint)> {
+    // Each mock module is one producer; the tag is what the wire key would say.
+    fn tag(p: Protocol, points: Vec<TelemetryPoint>) -> Vec<(Protocol, TelemetryPoint)> {
+        points.into_iter().map(|pt| (p, pt)).collect()
+    }
     let mut points = Vec::new();
 
     // Network devices
-    points.extend(snmp::router("router01"));
-    points.extend(snmp::router("router02"));
-    points.extend(snmp::switch("switch01", 24));
+    points.extend(tag(Protocol::Snmp, snmp::router("router01")));
+    points.extend(tag(Protocol::Snmp, snmp::router("router02")));
+    points.extend(tag(Protocol::Snmp, snmp::switch("switch01", 24)));
 
     // Servers
-    points.extend(sysinfo::host("server01"));
-    points.extend(sysinfo::host("server02"));
-    points.extend(syslog::server("server01"));
+    points.extend(tag(Protocol::Sysinfo, sysinfo::host("server01")));
+    points.extend(tag(Protocol::Sysinfo, sysinfo::host("server02")));
+    points.extend(tag(Protocol::Logs, syslog::server("server01")));
 
     // Linux kernel networking (netlink runs on the hosts)
-    points.extend(netlink::host("server01"));
-    points.extend(netlink::host("server02"));
+    points.extend(tag(Protocol::Netlink, netlink::host("server01")));
+    points.extend(tag(Protocol::Netlink, netlink::host("server02")));
 
     // Passive flow monitoring + flow export + streamed telemetry
-    points.extend(netring::probe("netprobe01"));
-    points.extend(netflow::exporter("edge-fw"));
-    points.extend(gnmi::target("router01"));
+    points.extend(tag(Protocol::Netring, netring::probe("netprobe01")));
+    points.extend(tag(Protocol::Netflow, netflow::exporter("edge-fw")));
+    points.extend(tag(Protocol::Gnmi, gnmi::target("router01")));
 
     // Industrial devices
-    points.extend(modbus::plc("plc01"));
+    points.extend(tag(Protocol::Modbus, modbus::plc("plc01")));
 
     // Live media (parallax): stats telemetry makes the camera host's device
     // card appear, so the stream catalogue + tile views are reachable in
     // demo (demo mirrors the wire contract).
-    points.extend(parallax::host("camhost01"));
+    points.extend(tag(Protocol::Parallax, parallax::host("camhost01")));
 
-    points.into_iter().map(|p| (p.protocol, p)).collect()
+    points
 }
 
 #[cfg(test)]
@@ -1093,7 +939,6 @@ mod tests {
     fn test_snmp_router_metrics() {
         let points = snmp::router("test-router");
         assert!(!points.is_empty());
-        assert!(points.iter().all(|p| p.protocol == Protocol::Snmp));
         assert!(points.iter().all(|p| p.source == "test-router"));
     }
 

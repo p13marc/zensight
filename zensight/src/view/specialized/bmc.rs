@@ -292,12 +292,7 @@ mod tests {
         for (metric, v) in metrics {
             state.metrics.insert(
                 (*metric).to_string(),
-                TelemetryPoint::new(
-                    "bmc01",
-                    Protocol::Bmc,
-                    (*metric).to_string(),
-                    TelemetryValue::Gauge(*v),
-                ),
+                TelemetryPoint::new("bmc01", (*metric).to_string(), TelemetryValue::Gauge(*v)),
             );
         }
         state

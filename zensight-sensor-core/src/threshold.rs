@@ -537,12 +537,7 @@ mod tests {
     use zensight_common::comparison::ComparisonOp;
 
     fn point(metric: &str, value: f64) -> TelemetryPoint {
-        TelemetryPoint::new(
-            "web01",
-            Protocol::Sysinfo,
-            metric,
-            TelemetryValue::Gauge(value),
-        )
+        TelemetryPoint::new("web01", metric, TelemetryValue::Gauge(value))
     }
 
     /// `decide` is pure with respect to the channel — only `observe_point`
@@ -814,12 +809,7 @@ mod tests {
             ComparisonOp::LessThan,
             1.0,
         )]);
-        let p = TelemetryPoint::new(
-            "web01",
-            Protocol::Sysinfo,
-            "link/up",
-            TelemetryValue::Boolean(false),
-        );
+        let p = TelemetryPoint::new("web01", "link/up", TelemetryValue::Boolean(false));
         assert!(firing_alert(&e.decide(&p)).is_some());
     }
 

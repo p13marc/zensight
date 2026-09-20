@@ -1045,8 +1045,8 @@ mod outlet_tests {
 
     use super::*;
     use std::collections::HashMap;
+    use zensight_common::TelemetryPoint;
     use zensight_common::outlet::{OutletCapability, OutletVerb};
-    use zensight_common::{Protocol, TelemetryPoint};
 
     fn cap(enabled: bool, allow: &[&str]) -> OutletCapability {
         OutletCapability {
@@ -1060,7 +1060,7 @@ mod outlet_tests {
     fn point(metric: &str, value: TelemetryValue) -> (String, TelemetryPoint) {
         (
             metric.to_string(),
-            TelemetryPoint::new("pdu-a", Protocol::Snmp, metric, value),
+            TelemetryPoint::new("pdu-a", metric, value),
         )
     }
 
@@ -1149,7 +1149,6 @@ mod outlet_tests {
             "system/profile".to_string(),
             TelemetryPoint::new(
                 "pdu-a",
-                Protocol::Snmp,
                 "system/profile",
                 TelemetryValue::Text("generic-device,pdu-eaton".into()),
             ),

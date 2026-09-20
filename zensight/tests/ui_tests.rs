@@ -259,7 +259,6 @@ fn test_global_search_panel_results() {
         zensight_common::TelemetryPoint {
             timestamp: 0,
             source: "router01".to_string(),
-            protocol: Protocol::Snmp,
             metric: "queue/depth".to_string(),
             value: zensight_common::TelemetryValue::Gauge(7.0),
             labels: HashMap::new(),
@@ -834,7 +833,6 @@ fn test_metric_promote_to_alert() {
     let mut p = zensight_common::TelemetryPoint {
         timestamp: 0,
         source: "server01".to_string(),
-        protocol: Protocol::Sysinfo,
         metric: "cpu/usage".to_string(),
         value: TelemetryValue::Gauge(91.0),
         labels: HashMap::new(),
@@ -870,7 +868,6 @@ fn test_sysinfo_depth_cards() {
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
             source: "server01".to_string(),
-            protocol: Protocol::Sysinfo,
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(v),
             labels: HashMap::new(),
@@ -899,7 +896,6 @@ fn test_netlink_tc_panel() {
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
             source: "gw01".to_string(),
-            protocol: Protocol::Netlink,
             metric: metric.to_string(),
             value: TelemetryValue::Counter(v),
             labels: HashMap::new(),
@@ -928,7 +924,6 @@ fn test_netlink_depth_cards() {
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
             source: "gw01".to_string(),
-            protocol: Protocol::Netlink,
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(v),
             labels: HashMap::new(),
@@ -965,7 +960,6 @@ fn test_netring_red_cards() {
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
             source: "sensor01".to_string(),
-            protocol: Protocol::Netring,
             metric: metric.to_string(),
             value: TelemetryValue::Counter(v as u64),
             labels: HashMap::new(),
@@ -1202,7 +1196,6 @@ fn test_syslog_specialized_view() {
     // Add a syslog message
     let mut point = TelemetryPoint::new(
         "server01",
-        Protocol::Logs,
         "message/1",
         TelemetryValue::Text("Test log message".to_string()),
     );
@@ -1233,7 +1226,6 @@ fn test_modbus_specialized_view() {
     // Add a holding register
     let point = TelemetryPoint::new(
         "plc01",
-        Protocol::Modbus,
         "holding/40001/temperature",
         TelemetryValue::Gauge(72.5),
     );
@@ -1258,12 +1250,7 @@ fn test_netflow_specialized_view() {
     let mut state = DeviceDetailState::new(device_id);
 
     // Add a flow record
-    let mut point = TelemetryPoint::new(
-        "router01",
-        Protocol::Netflow,
-        "flow/1",
-        TelemetryValue::Counter(1000),
-    );
+    let mut point = TelemetryPoint::new("router01", "flow/1", TelemetryValue::Counter(1000));
     point
         .labels
         .insert("src_ip".to_string(), "10.0.0.1".to_string());
@@ -1296,7 +1283,6 @@ fn test_gnmi_specialized_view() {
     // Add a gNMI path
     let point = TelemetryPoint::new(
         "spine01",
-        Protocol::Gnmi,
         "interfaces/interface/state/name",
         TelemetryValue::Text("eth0".to_string()),
     );
@@ -1397,12 +1383,7 @@ fn test_overview_section_renders() {
     device.is_healthy = true;
 
     // Add actual telemetry points
-    let point = TelemetryPoint::new(
-        "server01",
-        Protocol::Sysinfo,
-        "cpu/usage",
-        TelemetryValue::Gauge(45.0),
-    );
+    let point = TelemetryPoint::new("server01", "cpu/usage", TelemetryValue::Gauge(45.0));
     device.metrics.insert("cpu/usage".to_string(), point);
 
     state.devices.insert(device_id, device);
@@ -1448,12 +1429,7 @@ fn test_overview_protocol_tab_click() {
     device.metric_count = 1;
     device.is_healthy = true;
 
-    let point = TelemetryPoint::new(
-        "router01",
-        Protocol::Snmp,
-        "ifAdminStatus/1",
-        TelemetryValue::Counter(1),
-    );
+    let point = TelemetryPoint::new("router01", "ifAdminStatus/1", TelemetryValue::Counter(1));
     device.metrics.insert("ifAdminStatus/1".to_string(), point);
 
     state.devices.insert(device_id, device);
@@ -1503,12 +1479,7 @@ fn test_overview_collapse_toggle() {
     let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01".to_string());
     let mut device = DeviceState::new(device_id.clone());
 
-    let point = TelemetryPoint::new(
-        "server01",
-        Protocol::Sysinfo,
-        "cpu/usage",
-        TelemetryValue::Gauge(50.0),
-    );
+    let point = TelemetryPoint::new("server01", "cpu/usage", TelemetryValue::Gauge(50.0));
     device.metrics.insert("cpu/usage".to_string(), point);
 
     state.devices.insert(device_id, device);
@@ -2189,7 +2160,6 @@ fn test_specialized_device_view_has_back_button() {
     let mut state = DeviceDetailState::new(device_id);
     state.update(TelemetryPoint::new(
         "router01",
-        Protocol::Netlink,
         "iface/eth0/rx_bytes",
         TelemetryValue::Counter(1000),
     ));
@@ -2231,12 +2201,7 @@ fn test_netlink_specialized_view() {
         ("routes/ipv4_count", TelemetryValue::Gauge(5.0)),
         ("routes/default_v4_present", TelemetryValue::Boolean(true)),
     ] {
-        state.update(TelemetryPoint::new(
-            "router01",
-            Protocol::Netlink,
-            metric,
-            value,
-        ));
+        state.update(TelemetryPoint::new("router01", metric, value));
     }
 
     // Pre-populate an on-demand fetched socket detail table (as if the query
@@ -2343,12 +2308,7 @@ fn test_netring_specialized_view() {
         ),
         ("bandwidth/dns/bytes_per_sec", TelemetryValue::Gauge(1200.0)),
     ] {
-        state.update(TelemetryPoint::new(
-            "wiretap1",
-            Protocol::Netring,
-            metric,
-            value,
-        ));
+        state.update(TelemetryPoint::new("wiretap1", metric, value));
     }
 
     // Pre-populate on-demand flow detail (as if @rpc/netring/flows had replied).
@@ -2473,18 +2433,12 @@ fn test_netlink_netring_overviews_render() {
     let mut nl = DeviceState::new(nl_id.clone());
     nl.metrics.insert(
         "iface/eth0/up".into(),
-        TelemetryPoint::new(
-            "router01",
-            Protocol::Netlink,
-            "iface/eth0/up",
-            TelemetryValue::Boolean(true),
-        ),
+        TelemetryPoint::new("router01", "iface/eth0/up", TelemetryValue::Boolean(true)),
     );
     nl.metrics.insert(
         "sockets/tcp/established".into(),
         TelemetryPoint::new(
             "router01",
-            Protocol::Netlink,
             "sockets/tcp/established",
             TelemetryValue::Gauge(7.0),
         ),
@@ -2499,21 +2453,11 @@ fn test_netlink_netring_overviews_render() {
     let mut nr = DeviceState::new(nr_id.clone());
     nr.metrics.insert(
         "flow/active".into(),
-        TelemetryPoint::new(
-            "wiretap1",
-            Protocol::Netring,
-            "flow/active",
-            TelemetryValue::Gauge(3.0),
-        ),
+        TelemetryPoint::new("wiretap1", "flow/active", TelemetryValue::Gauge(3.0)),
     );
     nr.metrics.insert(
         "tcp/resets_total".into(),
-        TelemetryPoint::new(
-            "wiretap1",
-            Protocol::Netring,
-            "tcp/resets_total",
-            TelemetryValue::Counter(5),
-        ),
+        TelemetryPoint::new("wiretap1", "tcp/resets_total", TelemetryValue::Counter(5)),
     );
     let nr_map: HashMap<&DeviceId, &DeviceState> = std::iter::once((&nr_id, &nr)).collect();
     let mut ui = simulator(netring_overview(&nr_map));
@@ -2911,7 +2855,6 @@ fn test_netlink_conntrack_wireguard_sections() {
     // Without conntrack/wireguard metrics: sections absent.
     state.update(TelemetryPoint::new(
         "gw01",
-        Protocol::Netlink,
         "iface/eth0/up",
         TelemetryValue::Boolean(true),
     ));
@@ -2933,7 +2876,7 @@ fn test_netlink_conntrack_wireguard_sections() {
         ),
         ("wireguard/wg0/abcd1234/up", TelemetryValue::Boolean(true)),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
     // #258: conntrack now lives under the Firewall & IPsec tab, WireGuard under
     // its own (now-visible) tab.
@@ -2965,7 +2908,6 @@ fn test_netlink_tabs_capability_and_switch() {
     // Bare host: only base metrics, no tc/xfrm/conntrack/wireguard.
     state.update(TelemetryPoint::new(
         "gw01",
-        Protocol::Netlink,
         "iface/eth0/up",
         TelemetryValue::Boolean(true),
     ));
@@ -2987,7 +2929,7 @@ fn test_netlink_tabs_capability_and_switch() {
         ("xfrm/sa/total", TelemetryValue::Gauge(2.0)),
         ("wireguard/wg0/peers", TelemetryValue::Gauge(1.0)),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
     {
         let mut ui = simulator(netlink_host_view(&state));
@@ -3024,13 +2966,12 @@ fn test_netlink_wireguard_tab() {
         ),
         ("wireguard/wg0/abcd1234/up", TelemetryValue::Boolean(true)),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
     // rx_bytes carries the wg-quick AllowedIPs enrichment label (#268).
     state.update(
         TelemetryPoint::new(
             "gw01",
-            Protocol::Netlink,
             "wireguard/wg0/abcd1234/rx_bytes",
             TelemetryValue::Counter(1000),
         )
@@ -3064,7 +3005,6 @@ fn test_netlink_events_tab() {
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Events;
     state.update(TelemetryPoint::new(
         "gw01",
-        Protocol::Netlink,
         "events/link/added_total",
         TelemetryValue::Counter(4),
     ));
@@ -3114,7 +3054,7 @@ fn test_netlink_firewall_tab() {
         ("conntrack/by_proto/tcp", TelemetryValue::Gauge(80.0)),
         ("xfrm/sa/total", TelemetryValue::Gauge(1.0)),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
     state.netlink_detail.apply(
         NetlinkDetailTopic::Nft,
@@ -3159,7 +3099,7 @@ fn test_netlink_qos_tab() {
         ("tc/eth0/fq_codel/health_score", TelemetryValue::Gauge(0.9)),
         ("tc/eth0/aqm_class", TelemetryValue::Text("aqm".into())),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
 
     let mut ui = simulator(netlink_host_view(&state));
@@ -3188,7 +3128,7 @@ fn test_netlink_routing_tab() {
         ("neighbors/by_state/reachable", TelemetryValue::Gauge(3.0)),
         ("neighbors/by_state/stale", TelemetryValue::Gauge(1.0)),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
     state.netlink_detail.apply(
         NetlinkDetailTopic::Routes,
@@ -3232,7 +3172,7 @@ fn test_netlink_interfaces_tab_and_pivot() {
         ("ethtool/eth0/speed_mbps", TelemetryValue::Gauge(1000.0)),
         ("ethtool/eth0/fec/modes", TelemetryValue::Text("RS".into())),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
 
     let mut ui = simulator(netlink_host_view(&state));
@@ -3275,7 +3215,7 @@ fn test_netlink_overview_hero() {
         ("neighbors/total", TelemetryValue::Gauge(8.0)),
         ("neighbors/by_state/failed", TelemetryValue::Gauge(2.0)),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
 
     let mut ui = simulator(netlink_host_view(&state));
@@ -3376,7 +3316,6 @@ fn test_netlink_sockets_ebpf_section() {
     // A socket aggregate so the Sockets tab renders its base content.
     state.update(TelemetryPoint::new(
         "gw01",
-        Protocol::Netlink,
         "sockets/tcp/established",
         TelemetryValue::Gauge(3.0),
     ));
@@ -3392,7 +3331,7 @@ fn test_netlink_sockets_ebpf_section() {
         ("sockets/tcp/connlat_us_p50", TelemetryValue::Gauge(120.0)),
         ("sockets/tcp/connlat_us_p95", TelemetryValue::Gauge(950.0)),
     ] {
-        state.update(TelemetryPoint::new("gw01", Protocol::Netlink, m, v));
+        state.update(TelemetryPoint::new("gw01", m, v));
     }
     state.netlink_detail.apply(
         NetlinkDetailTopic::Retransmits,
@@ -3459,7 +3398,7 @@ fn test_netring_tls_capture_sections() {
         ("capture/0/drops", TelemetryValue::Counter(5)),
         ("capture/0/drop_rate", TelemetryValue::Gauge(0.0001)),
     ] {
-        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+        state.update(TelemetryPoint::new("wiretap1", m, v));
     }
     // Pre-populate the fetched TLS inventory.
     state.netring_detail.apply_tls(Ok(vec![TlsRecord {
@@ -3513,7 +3452,7 @@ fn test_netring_encrypted_dns_panel() {
         ("dns/encrypted/dot", TelemetryValue::Counter(3)),
         ("dns/encrypted/unknown_resolver", TelemetryValue::Counter(4)),
     ] {
-        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+        state.update(TelemetryPoint::new("wiretap1", m, v));
     }
     let mut ui = simulator(netring_sensor_view(&state, None));
     assert!(ui.find("Encrypted DNS").is_ok());
@@ -3535,7 +3474,7 @@ fn test_netring_quic_ssh_sections() {
         ("quic/distinct_sni", TelemetryValue::Gauge(5.0)),
         ("ssh/distinct_hassh", TelemetryValue::Gauge(3.0)),
     ] {
-        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+        state.update(TelemetryPoint::new("wiretap1", m, v));
     }
     state.netring_detail.apply_quic(Ok(vec![QuicRecord {
         sni: Some("cloudflare-quic.com".into()),
@@ -3582,7 +3521,7 @@ fn test_netring_capture_overload_and_breakdown() {
         ("capture/0/freezes", TelemetryValue::Counter(4)),
         ("capture/0/xdp/rx_ring_full", TelemetryValue::Counter(120)),
     ] {
-        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+        state.update(TelemetryPoint::new("wiretap1", m, v));
     }
 
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
@@ -3617,7 +3556,7 @@ fn test_netring_capture_backend_and_shedding() {
         // capture/focus must not appear as a per-source row.
         ("capture/focus/packets", TelemetryValue::Counter(42)),
     ] {
-        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+        state.update(TelemetryPoint::new("wiretap1", m, v));
     }
 
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Capture;
@@ -3683,7 +3622,6 @@ fn test_netring_assets_section() {
     let mut state = DeviceDetailState::new(device_id);
     state.update(TelemetryPoint::new(
         "wiretap1",
-        Protocol::Netring,
         "assets/discovered",
         TelemetryValue::Gauge(2.0),
     ));
@@ -3737,7 +3675,6 @@ fn test_netring_tabs_capability_and_switch() {
     // Add a dns/ metric → the DNS tab becomes visible.
     state.update(TelemetryPoint::new(
         "wiretap1",
-        Protocol::Netring,
         "dns/queries_total",
         TelemetryValue::Counter(1),
     ));
@@ -3833,7 +3770,7 @@ fn test_netring_overview_chip_and_talkers_tab() {
         ("capture/0/packets", TelemetryValue::Counter(1000)),
         ("capture/0/drop_rate", TelemetryValue::Gauge(0.0)),
     ] {
-        state.update(TelemetryPoint::new("wiretap1", Protocol::Netring, m, v));
+        state.update(TelemetryPoint::new("wiretap1", m, v));
     }
     // Overview: capture-health chip present.
     {
@@ -3866,7 +3803,6 @@ fn test_logs_view_renders_lines() {
     let point = TelemetryPoint {
         timestamp: 1_700_000_000_000,
         source: "host01".to_string(),
-        protocol: Protocol::Logs,
         metric: "auth/crit".to_string(),
         value: TelemetryValue::Text("INTRUDER ALERT from 10.0.0.9".to_string()),
         labels: HashMap::new(),
@@ -3895,7 +3831,6 @@ fn test_logs_unit_filter_and_source_badge() {
     let point = TelemetryPoint {
         timestamp: 1_700_000_000_000,
         source: "host01".to_string(),
-        protocol: Protocol::Logs,
         metric: "daemon/err".to_string(),
         value: TelemetryValue::Text("upstream timed out".to_string()),
         labels,
@@ -3987,7 +3922,6 @@ fn log_line(ts: i64, message: &str) -> zensight::view::specialized::SyslogMessag
     let point = TelemetryPoint {
         timestamp: ts,
         source: "web01".to_string(),
-        protocol: Protocol::Logs,
         metric: "daemon/info".to_string(),
         value: TelemetryValue::Text(message.to_string()),
         labels,
@@ -4203,7 +4137,7 @@ fn test_logs_rollup_panel_renders() {
             TelemetryValue::Counter(900),
         ),
     ] {
-        state.update(TelemetryPoint::new("host01", Protocol::Logs, m, v));
+        state.update(TelemetryPoint::new("host01", m, v));
     }
 
     // Collapsed by default (#350): the header renders, the rollup detail
@@ -4249,7 +4183,6 @@ fn test_logs_rollup_show_all_units() {
     ] {
         state.update(TelemetryPoint::new(
             "host01",
-            Protocol::Logs,
             format!("by_unit/{unit}/messages_total"),
             TelemetryValue::Counter(n),
         ));
@@ -4460,7 +4393,6 @@ fn test_syslog_device_shows_host_history() {
         let p = TelemetryPoint {
             timestamp: 1,
             source: "host9".to_string(),
-            protocol: Protocol::Logs,
             metric: "daemon/err".to_string(),
             value: TelemetryValue::Text(msg.to_string()),
             labels: HashMap::new(),
@@ -4496,7 +4428,6 @@ fn test_systemd_specialized_view_tabs() {
     ] {
         state.update(TelemetryPoint::new(
             "server01",
-            Protocol::Systemd,
             metric,
             TelemetryValue::Gauge(v),
         ));
@@ -5320,7 +5251,6 @@ fn netring_capture_tab_hosts_capture_form() {
     // A capture/ metric so the tab is visible even without the advert path.
     state.update(zensight_common::TelemetryPoint::new(
         "host01",
-        Protocol::Netring,
         "capture/eth0/packets",
         zensight_common::TelemetryValue::Counter(10),
     ));
@@ -5360,7 +5290,6 @@ fn netring_capture_tab_without_advert_is_health_only() {
     state.specialized_tab = SpecializedTab::Capture;
     state.update(zensight_common::TelemetryPoint::new(
         "host01",
-        Protocol::Netring,
         "capture/eth0/packets",
         zensight_common::TelemetryValue::Counter(10),
     ));
@@ -5390,7 +5319,6 @@ fn netring_bandwidth_pivot_and_chip_clear() {
     state.specialized_tab = SpecializedTab::Bandwidth;
     state.update(zensight_common::TelemetryPoint::new(
         "host01",
-        Protocol::Netring,
         "bandwidth/https/bytes_per_sec",
         zensight_common::TelemetryValue::Gauge(1000.0),
     ));
@@ -5663,7 +5591,6 @@ fn test_parallax_health_panel_separates_a_congested_sender_from_a_dropping_link(
             "cam0/stats/fps".to_string(),
             vec![TelemetryPoint::new(
                 "hostA",
-                Protocol::Parallax,
                 "cam0/stats/fps",
                 TelemetryValue::Gauge(30.0),
             )]
@@ -5917,7 +5844,6 @@ fn test_parallax_health_panel_names_the_failing_stage() {
             "cam0/stats/fps".to_string(),
             vec![TelemetryPoint::new(
                 "hostA",
-                Protocol::Parallax,
                 "cam0/stats/fps",
                 TelemetryValue::Gauge(encoded_fps),
             )]
@@ -6079,7 +6005,6 @@ fn sysinfo_point(
     zensight_common::TelemetryPoint {
         timestamp: 0,
         source: "server01".to_string(),
-        protocol: Protocol::Sysinfo,
         metric: metric.to_string(),
         value,
         labels: HashMap::new(),
@@ -6661,7 +6586,6 @@ fn netlink_state(points: &[(&str, zensight_common::TelemetryValue)]) -> DeviceDe
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
             source: "server01".to_string(),
-            protocol: Protocol::Netlink,
             metric: metric.to_string(),
             value: value.clone(),
             labels: HashMap::new(),
@@ -6738,7 +6662,6 @@ fn netring_state(
         state.update(zensight_common::TelemetryPoint {
             timestamp: 0,
             source: "wiretap1".to_string(),
-            protocol: Protocol::Netring,
             metric: metric.to_string(),
             value: value.clone(),
             labels: HashMap::new(),
@@ -6823,7 +6746,6 @@ fn tier2_netlink_overview_counts_interfaces() {
             zensight_common::TelemetryPoint {
                 timestamp: 0,
                 source: "server01".to_string(),
-                protocol: Protocol::Netlink,
                 metric: metric.to_string(),
                 value: zensight_common::TelemetryValue::Boolean(up),
                 labels: HashMap::new(),
@@ -6974,7 +6896,6 @@ fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
     state.update(zensight_common::TelemetryPoint {
         timestamp: 0,
         source: "wiretap1".to_string(),
-        protocol: Protocol::Netring,
         metric: "dns/encrypted/doh".to_string(),
         value: zensight_common::TelemetryValue::Counter(43),
         labels: HashMap::new(),

@@ -1911,7 +1911,6 @@ mod tests {
         TelemetryPoint {
             timestamp: 1000,
             source: "test".to_string(),
-            protocol: Protocol::Snmp,
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(42.0),
             labels: std::collections::HashMap::new(),
@@ -2069,7 +2068,6 @@ mod tests {
         TelemetryPoint {
             timestamp: ts,
             source: "test".to_string(),
-            protocol: Protocol::Snmp,
             metric: metric.to_string(),
             value: TelemetryValue::Gauge(value),
             labels: std::collections::HashMap::new(),

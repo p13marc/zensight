@@ -10605,7 +10605,6 @@ mod prefetch_tests {
     fn only_text_log_events_feed_the_buffer() {
         let line = TelemetryPoint::new(
             "host01",
-            Protocol::Logs,
             "events/0000000000000000000000001",
             TelemetryValue::Text("INTRUDER ALERT from 10.0.0.9".to_string()),
         );
@@ -10617,7 +10616,7 @@ mod prefetch_tests {
             ("ingest/received_total", TelemetryValue::Counter(6)),
             ("units_in_failure", TelemetryValue::Gauge(0.0)),
         ] {
-            let rollup = TelemetryPoint::new("host01", Protocol::Logs, metric, value);
+            let rollup = TelemetryPoint::new("host01", metric, value);
             assert!(
                 !point_is_log_line("logs", &rollup),
                 "{metric} must not be a log line"
@@ -10627,7 +10626,6 @@ mod prefetch_tests {
         // Non-Logs telemetry is never a log line, even when Text.
         let snmp_text = TelemetryPoint::new(
             "router01",
-            Protocol::Snmp,
             "system/descr",
             TelemetryValue::Text("Cisco IOS".to_string()),
         );
@@ -11429,12 +11427,7 @@ mod origin_tests {
 
     fn reading(origin: &str, source: &str, metric: &str) -> Reading {
         Reading::new(
-            TelemetryPoint::new(
-                source,
-                Protocol::Netring,
-                metric,
-                TelemetryValue::Counter(1),
-            ),
+            TelemetryPoint::new(source, metric, TelemetryValue::Counter(1)),
             origin,
             "netring",
             metric,
@@ -11651,7 +11644,6 @@ mod tier2_app_fold_tests {
                 TelemetryPoint {
                     timestamp: 0,
                     source: source.to_string(),
-                    protocol,
                     metric: (*metric).to_string(),
                     value: value.clone(),
                     labels: Default::default(),
@@ -11680,7 +11672,6 @@ mod tier2_app_fold_tests {
                 TelemetryPoint {
                     timestamp: ts,
                     source: "server01".to_string(),
-                    protocol: Protocol::Sysinfo,
                     metric: metric.to_string(),
                     value: TelemetryValue::Counter(v),
                     labels: Default::default(),
@@ -12088,9 +12079,10 @@ mod system_view_tests {
 
     /// GATE 1/intake → #1255, #1256 · GATE 2/model → #1257 · GATE 3/view →
     /// #1258 · GATE 4/honesty → #1256 · GATE 5/definition → #1259 · GATE
-    /// 6/subscribe → #1262. Today it dies at gate 1: `TelemetryPoint` cannot
-    /// deserialise a `protocol` outside the closed enum. That failure is the
-    /// finding.
+    /// 6/subscribe → #1262. Today it dies at gate 1: the state document is
+    /// refused by `refine_key`, and a `DeviceId` still needs a `Protocol`
+    /// (#1255 took the enum off the wire; #1256 takes it out of the device).
+    /// That failure is the finding.
     #[test]
     #[should_panic(expected = "GATE 1/intake")]
     fn a_fictional_producer_renders_from_its_introspect_slice() {
@@ -12194,18 +12186,30 @@ mod system_view_tests {
     #[test]
     fn a_fictional_producer_is_dropped_at_three_gates_today() {
         // Telemetry never reaches `refine_key`: `decode_sample` parses the key
-        // structurally and decodes the payload — and the payload's `protocol`
-        // is a closed enum, so the point is dropped there. #1255 removes the
-        // field from the wire.
+        // structurally and decodes the payload. Since #1255 the payload
+        // carries no `protocol`, so a point from a producer outside the
+        // closed enum decodes — with the producer read off the key — but the
+        // `DeviceId` it would need still is the enum, so no device exists
+        // for it yet. #1256 makes the device a name.
         let telemetry = fake_sensor::samples_of("telemetry");
         assert!(!telemetry.is_empty());
         for (key, payload) in &telemetry {
-            assert!(
-                decode_sample(key, payload).is_none(),
-                "{key}: decoded — #1255 has landed; advance the ratchet to GATE 2/model"
-            );
-            let parsed = zensight_common::keyexpr::parse_key(key);
-            assert!(parsed.is_some(), "{key}: the key itself is grammatical");
+            let msg = decode_sample(key, payload).unwrap_or_else(|| {
+                panic!("{key}: dropped at decode — #1255 took the closed enum off the wire")
+            });
+            match msg {
+                Message::TelemetryReceived(r) => {
+                    assert_eq!(
+                        r.producer, PRODUCER,
+                        "{key}: the producer is the key's chunk 4"
+                    );
+                    assert!(
+                        r.device_id().is_none(),
+                        "{key}: a DeviceId for a producer outside the enum — #1256 has landed; advance the ratchet to GATE 2/model"
+                    );
+                }
+                other => panic!("{key}: decoded as something other than telemetry: {other:?}"),
+            }
         }
 
         // A state document from an unregistered producer does not exist to
@@ -12222,7 +12226,7 @@ mod system_view_tests {
         }
 
         // The closed enum is *why* the view `match` has no arm. This stops
-        // compiling when #1255 replaces `DeviceId.protocol` — the correct
+        // compiling when #1256 replaces `DeviceId.protocol` — the correct
         // signal (#1258 is where the default view takes over).
         assert!(
             PRODUCER.parse::<Protocol>().is_err(),

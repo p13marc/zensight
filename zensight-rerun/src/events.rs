@@ -236,14 +236,13 @@ mod tests {
     fn text_point_becomes_message() {
         let point = TelemetryPoint::new(
             "host1",
-            Protocol::Netlink,
             "events/route/replace",
             TelemetryValue::Text("default via 10.0.0.1".into()),
         )
         .with_label("iface", "eth0")
         .with_label("correlation_id", "inc-1");
         let event = normalize_point(
-            point.protocol.as_str(),
+            "netlink",
             &point,
             EventKind::RouteChange,
             Some("h_abc".into()),

@@ -370,12 +370,7 @@ mod tests {
     #[cfg(not(feature = "validate-json"))]
     #[test]
     fn without_the_feature_a_real_type_is_feature_off() {
-        let point = crate::TelemetryPoint::new(
-            "h",
-            crate::Protocol::Sysinfo,
-            "m",
-            crate::TelemetryValue::Gauge(1.0),
-        );
+        let point = crate::TelemetryPoint::new("h", "m", crate::TelemetryValue::Gauge(1.0));
         let v = verdict_for("TelemetryPoint", &serde_json::to_value(&point).unwrap());
         assert_eq!(v, Verdict::NotValidated(NotValidated::FeatureOff));
     }
@@ -385,12 +380,7 @@ mod tests {
     #[cfg(feature = "validate-json")]
     #[test]
     fn with_the_feature_valid_and_invalid_are_both_reachable() {
-        let point = crate::TelemetryPoint::new(
-            "h",
-            crate::Protocol::Sysinfo,
-            "m",
-            crate::TelemetryValue::Gauge(1.0),
-        );
+        let point = crate::TelemetryPoint::new("h", "m", crate::TelemetryValue::Gauge(1.0));
         assert_eq!(
             verdict_for("TelemetryPoint", &serde_json::to_value(&point).unwrap()),
             Verdict::Valid
@@ -445,6 +435,11 @@ mod tests {
             "TelemetryPoint.metric missing"
         );
         assert!(props.contains_key("value"), "TelemetryPoint.value missing");
+        // #1255: the producer is the key's, and the schema says so by omission.
+        assert!(
+            !props.contains_key("protocol"),
+            "TelemetryPoint.protocol is back on the wire"
+        );
     }
 
     /// The reply round-trips through the consumer-side parser (what zenctl /

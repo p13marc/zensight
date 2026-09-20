@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **`TelemetryPoint` no longer carries `protocol`; the producer is chunk 4 of
+  the key** (#1255, gate 1 of #1253). The payload said what the key already
+  said — and said it as a *closed enum*, so a producer the GUI was not compiled
+  with was refused at decode before any view could exist. Consumers now read
+  the producer from `v1/<origin>/telemetry/<producer>/…`
+  (`keyexpr::producer_name`, instance suffix stripped); `Protocol` remains the
+  identity of alerts, thresholds and events. `TelemetryPoint::new(source,
+  metric, value)` loses its second argument; `MetricStore::record`,
+  `StoredLog::from_point`, `LogRecord::from_point`/`from_telemetry`,
+  `is_log_exportable` and rerun's telemetry channel take the producer from
+  their caller.
+
+  **Rolling upgrade.** A new consumer decodes old payloads (the extra member
+  is ignored). An **old** consumer — GUI, exporters, historian, rerun of 0.14
+  or earlier — cannot decode a new producer's telemetry: upgrade consumers
+  first, producers second. While the fleet is mixed, the conformance judges
+  report `schema-drift` on `TelemetryPoint` between upgraded and
+  not-yet-upgraded producers and `field-new` (`protocol`) for the old
+  producers' samples; both clear when the last producer restarts on this
+  build (`--allow field-new` is the per-run override). CI runs all-new
+  binaries and stays green.
+
+  **Nothing else moves.** Exported Prometheus/OTel series names and labels
+  were already derived from the key; store series paths
+  (`<origin>/<producer>/<subject>`) are byte-identical because
+  `Protocol::as_str()` was the producer name without its instance suffix —
+  which is what the key's name is — so the GUI's and the historian's redb
+  files carry over with no `SCHEMA_VERSION` bump. The GUI's per-device JSON
+  export loses its `protocol` member; the CSV column keeps it, from the device.
+
 ### Added
 
 - **`@rpc/netflow/flows/page` — a truncated flow read can say it was

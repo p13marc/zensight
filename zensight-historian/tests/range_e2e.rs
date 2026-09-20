@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use zensight_common::history::{RangeReply, SeriesInfo};
-use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::{TelemetryPoint, TelemetryValue};
 use zensight_historian::ingest::{IngestCounters, SharedStore, record_point};
 use zensight_historian::query::range;
 
@@ -21,11 +21,10 @@ fn no_batch() -> zensight_historian::ingest::BatchTrigger {
     }
 }
 
-fn point(protocol: Protocol, metric: &str, value: TelemetryValue, ts: i64) -> TelemetryPoint {
+fn point(metric: &str, value: TelemetryValue, ts: i64) -> TelemetryPoint {
     TelemetryPoint {
         timestamp: ts,
         source: "dev1".to_string(),
-        protocol,
         metric: metric.to_string(),
         value,
         labels: Default::default(),
@@ -62,7 +61,6 @@ async fn range_answers_each_aggregate_over_a_live_session() {
         record_point(
             &format!("v1/{origin}/telemetry/sysinfo/network/eth0/rx_bytes"),
             &point(
-                Protocol::Sysinfo,
                 "network/eth0/rx_bytes",
                 TelemetryValue::Counter((i * 100) as u64),
                 ts,
@@ -74,12 +72,7 @@ async fn range_answers_each_aggregate_over_a_live_session() {
         );
         record_point(
             &format!("v1/{origin}/telemetry/sysinfo/system/load"),
-            &point(
-                Protocol::Sysinfo,
-                "system/load",
-                TelemetryValue::Gauge(i as f64),
-                ts,
-            ),
+            &point("system/load", TelemetryValue::Gauge(i as f64), ts),
             &store,
             &counters,
             &shed,
@@ -159,12 +152,7 @@ async fn pages_reassemble_into_the_unpaged_answer() {
         for name in ["a", "b"] {
             record_point(
                 &format!("v1/{origin}/telemetry/sysinfo/{name}"),
-                &point(
-                    Protocol::Sysinfo,
-                    name,
-                    TelemetryValue::Gauge(i as f64),
-                    i * 1_000,
-                ),
+                &point(name, TelemetryValue::Gauge(i as f64), i * 1_000),
                 &store,
                 &counters,
                 &shed,
@@ -260,12 +248,7 @@ async fn a_series_interned_between_pages_is_neither_repeated_nor_skipped() {
             for i in 0..10i64 {
                 record_point(
                     &format!("v1/{origin}/telemetry/sysinfo/{name}"),
-                    &point(
-                        Protocol::Sysinfo,
-                        &name,
-                        TelemetryValue::Gauge(i as f64),
-                        i * 1_000,
-                    ),
+                    &point(&name, TelemetryValue::Gauge(i as f64), i * 1_000),
                     &store,
                     counters,
                     shed,
@@ -364,7 +347,6 @@ async fn a_window_wider_than_the_ring_says_what_it_could_cover() {
         record_point(
             &format!("v1/{origin}/telemetry/sysinfo/cpu/usage"),
             &point(
-                Protocol::Sysinfo,
                 "cpu/usage",
                 TelemetryValue::Gauge(i as f64),
                 ring_start + i * 1_000,
@@ -445,12 +427,7 @@ async fn series_lists_what_is_held() {
 
     record_point(
         &format!("v1/{origin}/telemetry/snmp/sw1/if/3/in_octets"),
-        &point(
-            Protocol::Snmp,
-            "if/3/in_octets",
-            TelemetryValue::Counter(1),
-            0,
-        ),
+        &point("if/3/in_octets", TelemetryValue::Counter(1), 0),
         &store,
         &counters,
         &shed,
@@ -458,12 +435,7 @@ async fn series_lists_what_is_held() {
     );
     record_point(
         &format!("v1/{origin}/telemetry/sysinfo/system/load"),
-        &point(
-            Protocol::Sysinfo,
-            "system/load",
-            TelemetryValue::Gauge(1.0),
-            0,
-        ),
+        &point("system/load", TelemetryValue::Gauge(1.0), 0),
         &store,
         &counters,
         &shed,

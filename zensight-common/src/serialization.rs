@@ -150,13 +150,12 @@ pub fn decode_with_encoding<T: DeserializeOwned>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+    use crate::telemetry::{TelemetryPoint, TelemetryValue};
 
     #[test]
     fn test_json_roundtrip() {
         let point = TelemetryPoint::new(
             "router01",
-            Protocol::Snmp,
             "system/sysUpTime",
             TelemetryValue::Counter(123456),
         );
@@ -165,7 +164,6 @@ mod tests {
         let decoded: TelemetryPoint = decode(&encoded, Format::Json).unwrap();
 
         assert_eq!(point.source, decoded.source);
-        assert_eq!(point.protocol, decoded.protocol);
         assert_eq!(point.metric, decoded.metric);
         assert_eq!(point.value, decoded.value);
     }
@@ -174,7 +172,6 @@ mod tests {
     fn test_cbor_roundtrip() {
         let point = TelemetryPoint::new(
             "router01",
-            Protocol::Snmp,
             "system/sysUpTime",
             TelemetryValue::Counter(123456),
         );
@@ -183,7 +180,6 @@ mod tests {
         let decoded: TelemetryPoint = decode(&encoded, Format::Cbor).unwrap();
 
         assert_eq!(point.source, decoded.source);
-        assert_eq!(point.protocol, decoded.protocol);
         assert_eq!(point.metric, decoded.metric);
         assert_eq!(point.value, decoded.value);
     }
@@ -192,7 +188,6 @@ mod tests {
     fn test_cbor_is_smaller() {
         let point = TelemetryPoint::new(
             "router01",
-            Protocol::Snmp,
             "system/sysUpTime",
             TelemetryValue::Counter(123456),
         );
@@ -267,7 +262,7 @@ mod tests {
     fn a_declared_encoding_beats_the_sniff() {
         // RFC 08 §7's precedence, which every producer already stamped and no
         // consumer read (#1148).
-        let point = TelemetryPoint::new("h", Protocol::Snmp, "m", TelemetryValue::Counter(1));
+        let point = TelemetryPoint::new("h", "m", TelemetryValue::Counter(1));
         for format in [Format::Json, Format::Cbor] {
             let bytes = encode(&point, format).unwrap();
             let back: TelemetryPoint =
@@ -290,7 +285,7 @@ mod tests {
 
     #[test]
     fn an_unrecognised_encoding_falls_back_to_the_sniff() {
-        let point = TelemetryPoint::new("h", Protocol::Snmp, "m", TelemetryValue::Counter(1));
+        let point = TelemetryPoint::new("h", "m", TelemetryValue::Counter(1));
         let bytes = encode(&point, Format::Cbor).unwrap();
         let back: TelemetryPoint =
             decode_with_encoding(&zenoh::bytes::Encoding::APPLICATION_OCTET_STREAM, &bytes)
@@ -300,12 +295,7 @@ mod tests {
 
     #[test]
     fn test_auto_decode() {
-        let point = TelemetryPoint::new(
-            "router01",
-            Protocol::Snmp,
-            "test",
-            TelemetryValue::Counter(42),
-        );
+        let point = TelemetryPoint::new("router01", "test", TelemetryValue::Counter(42));
 
         // Test with JSON
         let json = encode(&point, Format::Json).unwrap();
