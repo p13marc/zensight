@@ -70,6 +70,7 @@ procedure	netflow	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	netflow	artifact/status	read	-	ArtifactStatus
 procedure	netflow	describe	read	-	SchemaSet
 procedure	netflow	flows	read	-	Vec<FlowRecord>
+procedure	netflow	flows/page	read	-	Page<FlowRecord>
 procedure	netflow	introspect	read	-	RegistrySlice
 procedure	netflow	thresholds	read	-	ThresholdsConfig
 procedure	netflow	thresholds/set	write	ThresholdsConfig	Ack

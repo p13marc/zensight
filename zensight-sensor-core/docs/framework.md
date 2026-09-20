@@ -191,6 +191,23 @@ registry slice). A topic's read is `…/@rpc/<producer>/<topic>`, its write is
 token — alive ⇒ callable. How many queries a producer handles at once, and the
 bounds that keep that safe, are below: *Serving `@rpc` — one query at a time*.
 
+## Small shared shapes (#1156)
+
+Two things every sensor had re-implemented, kept in this crate so the
+difference between copies is a name rather than a crate boundary:
+
+- `json.rs` — lenient readers over a `serde_json::Value` for vendor APIs
+  (Redfish, Proxmox, podman) whose shapes drift between releases. `text` /
+  `number` are strict; `text_lenient` / `number_lenient` accept a number as a
+  string; `first_number` / `first_uint` are the alias table for a reading that
+  moved; `flag` reads bool / number / string with the API's own truthy set.
+  Nothing invents a value: absent stays absent.
+- `ring.rs` — `BoundedRing<T>`, the bounded ring of recent records behind a
+  read procedure (`@rpc/logs/events`, `@rpc/netflow/flows`): the
+  high-cardinality detail RFC 04 R3 forbids streaming, held with its capacity
+  beside the deque, evicted oldest-first, read under a lock that never holds
+  an `.await`.
+
 ## Serving `@rpc` — one query at a time
 
 Every `@rpc` queryable in this workspace handles **one query at a time**. That

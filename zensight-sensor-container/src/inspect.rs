@@ -311,7 +311,7 @@ fn ips(inspect: &Value) -> Vec<String> {
 // ── Value helpers ────────────────────────────────────────────────────────────
 
 fn get<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
-    v.get(key).filter(|x| !x.is_null())
+    zensight_sensor_core::json::get(v, key)
 }
 
 fn first_str(candidates: &[Option<&Value>]) -> Option<String> {
@@ -326,16 +326,14 @@ fn first_num(candidates: &[Option<&Value>]) -> Option<f64> {
     candidates.iter().flatten().find_map(|v| as_num(v))
 }
 
+// Lenient (#1156): podman's `inspect` is as loose about numbers as the
+// Proxmox API, so the same helper reads both.
 fn num(v: &Value, key: &str) -> Option<f64> {
-    v.get(key).and_then(as_num)
+    zensight_sensor_core::json::number_lenient(v, key)
 }
 
 fn as_num(v: &Value) -> Option<f64> {
-    match v {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    }
+    zensight_sensor_core::json::as_number_lenient(v)
 }
 
 /// Enough of RFC 3339 to read a container timestamp: `2026-08-28T02:00:01Z`

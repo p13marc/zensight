@@ -210,6 +210,9 @@ kind = "json-schema"
 [types."Vec<FlowRecord>"]
 kind = "json-schema"
 
+[types."Page<FlowRecord>"]
+kind = "json-schema"
+
 [types."Vec<HttpRecord>"]
 kind = "json-schema"
 

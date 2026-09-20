@@ -73,7 +73,14 @@ is what `@rpc/netflow/flows` serves.
 - `zensight/v1/<origin>/@rpc/netflow/flows` — the bounded ring of recent raw flow
   records (`?exporter=…;max=…`, newest first, default 500 of 2048 held). This is
   where the per-flow detail lives; it is pulled, never streamed. Gated by
-  `publish_flows`.
+  `publish_flows`. Replies a bare `Vec<FlowRecord>`, which has nowhere to say
+  the walk stopped early — see the sibling.
+- `zensight/v1/<origin>/@rpc/netflow/flows/page` — the same walk, same
+  selectors (`limit=` as the alias of `max=`), in the RFC 05 §3.2 envelope
+  `{items, next_cursor, partial, scanned}` (#1156). `partial: true` with a
+  cursor (the last emitted record's `timestamp`) is how a caller learns the
+  ring held more than the page; `flows` cannot be changed in place (RFC 08
+  §3), so the envelope is a sibling, the way `logs/events/page` is.
 - `zensight/v1/<origin>/@rpc/netflow/introspect` — the registry slice this build serves
 
 See [../../docs/KEYSPACE.md](../../docs/KEYSPACE.md) for the authoritative contract.
