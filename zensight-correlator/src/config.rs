@@ -16,6 +16,9 @@ pub enum ConfigError {
     Parse(#[from] json5::Error),
     #[error("Validation error: {0}")]
     Validation(String),
+    /// A key no struct declares (#1150) — the refusal names every one by path.
+    #[error("{0}")]
+    UnknownKey(String),
 }
 
 /// Complete correlator configuration.
@@ -202,14 +205,17 @@ impl CorrelatorConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
-        let config: CorrelatorConfig = json5::from_str(&content)?;
-        config.validate()?;
-        Ok(config)
+        Self::parse(&content)
     }
 
-    /// Parse configuration from a JSON5 string.
+    /// Parse configuration from a JSON5 string — strictly (#1150): a key no
+    /// struct declares is a refusal naming it, exactly as every sensor's
+    /// `SensorConfig::parse_strict`. This daemon wired up `--check-config`
+    /// and then parsed with a bare `json5::from_str`, so a typo took the Rust
+    /// default and the check said the file was fine.
     pub fn parse(content: &str) -> Result<Self, ConfigError> {
-        let config: CorrelatorConfig = json5::from_str(content)?;
+        let config: CorrelatorConfig = zensight_common::config::parse_config_strict(content)
+            .map_err(|e| ConfigError::UnknownKey(e.to_string()))?;
         config.validate()?;
         Ok(config)
     }
@@ -285,5 +291,25 @@ mod tests {
         assert_eq!(d.recompute_max_wait_ms, 2_000);
         assert_eq!(d.reemit_secs, 60);
         assert!(d.rules.hostname_enabled);
+    }
+
+    /// #1150, the half this daemon had skipped: a key no struct declares is a
+    /// refusal that names it — not a silent Rust default.
+    #[test]
+    fn a_typoed_key_is_refused_by_name() {
+        let err = CorrelatorConfig::parse(r#"{ evidence_ttl_sec: 30 }"#).unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownKey(_)), "{err}");
+        assert!(err.to_string().contains("evidence_ttl_sec"), "{err}");
+        let ok = CorrelatorConfig::parse(r#"{ allow_unknown_fields: true, evidence_ttl_sec: 30 }"#)
+            .expect("the escape hatch downgrades it");
+        assert_ne!(ok.evidence_ttl_secs, 30, "and the typo still did not apply");
+    }
+
+    /// The shipped `configs/correlator.json5` passes the strict parser: a stale key
+    /// in it would now be a startup refusal on every install (#1150).
+    #[test]
+    fn the_shipped_config_parses_strictly() {
+        CorrelatorConfig::parse(include_str!("../../configs/correlator.json5"))
+            .expect("shipped config has no undeclared key");
     }
 }

@@ -28,8 +28,11 @@ named. Where it is only a habit, this page says so rather than implying more.
 ### The config hazard, and the half of it that is closed
 
 Every config a producer, exporter or service loads goes through
-`SensorConfig::parse_strict` (#1150). It collects **every** key no struct
-declares, by full dotted path, in one pass:
+`zensight_common::parse_config_strict` — `SensorConfig::parse_strict` for a
+sensor (#1150). It collects **every** key no struct declares, by full dotted
+path, in one pass. (This page said "every … service" from 0.14.0 while the
+correlator, `zensight-desired` and both exporters still parsed with a bare
+`json5::from_str`; they were brought under it on 2026-09-20.)
 
 > **A key nothing declares is a startup refusal**, naming each one, before any
 > session is opened. A misspelled `probe.poll_interval_sec` used to parse clean

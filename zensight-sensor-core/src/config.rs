@@ -279,37 +279,11 @@ pub trait SensorConfig: Sized + DeserializeOwned {
     ///   naming the keys. Read off the raw tree, so it needs no field on any
     ///   config struct.
     fn parse_strict(content: &str) -> Result<Self> {
-        let value: serde_json::Value = json5::from_str(content)?;
-        let allow = value
-            .get("allow_unknown_fields")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-
-        let mut unknown: Vec<String> = Vec::new();
-        let config: Self = serde_ignored::deserialize(value, |path| {
-            let path = path.to_string();
-            if path == "allow_unknown_fields" || path == "zenoh" || path.starts_with("zenoh.") {
-                return;
-            }
-            unknown.push(path);
-        })
-        .map_err(|e| SensorError::config(e.to_string()))?;
-
-        if !unknown.is_empty() {
-            let list = unknown.join(", ");
-            if allow {
-                tracing::warn!(
-                    unknown_keys = %list,
-                    "config has unknown keys (allow_unknown_fields is set — ignoring)"
-                );
-            } else {
-                return Err(SensorError::config(format!(
-                    "unknown config key(s): {list}. Fix the typo, or set \
-                     allow_unknown_fields: true to ignore (mixed-version fleets)."
-                )));
-            }
-        }
-
+        // One mechanism for every daemon, sensor or not
+        // (`zensight_common::parse_config_strict`, #1150): the correlator and
+        // `zensight-desired` parse with the same function.
+        let config: Self = zensight_common::config::parse_config_strict(content)
+            .map_err(|e| SensorError::config(e.to_string()))?;
         config.validate()?;
         Ok(config)
     }
