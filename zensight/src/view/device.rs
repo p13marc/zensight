@@ -86,6 +86,9 @@ pub struct DeviceDetailState {
     pub metric_filter: String,
     /// Pending search filter (user input).
     pub pending_filter: String,
+    /// The origin typed into the identity panel's "merge into" field (#1129):
+    /// `h-<12hex>`, validated before the button enables.
+    pub merge_target: String,
     /// Timestamp when pending filter was last updated.
     pub pending_filter_time: i64,
     /// On-demand netlink detail tables (sockets/routes/neighbors), fetched lazily
@@ -149,6 +152,7 @@ impl DeviceDetailState {
             chart: ChartState::new(format!("{}", device_id)),
             metric_filter: String::new(),
             pending_filter: String::new(),
+            merge_target: String::new(),
             pending_filter_time: 0,
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
@@ -802,7 +806,9 @@ pub fn host_detail_view<'a>(ctx: DeviceViewCtx<'a, '_>) -> Element<'a, Message> 
     if ctx.identity_expanded
         && let Some(entity) = ctx.entity
     {
-        col = col.push(container(entity_identity_details(entity)).padding([0, 20]));
+        col = col.push(
+            container(entity_identity_details(entity, &ctx.state.merge_target)).padding([0, 20]),
+        );
     }
     if let Some(strip) = facet_tab_strip(ctx.facets) {
         col = col.push(strip);
@@ -854,8 +860,11 @@ fn device_content<'a>(
 /// The expanded identity details (#306/#350): identity facts (IPs / MACs /
 /// vendor / platform / names) over the "Resolution group" drill-down that lists
 /// each [`MemberClaim`] (`sensor/source · rule · confidence`) — the wrong-merge
-/// diagnosis affordance. Rendered under the nav bar only when expanded.
-fn entity_identity_details(entity: &HostEntity) -> Element<'static, Message> {
+/// diagnosis affordance — and, since #1129, the wrong-merge **repair**: one
+/// "Split off" per non-canonical origin and a "Merge into" field, each a
+/// `@catalog` `link`/`unlink` write. Rendered under the nav bar only when
+/// expanded.
+fn entity_identity_details(entity: &HostEntity, merge_target: &str) -> Element<'static, Message> {
     let mut col = column![].spacing(6);
 
     let mut facts: Vec<String> = Vec::new();
@@ -894,7 +903,89 @@ fn entity_identity_details(entity: &HostEntity) -> Element<'static, Message> {
         col = col.push(row);
     }
 
+    col = col.push(entity_assertion_controls(entity, merge_target));
+
     container(col).padding([4, 0]).into()
+}
+
+/// The origin an operator's assertion keeps — `host_id` when the catalog
+/// resolved one, else the first origin the entity fused. `link`/`unlink`
+/// name **origins** (`h-<12hex>`), never the evidence-derived entity id,
+/// which changes shape the moment a merge does (RFC 06 §5.4).
+pub fn canonical_origin(entity: &HostEntity) -> Option<&str> {
+    entity
+        .host_id
+        .as_deref()
+        .filter(|h| zenkey::grammar::is_valid_host_origin(h))
+        .or_else(|| entity.origins.first().map(String::as_str))
+}
+
+/// The merge/split controls (#1129) — the write side of the workflow the
+/// resolution group above only diagnoses. `@catalog`'s `link` and `unlink`
+/// procedures shipped in 0.7.0 with no caller anywhere; the GUI consumed the
+/// alias documents a merge produces and could never cause one.
+///
+/// - **Split off** — one per origin other than the canonical: `unlink` the
+///   pair, so the catalog stops fusing that host into this entity. Rendered
+///   only when the entity fused more than one origin; a single-origin entity
+///   has nothing to split.
+/// - **Merge into** — an origin typed by the operator; `link` this entity's
+///   canonical origin *into* it. The button enables only for a well-formed
+///   `h-<12hex>` that is not this entity's own — the catalog would refuse
+///   both, and refusing locally is cheaper than a round trip to be told.
+///
+/// The refusal when the catalog's `allow_operator_assertions` is off comes
+/// back named (`error/gated`, `refused_by`) and is rendered as such (#866).
+fn entity_assertion_controls(entity: &HostEntity, merge_target: &str) -> Element<'static, Message> {
+    let mut col = column![].spacing(crate::view::tokens::space::XS);
+    let Some(canonical) = canonical_origin(entity) else {
+        // No origin at all: nothing an assertion could name.
+        return col.into();
+    };
+    let canonical = canonical.to_string();
+
+    let others: Vec<&String> = entity.origins.iter().filter(|o| **o != canonical).collect();
+    if !others.is_empty() {
+        col = col.push(text("Origins").size(font::BODY));
+        for origin in others {
+            let old = origin.clone();
+            let new = canonical.clone();
+            col = col.push(
+                row![
+                    text(origin.clone()).size(font::DENSE),
+                    button(text("Split off").size(font::DENSE))
+                        .on_press(Message::UnlinkHosts { old, new })
+                        .padding([2, 8]),
+                ]
+                .spacing(crate::view::tokens::space::SM)
+                .align_y(Alignment::Center),
+            );
+        }
+    }
+
+    let target = merge_target.trim().to_string();
+    let valid = zenkey::grammar::is_valid_host_origin(&target) && target != canonical;
+    let merge = button(text("Merge into").size(font::DENSE)).padding([2, 8]);
+    let merge = if valid {
+        merge.on_press(Message::LinkHosts {
+            old: canonical.clone(),
+            new: target,
+        })
+    } else {
+        merge
+    };
+    col = col.push(
+        row![
+            text_input("merge into origin h-…", merge_target)
+                .on_input(Message::MergeTargetChanged)
+                .size(font::DENSE)
+                .width(Length::Fixed(220.0)),
+            merge,
+        ]
+        .spacing(crate::view::tokens::space::SM)
+        .align_y(Alignment::Center),
+    );
+    col.into()
 }
 
 /// The compact identity summary fragment for the nav bar (#350): entity-id

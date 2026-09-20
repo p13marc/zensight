@@ -19,6 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `timestamp`. The `exporter=` selector is percent-decoded on both. Registry
   `netflow` 1.3 → 1.4, `registry.lock` +1 line (additive).
 
+- **Host merge and split from the identity panel** (#1129). `@catalog`'s
+  `link`/`unlink` write procedures shipped in 0.7.0 with no caller anywhere:
+  the GUI consumed the alias documents a merge produces and could never cause
+  one. The host detail's identity panel now offers one **Split off** per
+  origin the entity fused beyond its canonical one (`unlink` that pair) and a
+  **Merge into** field for an origin typed by the operator (`link` this
+  entity's canonical origin into it). Both name origins, never entity ids;
+  both ride the audited write seam and render the catalog's gate refusal by
+  name.
 - **The system-view test — a producer the GUI was not compiled with, stated as
   a test the tree can run** (#1254, the decision gate of #1253). `fake-sensor`
   is not a `Protocol` variant and has no registry TOML; the fixture in

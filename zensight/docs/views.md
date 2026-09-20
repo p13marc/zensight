@@ -961,3 +961,28 @@ which is the kind of test #1031 asked for and the kind that was missing.
 **Settings** (`view/settings.rs`) — Zenoh connection mode (peer/client/router),
 connect/listen endpoints, stale threshold, and theme; persisted to
 `~/.config/zensight/settings.json5`.
+
+## Host identity — merge and split (#1129)
+
+The identity panel under a host's nav bar (▸ identity) shows what the catalog
+fused into this entity — IPs, MACs, names, and the **resolution group**: one
+row per member claim with the rule and confidence that put it there. That is
+the wrong-merge *diagnosis*; since #1129 the panel also carries the *repair*,
+the first caller of `@catalog`'s `link`/`unlink` write procedures (RFC 06 §5.5,
+shipped in 0.7.0 with none):
+
+- **Split off** — one per origin the entity fused other than its canonical
+  one (`host_id`, else the first origin). Pressing it sends
+  `@rpc/unlink?old=<that origin>;new=<canonical>;actor=<you>`, and the catalog
+  stops merging the two on its next pass.
+- **Merge into** — an origin typed by the operator (`h-<12hex>`). The button
+  enables only for a well-formed origin that is not this entity's own, and
+  sends `@rpc/link?old=<canonical>;new=<typed>`.
+
+Both name **origins**, never entity ids — an entity id computed from a
+hostname or a MAC changes when the set it names changes, so an assertion keyed
+on one would dangle the instant it took effect. Both are gated by the
+correlator's `allow_operator_assertions`; when it is off the refusal comes back
+named (`error/gated`, `refused_by`) and the toast says so, as for ack/silence
+(#866). With no catalog alive the buttons refuse locally ("catalog offline —
+nothing can record this") rather than time out.
