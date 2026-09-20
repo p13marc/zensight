@@ -6,8 +6,9 @@
 
 # Dynamic views: the GUI renders what the bus describes — Analysis, Architecture & Proposal
 
-*Status: proposal for review. Prompted by: "GUI is too static. I think we have to
-think of a plugin system."*
+*Status: proposal for review, revised the same day for embedded scripting
+(Rhai) in place of any home-grown DSL. Prompted by: "GUI is too static. I think
+we have to think of a plugin system."*
 
 This document measures how static the GUI actually is and where the coupling
 lives (§1), inventories what the bus already says about itself that the GUI does
@@ -65,8 +66,10 @@ plan (§8). Sources are in §11.
    refines the default the way a JSON-Forms UI schema refines a data schema;
    (d) keep hand-written views as bespoke renderers registered by producer name
    over the same model, and delete the 82 messages, 7 detail states and most of
-   the 97 typed reply structs. WASM "view logic" plugins are a bounded later step
-   that emit the *same* declarative tree. (§5–§8)
+   the 97 typed reply structs. **Presentation logic** — a row label, a sort key,
+   a visibility — is an embedded, sandboxed **Rhai** snippet beside the document,
+   never an expression *in* the document, so the format stays a closed
+   vocabulary and no DSL is invented. WASM is not planned. (§5–§8)
 
 5. **Proof of concept is cheap and already half-built.** `generic_device_view`
    exists; the slice is already fetched; the Bus explorer already renders any
@@ -352,7 +355,27 @@ shared buffers of data around for plugins to operate on would need to consider
 alternative options."* For a view that receives a few hundred metrics per device
 this is fine; for the traffic-matrix or a 10 k-row bus-explorer tree it is not.
 
-### 3.10 Declarative engines for Iced
+### 3.10 Embedded scripting — Rhai, Starlark, Rune
+
+When a declarative document needs *some* logic, the alternatives to inventing an
+expression language are embedded interpreters designed for hosts. **Rhai** is
+built for Rust hosts: values cross the boundary as `Dynamic`, host functions and
+getters are registered explicitly, and its stated guarantee is *"Rhai is designed
+to not bring down the host system, regardless of what a script may do to it."*
+Its safety chapter enumerates the vectors it caps — memory, CPU, time, stack,
+overflow — with `Engine::set_max_operations` (one operation ≈ *"one expression
+node, loading one variable/constant, one operator call, one iteration of a loop,
+or one function call"*) and `Engine::on_progress(|ops| …) -> Option<Dynamic>`,
+which terminates the script with `EvalAltResult::ErrorTerminated` when it
+returns `Some` — the documented way to enforce a timeout. A default engine has
+no file, network or clock access; scripts see only what the host registers.
+**Starlark** (Bazel's configuration language) is the principled alternative:
+hermetic and deterministic by design, Python-subset syntax, immutable data.
+**Rune** is a VM with async and hot reload, heavier than either. All three
+produce *values*, not widgets — which is exactly the property the Zed
+conclusion (§3.8) calls for.
+
+### 3.11 Declarative engines for Iced
 
 Two exist: **Dampen** (XML → Iced, hot reload, *"NOT ready for production use"*)
 and **Glacier UI** (XML → Iced, `.gss` stylesheets, data binding). They prove the
@@ -365,17 +388,18 @@ styling system beside the tokenised design system. What we need is narrower — 
 
 ## 4. Options
 
-| | Native `.so` plugin | WASM plugin (draws) | WASM plugin (emits data) | Scripting (Rhai/Lua) | **Declarative + registry-driven** |
+| | Native `.so` plugin | WASM plugin (draws) | WASM plugin (emits data) | Home-grown expression DSL in the document | **Declarative document + Rhai for logic** |
 |---|---|---|---|---|---|
 | Feasible on Iced | **No** — no ABI for `Element` | No — same reason | Yes | Yes | **Yes** |
-| Unknown producer renders | only if plugin present | only if plugin present | default + plugin | default + script | **default from slice; refined by views.toml** |
-| Sandbox | none — it is the process | wasmtime | wasmtime | interpreter | **by construction — it is data** |
-| Version coupling | exact Iced + zensight version | WIT version | WIT version | script API | **schema version of views.toml** |
-| Testable with `iced_test::simulator` | no | no | yes (tree is data) | partly | **yes** |
-| Design-system guard holds | no | no | if the tree names roles | if the API only exposes roles | **yes — tree names roles, tokens resolve** |
-| Runs where the GUI runs (flatpak, no toolchain) | needs matching build | needs runtime | needs runtime | yes | **yes** |
-| Cost to first useful result | high | high | high (needs the tree first) | medium | **low — phase 0 is one function** |
-| What Zed did | rejected | rejected | planned | — | planned (as the protocol WASM will emit) |
+| Unknown producer renders | only if plugin present | only if plugin present | default + plugin | default + doc | **default from slice; refined by document + scripts** |
+| Sandbox | none — it is the process | wasmtime | wasmtime | our evaluator (unproven) | **Rhai's documented limits; no ambient I/O** |
+| Version coupling | exact Iced + zensight version | WIT version | WIT version | our grammar | **document schema + a registered host API** |
+| Testable with `iced_test::simulator` | no | no | yes (tree is data) | yes | **yes; scripts unit-tested on fixture rows** |
+| Design-system guard holds | no | no | if the tree names roles | if the grammar has no styles | **yes — scripts return values, the renderer draws** |
+| Runs where the GUI runs (flatpak, no toolchain) | needs matching build | needs runtime | needs runtime | yes | **yes — one pure-Rust dependency** |
+| Cost to first useful result | high | high | high (needs the tree first) | medium, and it grows | **low — phase 0 is one function; scripts are phase 3** |
+| Who maintains the language | — | — | — | **us, forever** | Rhai |
+| What Zed did | rejected | rejected | planned | — | the same shape: extension emits data, host draws |
 
 The declarative path is not the compromise option — it is the option every
 comparable system converged on, and it is a *prerequisite* for the WASM one: a
@@ -384,9 +408,13 @@ designed first regardless. Designing it as a document that sensors can ship
 without WASM gets the payoff years earlier.
 
 **Decision:** declarative, registry-driven views with a small versioned
-definition format; hand-written Rust views retained as bespoke renderers over the
-same model; WASM deferred to a bounded "view logic" step that emits the same
-tree (§8, phase 5).
+definition format that carries **no expressions**; presentation logic in
+**Rhai** snippets that produce values the renderer consumes (§6.4); hand-written
+Rust views retained as bespoke renderers over the same model. **No home-grown
+DSL** — the test is *if a construct needs an evaluator, it is out of the
+format* — and no WASM: with a sandboxed interpreter for logic and the document
+for structure, the component-model host would isolate against a threat
+(hostile third-party plugins) this project does not have.
 
 ---
 
@@ -405,7 +433,10 @@ Corollaries that decide the hard cases:
   producer-specific is *optional* and *additive*: a `views.toml`, a bespoke Rust
   renderer, an icon.
 - A view definition may say *what* and *how it relates* (this column is the
-  limit for that one); it may not say *how it looks* (no colours, no pixels).
+  limit for that one); it may not say *how it looks* (no colours, no pixels),
+  and it may not **compute**. Presentation logic is a script (§6.4) that returns
+  a value; a script may compute a label, a sort key or a visibility, never a
+  limit the renderer would colour as the producer's.
 - The one hand-written intake path is the common families (§1.4). Everything
   else is decoded by schema.
 
@@ -585,17 +616,22 @@ fields   = ["celsius", "upper_warning_c", "upper_critical_c"]   # default: all
 label    = "$sensor"                # row display name; default: the vars joined
 hide     = ["output_watts"]
 top_n    = 20                       # default from cardinality
-sort     = { by = "celsius", dir = "desc" }
+sort     = { by = "celsius", dir = "desc" }   # a field — or { rhai = "…" } for a key
 sparkline = ["celsius"]
 [panel.grade]                       # LimitRow semantics; absent ≠ 0, unmetered ≠ 0
 reading  = "celsius"
 warning  = "upper_warning_c"        # sibling field — the producer's own limit
-critical = "upper_critical_c"
+critical = "upper_critical_c"       # FIELD NAMES ONLY here: no script slot (§6.4)
 [panel.stale]                       # override the ttl_s/rate default
 after_s = 60
-[[panel.rule]]                      # JSON Forms rules, restricted to the family
-when = { field = "present", eq = false }
-then = "absent"                     # | "hide" | "muted"
+# Presentation logic — Rhai, returning a value (§6.4). No `rule`/`when`
+# vocabulary exists: anything conditional is a script, so the format never
+# grows an operator.
+label  = { rhai = "`${sensor}`" }
+show   = { rhai = "row.present != false" }        # bool: hide the row
+note   = { rhai = "if !row.reachable { \"last readings — BMC did not answer\" }" }
+[panel.format]                      # per-field display value, still typed by decl
+duration_secs = { rhai = "fmt_age(row.duration_secs)" }
 # document:
 schema = "Chassis"                  # type name in describe; default: the subject's type
 # reply:
@@ -627,10 +663,7 @@ group_by = "{chassis}"
 kind = "facts"
 scope = "{chassis}"
 fields = ["reachable"]
-[[panel.rule]]
-when = { field = "reachable", eq = false }
-then = "muted"
-note = "The BMC did not answer this cycle — readings below are the last it gave"
+note = { rhai = "if !row.reachable { \"The BMC did not answer this cycle — readings below are the last it gave\" }" }
 
 [[panel]]
 kind = "table"
@@ -656,15 +689,15 @@ fields = ["input_watts", "capacity_watts", "present"]
 [panel.grade]
 reading = "input_watts"
 critical = "capacity_watts"
-[[panel.rule]]
-when = { field = "present", eq = false }
-then = "absent"
+absent   = "present"                # the field whose `false` means "no supply in the bay"
 ```
 
 Every honesty rule the Rust view encodes (#1127) is expressible: "no fan
-threshold" is the *absence* of a `grade`; "absent ≠ 0" is a `rule`; "the limit is
-the publisher's" is enforced because `warning`/`critical` may only name **sibling
-fields**, never literals.
+threshold" is the *absence* of a `grade`; "absent ≠ 0" is `grade.absent` naming
+the presence field; "the limit is the publisher's" is enforced because
+`warning`/`critical` may only name **sibling fields**, never literals and never
+scripts. The one sentence of logic — the unreachable note — is a Rhai snippet
+returning a string or nothing.
 
 ### 6.3 Worked example — `pve` backup freshness (`overview/pve.rs`)
 
@@ -677,19 +710,81 @@ join  = "backup/{vmid}"           # left join on the shared var: a guest with no
                                   # backup row is the TOP row, not a missing one
 fields = ["running", "backup.age_secs", "backup.ok", "backup.size_change_pct"]
 label = "vmid $vmid"
-sort = { by = "backup.age_secs", dir = "desc", missing = "first" }
+sort = { rhai = "if row.backup == () { -1 } else { -row.backup.age_secs }" }   # never backed up sorts first
+label = { rhai = "`vmid ${vmid}`" }
+[panel.format]
+"backup.age_secs" = { rhai = "if row.backup == () { \"never\" } else { fmt_age(row.backup.age_secs) }" }
 [panel.grade]
 reading  = "backup.age_secs"
-critical = { const = 172800, declared_by = "gui" }   # explicit: a GUI window, not a producer limit
+critical = { const = 172800, declared_by = "gui" }   # a literal with provenance: a GUI window, not a producer limit
 ```
 
 The `join` is the one thing the derivation cannot infer — that two families share
 a var by *meaning* — and it is exactly the design decision `backup_rows()` makes in
-prose today. `declared_by = "gui"` is how a definition admits a threshold is its
-own rather than the producer's; the renderer labels it as such (this is the
-`EXPIRY_SOON_DAYS` rule from the probe view, made visible).
+prose today. The "never backed up sorts first" rule that needed a `missing =
+"first"` special case in the closed vocabulary is three tokens of Rhai instead,
+and the vocabulary is smaller for it. `declared_by = "gui"` is how a definition
+admits a threshold is its own rather than the producer's; the renderer labels it
+as such (this is the `EXPIRY_SOON_DAYS` rule from the probe view, made visible) —
+it is a **literal with provenance**, not logic, which is why it stays in the
+document and not in a script.
 
-### 6.4 The semantic hint
+### 6.4 Presentation scripts — Rhai
+
+The probe view's `outcome_label()` builds *"timed out after 20.0 s"* from
+`timeout` and `duration_ms`; pve's `age_label()` turns seconds into *"3.2d"*;
+container's row label is `host/name`. None of these is a threshold, all of them
+are presentation, and none fits a closed vocabulary without a `format` construct
+with conditionals — which is a DSL by another name. So the document has **no
+conditional vocabulary at all**; wherever it needs one, a slot takes
+`{ rhai = "…" }`.
+
+**What a script sees.** A fresh `Scope` per evaluation with: `row` (a map of the
+family's fields for this instance, siblings from a `join` under their family
+name, `()` when absent), the bound vars by name (`chassis`, `vmid`, …), and `decl`
+(the slice's `SubjectDecl` for each field: `unit`, `kind`, `description`). Host
+functions are registered explicitly and are pure: `fmt_age`, `fmt_bytes`,
+`fmt_unit(value, unit)`. `now_ms` is **not** among them — a script must not know
+the time; staleness is the renderer's, from `ttl_s`/`rate`.
+
+**What a script returns.** A value the slot's type demands — `label`/`note`/
+`format.*` a string or `()`, `show` a bool, `sort` a number or string. The
+renderer draws. A script cannot name a colour, a size or a widget, so the
+design-system guard holds by construction.
+
+**What a script cannot do.** Produce a limit. `grade.warning`/`critical`/
+`absent` accept field names only; there is no script slot, so the renderer never
+colours a computed number as the producer's threshold. The doctrine — the limit
+is the publisher's — is enforced by the *absence of an API*, not by review.
+
+**Limits, from Rhai's Safety chapter.** `Engine::set_max_operations` (a few
+thousand is generous for a row label), `on_progress` returning `Some(())` past a
+wall-clock budget so a runaway script terminates with `ErrorTerminated` rather
+than stalling a frame, `set_max_call_levels`, string/array/map size caps, and
+the `unchecked` feature *not* enabled. No file, network or clock is registered.
+A script error renders as the slot's fallback (the field's default display) plus
+a visible "view script failed: …" note — a broken view must look broken, never
+silently empty.
+
+**Where scripts live and how they are checked.** Inline in the document for
+one-liners; a `.rhai` file beside `views.toml` for anything longer, inlined into
+the served `ViewSet`. At build, every script is `Engine::compile`d and its AST
+walked for variable names, which must be declared fields or vars of the panel's
+family — the same "must not lie" posture as the registry lint. At load, compiled
+`AST`s are cached per view version. In tests, a script is evaluated against a
+fixture row in a plain Rust test, no window needed.
+
+**Why Rhai and not Starlark or a WASM component.** Rhai is built for Rust hosts
+(getters, `Dynamic`, serde), one pure-Rust dependency, and its limits are the
+documented ones above. Starlark is the principled alternative if hermeticity
+must be *provable* rather than arranged (nothing registered → nothing reachable);
+because scripts only produce values, the engine is swappable behind the slot
+API. A WASM component host isolates memory against hostile code, which is a
+threat model this project does not have — sensors are already trusted processes
+on the host, and their view scripts ship in the same tree. Keep the option; do
+not build it.
+
+### 6.5 The semantic hint
 
 Home Assistant's `device_class` earns its keep with a dozen values. We add one
 optional field to the registry, upstream in zenkey (RFC 08 §2, additive):
@@ -736,13 +831,13 @@ Each phase is shippable and leaves the tree no worse than before it.
 | **0 — spike** (days) | `generic_device_view` reads the producer's `RegistrySlice` (already fetched) and renders families as tables with units and kinds. No `views.toml`. | A producer with no hand-written view renders something honest. Would have covered bmc/pve/container/probe on day one. |
 | **1 — intake** | `Message::Document`/`Event`; decode via `zenkey_fleet::SchemaStore`; `DeviceId.producer: String`; `TelemetryPoint` loses `protocol` (`!`); late-joiner ring for pre-slice samples; unregistered producer → rendered finding. | An unknown producer is *seen*. |
 | **2 — model + defaults** | The family derivation (§5.3) as a tested pure function over `RegistrySlice`; default renderers for table/facts/document; common families untouched. | The default view is good enough that a bespoke one is a choice, not a requirement. |
-| **3 — definitions** | `views.toml` v1, `zenkey-build` lint, `@rpc/<producer>/views`, GUI precedence (producer → bundled → bespoke). **bmc, pve and probe rewritten declaratively** and their Rust views deleted — the acceptance test is that the simulator tests written for #1126/#1127/#1128 pass unchanged against the declarative renderer. | The format is expressive enough for real views and the honesty rules survive. |
+| **3 — definitions + scripts** | `views.toml` v1 with Rhai slots (§6.4), the build lint (document references only declared subjects; every script compiles and names only declared fields), `@rpc/<producer>/views`, GUI precedence (producer → bundled → bespoke). **bmc, pve and probe rewritten declaratively** and their Rust views deleted — the acceptance test is that the simulator tests written for #1126/#1127/#1128 pass unchanged against the declarative renderer. | The format plus a sandboxed value-returning script is expressive enough for real views, and the honesty rules survive. |
 | **4 — consolidation** | Every specialized view reads the family model; generic `Call`/`Reply` replaces the Fetch pairs; write forms from request schemas; delete the 82 messages and 7 detail states. | `app.rs` is a router again. |
-| **5 — logic plugins** (optional) | A WASM "view logic" host: a component receives the family model, returns a `ViewSet` tree. Same renderer, same guards, sandboxed. | The third-party story, if it is ever needed. |
+| **5 — not planned** | WASM view plugins. Retained as an option only if hostile third-party plugins ever become a requirement; the document + Rhai covers every in-tree case. | — |
 
 Phase 0 is the whole argument in miniature and costs a day. Phase 1 is the one
 that needs the release choreography. Phases 2–3 are where the value is. Phase 4 is
-debt repayment. Phase 5 is insurance.
+debt repayment.
 
 ---
 
@@ -772,6 +867,15 @@ debt repayment. Phase 5 is insurance.
   retires it from `zensight-common` once every consumer keys on the producer
   name. Not a blocker: `Protocol::from_str` on the producer chunk bridges for
   as long as needed.
+- **Script performance.** Rhai is an AST interpreter — its own benchmark is ~1 M
+  simple iterations in 0.14 s. A row label over a few hundred rows at the GUI's
+  refresh cadence is far inside that; the traffic matrix and the 10 k-row
+  explorer tree are not, and stay bespoke Rust. Compile once per view version,
+  evaluate with a fresh `Scope`, and `on_progress` caps the worst case.
+- **Script determinism.** Not formally hermetic like Starlark, but with no clock,
+  I/O or randomness registered it is deterministic in practice, and the build
+  lint rejects an unknown identifier. If provable hermeticity is ever required,
+  the slot API is engine-agnostic.
 - **Scope creep into a dashboard builder.** Non-goal (§10). Grafana exists and the
   exporters feed it; this is about the GUI showing the bus it watches.
 
@@ -784,8 +888,10 @@ Grafana; loading third-party code in v1–4; changing the keyspace.
 
 **Open questions for review:**
 
-1. **Format:** TOML (registry parity, one linter) vs JSON5 (config parity)? This
-   doc assumes TOML.
+1. **Format:** follows the registry. zenkey #374 proposes a KDL spelling because
+   *the format is a wire contract*; the view document should take whatever the
+   registry takes, not choose on its own. This doc uses TOML because the registry
+   is TOML today.
 2. **Where a definition lives:** compiled into the sensor and served (proposed —
    versioned with the slice) vs a separate artifact the GUI fetches from a
    store. Serving keeps "a sensor and its view move together."
@@ -796,12 +902,30 @@ Grafana; loading third-party code in v1–4; changing the keyspace.
 5. **Common-procedure declaration:** `views` declared in all 18 registries like
    `introspect`, or does zenkey gain injected common procedures (an RFC 08
    change)? The former needs no upstream work.
-6. **Histogram (#1151):** the family model wants it for latency families; does it
-   land before phase 2?
+6. **Histogram (#1151 / zenkey #459):** the family model wants it for latency
+   families; does it land before phase 2?
+7. **Rhai vs Starlark:** Rhai for Rust ergonomics (proposed) or Starlark for
+   provable hermeticity? Swappable behind the slot API; decide before phase 3.
 
 ---
 
-## 11. Sources
+## 11. Dependencies on zenkey
+
+Filed 2026-09-20. Only the first is required.
+
+| zenkey | What | Needed by | Status |
+|---|---|---|---|
+| [#460](https://git.marcpardo.eu/marcpardo/zenkey/issues/460) | **`RegistrySlice::bind(class, tail) -> Option<Bound>`** — match a live subject tail against declared `path` patterns and return the `{vars}`. Today `subject_target` compares `s.path == path` literally and the generated `parse_metric()` exists only for compiled producers. ~50 lines. | phase 2 (the family model) | **required** — the GUI can carry a private copy until it lands |
+| [#461](https://git.marcpardo.eu/marcpardo/zenkey/issues/461) | RFC 08 §2, additive: optional `semantic` on `SubjectDecl` (§6.5) | phase 3+ | optional |
+| [#462](https://git.marcpardo.eu/marcpardo/zenkey/issues/462) | RFC 05: `views` as a *common* read procedure with reply `ViewSet`, so `zenctl` can render a producer from the same document; format deferred to #374 | phase 3+ — ZenSight can declare it per-registry meanwhile | optional |
+| [#459](https://git.marcpardo.eu/marcpardo/zenkey/issues/459) | `histogram` as a fifth `SubjectKind` (ZenSight #1151) | phase 2 for latency families | already filed |
+| [#374](https://git.marcpardo.eu/marcpardo/zenkey/issues/374) | registry KDL spelling — the view document follows it | phase 3 | tracking |
+
+Nothing else in this design touches zenkey: the `views` procedure rows, the
+`ViewSet` type and schema, the family derivation, the renderer, the Rhai host API
+and the build lint are all ZenSight-side and additive.
+
+## 12. Sources
 
 Tree evidence (master `77d69946`):
 `zensight-common/src/telemetry.rs:166,272` · `zensight-common/src/keyexpr.rs:49` ·
@@ -827,3 +951,5 @@ External:
 - WASM components — [Building Native Plugin Systems with WebAssembly Components](https://tartanllama.xyz/posts/wasm-plugins/), [Extism](https://github.com/extism/extism)
 - Iced — [iced-rs/iced](https://github.com/iced-rs/iced), [Dampen](https://github.com/mattdef/dampen), [Glacier UI](https://github.com/antoniofernandodj/glacier-ui)
 - Zenoh — [REST API & admin space](https://zenoh.io/docs/apis/rest/), [Storage manager plugin](https://zenoh.io/docs/manual/plugin-storage-manager/)
+- Rhai — [Safety](https://rhai.rs/book/safety/index.html), [Maximum operations](https://rhai.rs/book/safety/max-operations.html), [Track progress / terminate a script](https://rhai.rs/book/safety/progress.html), [Benchmarks](https://rhai.rs/book/about/benchmarks.html), [rhaiscript/rhai](https://github.com/rhaiscript/rhai)
+- Starlark — [starlark-lang.org](https://starlark-lang.org/), [bazelbuild/starlark](https://github.com/bazelbuild/starlark); Rune — [rune-rs/rune](https://github.com/rune-rs/rune)
