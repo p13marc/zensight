@@ -97,7 +97,15 @@ fn default_delete_grace() -> u32 {
 impl DesiredDaemonConfig {
     pub fn load(path: &str) -> Result<Self, String> {
         let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
-        let cfg: Self = json5::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+        Self::parse(&text).map_err(|e| format!("{path}: {e}"))
+    }
+
+    /// Strict (#1150): a key no struct declares is a refusal naming it, as for
+    /// every sensor. `--check-config` used to pass a typo'd key through a
+    /// bare `json5::from_str`.
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let cfg: Self =
+            zensight_common::config::parse_config_strict(text).map_err(|e| e.to_string())?;
         cfg.validate()?;
         Ok(cfg)
     }
@@ -139,5 +147,24 @@ mod tests {
     fn the_shipped_config_loads() {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../configs/desired.json5");
         DesiredDaemonConfig::load(path).expect("configs/desired.json5 must load");
+    }
+
+    /// #1150, the half this daemon had skipped: a key no struct declares is a
+    /// refusal that names it — not a silent Rust default.
+    #[test]
+    fn a_typoed_key_is_refused_by_name() {
+        let err = DesiredDaemonConfig::parse(
+            r#"{ desired: { policy: "fleet-policy.json5", refresh_sec: 30 } }"#,
+        )
+        .unwrap_err();
+        assert!(err.contains("desired.refresh_sec"), "{err}");
+    }
+
+    /// The shipped `configs/desired.json5` passes the strict parser: a stale key
+    /// in it would now be a startup refusal on every install (#1150).
+    #[test]
+    fn the_shipped_config_parses_strictly() {
+        DesiredDaemonConfig::parse(include_str!("../../configs/desired.json5"))
+            .expect("shipped config has no undeclared key");
     }
 }

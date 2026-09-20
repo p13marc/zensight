@@ -15,6 +15,9 @@ pub enum ConfigError {
     Parse(#[from] json5::Error),
     #[error("Validation error: {0}")]
     Validation(String),
+    /// A key no struct declares (#1150) — the refusal names every one by path.
+    #[error("{0}")]
+    UnknownKey(String),
 }
 
 /// Complete exporter configuration.
@@ -268,14 +271,16 @@ impl ExporterConfig {
     /// Load configuration from a JSON5 file.
     pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let content = std::fs::read_to_string(path)?;
-        let config: ExporterConfig = json5::from_str(&content)?;
-        config.validate()?;
-        Ok(config)
+        Self::parse(&content)
     }
 
-    /// Parse configuration from a JSON5 string.
+    /// Parse configuration from a JSON5 string — strictly (#1150): a key no
+    /// struct declares is a refusal naming it, exactly as every sensor's
+    /// `SensorConfig::parse_strict`. This exporter parsed with a bare
+    /// `json5::from_str`, so a typo took the Rust default silently.
     pub fn parse(content: &str) -> Result<Self, ConfigError> {
-        let config: ExporterConfig = json5::from_str(content)?;
+        let config: ExporterConfig = zensight_common::config::parse_config_strict(content)
+            .map_err(|e| ConfigError::UnknownKey(e.to_string()))?;
         config.validate()?;
         Ok(config)
     }
@@ -632,5 +637,22 @@ mod tests {
 
         cfg.filters.include_protocols = vec!["snmp".into(), "logs".into()];
         assert!(cfg.validate().is_ok());
+    }
+
+    /// #1150, the half this exporter had skipped: a key no struct declares is
+    /// a refusal that names it — not a silent Rust default.
+    #[test]
+    fn a_typoed_key_is_refused_by_name() {
+        let err = ExporterConfig::parse(r#"{ listen_addres: "x" }"#).unwrap_err();
+        assert!(matches!(err, ConfigError::UnknownKey(_)), "{err}");
+        assert!(err.to_string().contains("listen_addres"), "{err}");
+    }
+
+    /// The shipped `configs/prometheus-exporter.json5` passes the strict parser: a stale key
+    /// in it would now be a startup refusal on every install (#1150).
+    #[test]
+    fn the_shipped_config_parses_strictly() {
+        ExporterConfig::parse(include_str!("../../configs/prometheus-exporter.json5"))
+            .expect("shipped config has no undeclared key");
     }
 }

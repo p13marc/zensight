@@ -777,6 +777,89 @@ pub fn parse_config<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T> {
     json5::from_str(content).map_err(|e| Error::Config(format!("Failed to parse config: {}", e)))
 }
 
+/// Parse a JSON5 config **refusing every key no struct declares** (#1150),
+/// by full dotted path, in one pass.
+///
+/// This is the mechanism behind `SensorConfig::parse_strict`, lifted here so a
+/// daemon that is not a sensor — the correlator, `zensight-desired` — parses
+/// the same way rather than with a bare `json5::from_str` that lets a typo'd
+/// key take the Rust default on a production host. It is `serde_ignored`, not
+/// `deny_unknown_fields`, so the message names every stray key and where it
+/// sits. Two exemptions, both deliberate (`docs/COMPATIBILITY.md`): the
+/// `zenoh` block is never checked (a newer participant must be able to hand
+/// its transport knobs to an older one mid-rollout), and a top-level
+/// `allow_unknown_fields: true` downgrades the refusal to one `warn!` naming
+/// the keys. Validation is the caller's; this only parses.
+pub fn parse_config_strict<T: for<'de> Deserialize<'de>>(content: &str) -> Result<T> {
+    let value: serde_json::Value = json5::from_str(content)
+        .map_err(|e| Error::Config(format!("Failed to parse config: {}", e)))?;
+    let allow = value
+        .get("allow_unknown_fields")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+
+    let mut unknown: Vec<String> = Vec::new();
+    let config: T = serde_ignored::deserialize(value, |path| {
+        let path = path.to_string();
+        if path == "allow_unknown_fields" || path == "zenoh" || path.starts_with("zenoh.") {
+            return;
+        }
+        unknown.push(path);
+    })
+    .map_err(|e| Error::Config(e.to_string()))?;
+
+    if !unknown.is_empty() {
+        let list = unknown.join(", ");
+        if allow {
+            tracing::warn!(
+                unknown_keys = %list,
+                "config has unknown keys (allow_unknown_fields is set — ignoring)"
+            );
+        } else {
+            return Err(Error::Config(format!(
+                "unknown config key(s): {list}. Fix the typo, or set \
+                 allow_unknown_fields: true to ignore (mixed-version fleets)."
+            )));
+        }
+    }
+    Ok(config)
+}
+
+#[cfg(test)]
+mod strict_tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize)]
+    struct Cfg {
+        #[serde(default)]
+        zenoh: ZenohConfig,
+        #[serde(default)]
+        ttl_secs: u64,
+    }
+
+    #[test]
+    fn a_key_nothing_declares_is_refused_by_path() {
+        let err =
+            parse_config_strict::<Cfg>(r#"{ ttl_secs: 5, ttl_sec: 5 }"#).expect_err("refused");
+        assert!(
+            err.to_string().contains("unknown config key(s): ttl_sec"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn the_zenoh_block_and_the_escape_hatch_are_exempt() {
+        let cfg: Cfg =
+            parse_config_strict(r#"{ zenoh: { mode: "peer", future_knob: 1 }, ttl_secs: 5 }"#)
+                .expect("zenoh knobs pass");
+        assert_eq!(cfg.ttl_secs, 5);
+        let cfg: Cfg = parse_config_strict(r#"{ allow_unknown_fields: true, ttl_sec: 5 }"#)
+            .expect("downgraded to a warning");
+        assert_eq!(cfg.ttl_secs, 0, "the typo still took the default — loudly");
+        let _ = cfg.zenoh;
+    }
+}
+
 #[cfg(test)]
 mod link_profile_tests {
     use super::*;
