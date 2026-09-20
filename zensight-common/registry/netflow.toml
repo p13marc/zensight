@@ -3,7 +3,7 @@
 # TelemetryPoint) — typed per-metric refinement is additive (registry MINOR).
 
 [registry]
-version = "1.3"
+version = "1.4"
 app = "zensight"
 convention = 1
 
@@ -108,7 +108,14 @@ kind = "read"
 reply = "Vec<FlowRecord>"
 idempotent = true
 since = "1.0"
-description = "on-demand flow detail (?src=;dst=;max=)"
+description = "on-demand flow detail (?exporter=;max=)"
+[[procedure]]
+path = "flows/page"
+kind = "read"
+reply = "Page<FlowRecord>"
+idempotent = true
+since = "1.4"
+description = "the same walk as `flows`, in the RFC 05 §3.2 envelope: {items, next_cursor, partial, scanned}. Accepts every selector `flows` does. The sibling exists because `flows` replies with a bare Vec, which has nowhere to say 'I stopped early' — the ring holds 2048 records and the default reply 500, so on a busy exporter most calls are truncated and none said so (#1156)"
 
 # The `@blob` plane (RFC 07 §2, RFC 08 §2 v1.8): every artifact-capable
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2

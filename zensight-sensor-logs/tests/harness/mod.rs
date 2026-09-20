@@ -211,7 +211,7 @@ impl RigBuilder {
         // Unique producer prefix so parallel rigs don't share keys on one origin.
         let producer = format!("test-{nanos}-logs");
         let filter = Arc::new(FilterManager::pass_all());
-        let (ring, capacity) = query::new_ring(10_000);
+        let ring = query::new_ring(10_000);
 
         // Serve both event procedures (no durable store in the socket rigs;
         // the store's query path is exercised by a dedicated e2e test). The
@@ -231,13 +231,7 @@ impl RigBuilder {
         if self.drain {
             let ring = ring.clone();
             let filter = filter.clone();
-            tokio::spawn(intake_loop(
-                rx,
-                filter,
-                ring,
-                capacity,
-                self.collapse_window,
-            ));
+            tokio::spawn(intake_loop(rx, filter, ring, self.collapse_window));
         } else {
             // Keep rx alive but never drain it, so the channel back-pressures.
             std::mem::forget(rx);
@@ -250,7 +244,6 @@ impl RigBuilder {
             session,
             producer,
             ring,
-            capacity,
             filter,
             ingest_stats,
             listener: self.listener,
@@ -262,7 +255,6 @@ async fn intake_loop(
     mut rx: tokio::sync::mpsc::Receiver<ReceivedMessage>,
     filter: Arc<FilterManager>,
     ring: EventRing,
-    capacity: usize,
     collapse_window: Option<Duration>,
 ) {
     use std::time::Instant;
@@ -284,7 +276,7 @@ async fn intake_loop(
                 .insert("repeat_count".to_string(), count.to_string());
         }
         if let Some(record) = LogRecord::from_point(&point) {
-            query::push(&ring, capacity, record);
+            ring.push(record);
         }
     };
 
@@ -324,7 +316,6 @@ pub struct LogRig {
     pub session: Arc<zenoh::Session>,
     pub producer: String,
     pub ring: EventRing,
-    pub capacity: usize,
     pub filter: Arc<FilterManager>,
     pub ingest_stats: Arc<zensight_sensor_logs::ingest::IngestStats>,
     pub listener: ListenerConfig,

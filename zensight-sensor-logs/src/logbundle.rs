@@ -158,7 +158,7 @@ impl ArtifactProducer for LogBundleProducer {
                 }
             }
             // Hot ring (recent lines maybe not yet flushed).
-            if let Ok(r) = ring.lock() {
+            ring.with(|r| {
                 for rec in r.iter() {
                     if rec.ts >= from_ms
                         && rec.ts <= to_ms
@@ -168,7 +168,7 @@ impl ArtifactProducer for LogBundleProducer {
                         by_uid.insert(rec.uid.clone(), rec.clone());
                     }
                 }
-            }
+            });
             let records: Vec<LogRecord> = by_uid
                 .into_values()
                 .filter(|r| source_filter.as_deref().is_none_or(|s| r.host == s))
@@ -279,7 +279,7 @@ mod tests {
 
     #[test]
     fn advert_and_kind_slug() {
-        let (ring, _) = new_ring(100);
+        let ring = new_ring(100);
         let p = LogBundleProducer::new(&limits(), "h", None, ring);
         assert_eq!(p.kind(), "logbundle");
         assert!(matches!(p.advert(), KindAdvert::LogBundle { max_lines: 3 }));
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn accepts_validates_pattern() {
-        let (ring, _) = new_ring(100);
+        let ring = new_ring(100);
         let p = LogBundleProducer::new(&limits(), "h", None, ring);
         assert!(
             p.accepts(&ArtifactKind::LogBundle {
@@ -339,7 +339,7 @@ mod tests {
             .collect();
         store.write_batch(&recs).unwrap();
 
-        let (ring, _) = new_ring(100);
+        let ring = new_ring(100);
         // max_lines = 3 (from limits()) → 4 "boom" matches truncate to 3.
         let p = LogBundleProducer::new(&limits(), "web01", Some(store), ring);
 

@@ -8,9 +8,11 @@
 //! per-line event ring (#358).
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
+use zensight_common::page::Page;
 use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_sensor_core::ring::BoundedRing;
 
 use crate::fields::MAX_EXPORTERS;
 use crate::receiver::{FlowFieldValue, FlowRecord, protocol_number_to_name};
@@ -18,24 +20,44 @@ use crate::receiver::{FlowFieldValue, FlowRecord, protocol_number_to_name};
 /// Default reply cap when no `?max=` selector is supplied.
 pub const DEFAULT_FLOWS_REPLY_MAX: usize = 500;
 
-/// Flow-ring capacity (recent raw records held for the `flows` procedure).
+/// Flow-ring capacity (recent raw records held for the `flows` procedure),
+/// and the most one reply may carry: a reply cap is a memory bound on this
+/// process, and `partial` + `next_cursor` is how a caller asks for more.
 pub const FLOWS_RING_CAPACITY: usize = 2048;
 
 /// The bounded ring of recent flow records, shared between the intake loop
-/// and the `flows` queryable task.
-pub type FlowRing = Arc<Mutex<VecDeque<FlowRecord>>>;
+/// and the `flows` queryable tasks — the framework's [`BoundedRing`] since
+/// #1156, the same shape the logs sensor's event ring uses.
+pub type FlowRing = Arc<BoundedRing<FlowRecord>>;
 
 /// Create an empty flow ring.
 pub fn new_ring() -> FlowRing {
-    Arc::new(Mutex::new(VecDeque::with_capacity(FLOWS_RING_CAPACITY)))
+    Arc::new(BoundedRing::new(FLOWS_RING_CAPACITY))
 }
 
-/// Append one record, evicting the oldest past capacity.
-pub fn push(ring: &FlowRing, record: FlowRecord) {
-    if let Ok(mut r) = ring.lock() {
-        r.push_back(record);
-        while r.len() > FLOWS_RING_CAPACITY {
-            r.pop_front();
+/// The two spellings of the flow-detail read (#1156, the shape #1147 gave
+/// the logs sensor). They run the same walk over the same ring and differ
+/// only in what they put on the wire: `flows` cannot be changed in place —
+/// RFC 08 §3 calls a changed reply type on an existing path incompatible and
+/// the lock refuses it — so the envelope arrives as a sibling and `flows`
+/// keeps its `Vec<FlowRecord>` contract for every caller built against it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Procedure {
+    /// `flows` — `Vec<FlowRecord>`. Cannot say "I stopped early".
+    Bare,
+    /// `flows/page` — `Page<FlowRecord>`, with `partial`, `next_cursor` and
+    /// `scanned`.
+    Paged,
+}
+
+impl Procedure {
+    /// This procedure's `@rpc` key — built, not formatted: `flows/page` is two
+    /// chunks, and `query_key` refuses an embedded `/`.
+    #[must_use]
+    pub fn key(self) -> String {
+        match self {
+            Self::Bare => zensight_common::command::query_key("netflow", "flows"),
+            Self::Paged => zensight_common::command::nested_query_key("netflow", "flows", "page"),
         }
     }
 }
@@ -200,25 +222,45 @@ impl Rollups {
     }
 }
 
-/// Pure reply builder for the `flows` procedure: newest-first,
-/// exporter-filtered, capped at `max`.
+/// Pure reply builder for the flow-detail read: newest-first,
+/// exporter-filtered, one page of at most `max`.
+///
+/// Returns a [`Page`] rather than a bare `Vec` (#1156): the ring holds 2048
+/// records and the default reply is 500, so a busy exporter's walk stops
+/// early on most calls — and the bare shape had nowhere to say so. Taking
+/// `max + 1` and keeping `max` is how the walk learns there was a next row
+/// without paying for it; the cursor is the last row **emitted** — its
+/// `timestamp`, a value, never a position (RFC 05 §3.2).
 fn filter_ring(
     records: &VecDeque<FlowRecord>,
     exporter: Option<&str>,
     max: usize,
-) -> Vec<FlowRecord> {
-    records
+) -> Page<FlowRecord> {
+    let mut matches: Vec<FlowRecord> = records
         .iter()
         .rev()
         .filter(|r| exporter.is_none_or(|e| r.exporter_name == e))
-        .take(max)
+        .take(max.saturating_add(1))
         .cloned()
-        .collect()
+        .collect();
+    let scanned = matches.len() as u64;
+    if matches.len() > max {
+        matches.truncate(max);
+        let cursor = matches
+            .last()
+            .map(|r| r.timestamp.to_string())
+            .unwrap_or_default();
+        return Page::more(matches, cursor).scanned(scanned);
+    }
+    Page::complete(matches).scanned(scanned)
 }
 
-/// Serve the `flows` read procedure (`?exporter=…;max=…`) until the session
-/// closes. Replies newest-first JSON `Vec<FlowRecord>` on the concrete key.
-pub async fn serve_flows(session: Arc<zenoh::Session>, key: String, ring: FlowRing) {
+/// Serve one of the two flow-detail procedures (`?exporter=…;max=…`, `limit=`
+/// as the paginated alias) until the session closes. Replies newest-first on
+/// the concrete key: `flows` the bare `Vec<FlowRecord>` its registry entry
+/// declares, `flows/page` the RFC 05 §3.2 envelope.
+pub async fn serve_flows(session: Arc<zenoh::Session>, ring: FlowRing, procedure: Procedure) {
+    let key = procedure.key();
     let queryable = match zensight_common::served::serve_queryable(&session, &key).await {
         Ok(q) => q,
         Err(e) => {
@@ -230,24 +272,33 @@ pub async fn serve_flows(session: Arc<zenoh::Session>, key: String, ring: FlowRi
 
     while let Ok(query) = queryable.recv_async().await {
         let params = query.parameters();
-        let exporter = params.get("exporter").map(str::to_string);
+        // Percent-decoded (#1122, #1156): an exporter named `edge 01` reaches
+        // the filter as itself, not as `edge%2001`.
+        let exporter = params.get("exporter").map(zensight_common::percent_decode);
         let max = params
             .get("max")
+            .or_else(|| params.get("limit"))
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n > 0)
-            .unwrap_or(DEFAULT_FLOWS_REPLY_MAX);
-        let records: Vec<FlowRecord> = match ring.lock() {
-            Ok(r) => filter_ring(&r, exporter.as_deref(), max),
-            Err(_) => Vec::new(),
+            .unwrap_or(DEFAULT_FLOWS_REPLY_MAX)
+            .min(FLOWS_RING_CAPACITY);
+        let page = ring.with(|r| filter_ring(r, exporter.as_deref(), max));
+        debug_assert!(
+            !page.is_contract_violation(),
+            "a truncated page must carry a cursor (RFC 05 §3.2)"
+        );
+        let payload = match procedure {
+            Procedure::Paged => serde_json::to_vec(&page),
+            Procedure::Bare => serde_json::to_vec(&page.items),
         };
-        match serde_json::to_vec(&records) {
+        match payload {
             Ok(payload) => {
                 // Concrete reply key (RFC 05 §2.1).
                 if let Err(e) = query.reply(key.as_str(), payload).await {
-                    tracing::warn!(error = %e, "flows: reply failed");
+                    tracing::warn!(error = %e, key = %key, "flows: reply failed");
                 }
             }
-            Err(e) => tracing::warn!(error = %e, "flows: serialize failed"),
+            Err(e) => tracing::warn!(error = %e, key = %key, "flows: serialize failed"),
         }
     }
 }
@@ -460,13 +511,13 @@ mod tests {
             let exporter = if i % 2 == 0 { "a" } else { "b" };
             let mut record = rec(exporter, 6, i);
             record.timestamp = i as i64;
-            push(&ring, record);
+            ring.push(record);
         }
-        let r = ring.lock().unwrap();
+        let r = ring.with(|r| r.clone());
         let out = filter_ring(&r, Some("a"), 3);
-        assert_eq!(out.len(), 3);
-        assert!(out.iter().all(|f| f.exporter_name == "a"));
-        assert_eq!(out[0].timestamp, 8, "newest matching first");
+        assert_eq!(out.items.len(), 3);
+        assert!(out.items.iter().all(|f| f.exporter_name == "a"));
+        assert_eq!(out.items[0].timestamp, 8, "newest matching first");
     }
 
     /// **#1139, the acceptance.** The rollup map is bounded, and evicts the
@@ -533,5 +584,55 @@ mod tests {
             crate::fields::SamplingRegistry::MAX_EXPORTERS,
             MAX_EXPORTERS
         );
+    }
+
+    fn flow(exporter: &str, ts: i64) -> FlowRecord {
+        FlowRecord {
+            exporter_ip: "10.0.0.1".into(),
+            exporter_name: exporter.into(),
+            version: 9,
+            fields: HashMap::new(),
+            timestamp: ts,
+        }
+    }
+
+    /// The ring holds more than the page: `partial` says so and the cursor is
+    /// the last row emitted, newest first (#1156).
+    #[test]
+    fn a_truncated_flow_page_says_so() {
+        let ring: VecDeque<FlowRecord> = (0..10).map(|i| flow("edge01", 1_000 + i)).collect();
+        let page = filter_ring(&ring, None, 3);
+        assert!(page.partial);
+        assert_eq!(page.items.len(), 3);
+        assert_eq!(page.items[0].timestamp, 1_009, "newest first");
+        assert_eq!(
+            page.next_cursor.as_deref(),
+            Some("1007"),
+            "the last row emitted"
+        );
+        assert_eq!(page.scanned, Some(4), "max + 1 is all the walk paid for");
+        assert!(!page.is_contract_violation());
+    }
+
+    /// A page that holds the whole walk is complete, and an exporter filter
+    /// scopes the walk before the cap.
+    #[test]
+    fn a_complete_flow_page_and_the_exporter_filter() {
+        let mut ring: VecDeque<FlowRecord> = (0..4).map(|i| flow("edge01", 1_000 + i)).collect();
+        ring.push_back(flow("edge02", 2_000));
+        let page = filter_ring(&ring, Some("edge02"), 10);
+        assert!(!page.partial);
+        assert_eq!(page.next_cursor, None);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].exporter_name, "edge02");
+        let all = filter_ring(&ring, None, 10);
+        assert!(!all.partial);
+        assert_eq!(all.items.len(), 5);
+    }
+
+    #[test]
+    fn the_two_procedures_have_their_own_keys() {
+        assert!(Procedure::Bare.key().ends_with("/@rpc/netflow/flows"));
+        assert!(Procedure::Paged.key().ends_with("/@rpc/netflow/flows/page"));
     }
 }

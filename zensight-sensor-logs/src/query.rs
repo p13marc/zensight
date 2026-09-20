@@ -22,7 +22,9 @@
 //! store (days of history, survives restart); otherwise from the hot ring.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+use zensight_sensor_core::ring::BoundedRing;
 
 use zensight_common::LogRecord;
 use zensight_common::page::Page;
@@ -46,27 +48,15 @@ pub const MAX_EVENTS_REPLY_MAX: usize = 10_000;
 pub const MIN_EVENTS_RING_CAPACITY: usize = 100;
 
 /// The bounded ring of recent per-line log events, shared between the intake
-/// loop (producer) and the queryable task (consumer).
-pub type EventRing = Arc<Mutex<VecDeque<LogRecord>>>;
+/// loop (producer) and the queryable task (consumer) — the framework's
+/// [`BoundedRing`] since #1156, the same shape netflow's flow ring uses.
+pub type EventRing = Arc<BoundedRing<LogRecord>>;
 
 /// Create an empty ring for `capacity` records (clamped to
-/// [`MIN_EVENTS_RING_CAPACITY`]).
-pub fn new_ring(capacity: usize) -> (EventRing, usize) {
-    let capacity = capacity.max(MIN_EVENTS_RING_CAPACITY);
-    (
-        Arc::new(Mutex::new(VecDeque::with_capacity(capacity))),
-        capacity,
-    )
-}
-
-/// Append one record, evicting the oldest past `capacity`.
-pub fn push(ring: &EventRing, capacity: usize, record: LogRecord) {
-    if let Ok(mut r) = ring.lock() {
-        r.push_back(record);
-        while r.len() > capacity {
-            r.pop_front();
-        }
-    }
+/// [`MIN_EVENTS_RING_CAPACITY`]). The capacity travels with the ring
+/// (`ring.capacity()`), so a push cannot be given the wrong one.
+pub fn new_ring(capacity: usize) -> EventRing {
+    Arc::new(BoundedRing::new(capacity.max(MIN_EVENTS_RING_CAPACITY)))
 }
 
 /// Cap on records scanned by a single content search over the durable store
@@ -253,10 +243,7 @@ pub async fn run_events_procedure(
             // Hot path — snapshot the ring under the lock, reply outside it.
             // The ring is the whole of recent history, so a short page there
             // really is the end of it.
-            match ring.lock() {
-                Ok(r) => filter_ring(&r, since, host.as_deref(), max, &matcher),
-                Err(_) => Page::complete(Vec::new()),
-            }
+            ring.with(|r| filter_ring(r, since, host.as_deref(), max, &matcher))
         };
         debug_assert!(
             !page.is_contract_violation(),
@@ -365,13 +352,9 @@ mod tests {
             .expect("disable multicast scouting");
         let session = Arc::new(zenoh::open(config).await.expect("open zenoh session"));
 
-        let (ring, capacity) = new_ring(1000);
+        let ring = new_ring(1000);
         for i in 0..5 {
-            push(
-                &ring,
-                capacity,
-                rec(&format!("u{i}"), 100 + i, "web01", "m"),
-            );
+            ring.push(rec(&format!("u{i}"), 100 + i, "web01", "m"));
         }
         tokio::spawn(run_events_procedure(
             session.clone(),
@@ -428,13 +411,9 @@ mod tests {
             .expect("disable multicast scouting");
         let session = Arc::new(zenoh::open(config).await.expect("open zenoh session"));
 
-        let (ring, capacity) = new_ring(1000);
+        let ring = new_ring(1000);
         for i in 0..5 {
-            push(
-                &ring,
-                capacity,
-                rec(&format!("u{i}"), 100 + i, "web01", "m"),
-            );
+            ring.push(rec(&format!("u{i}"), 100 + i, "web01", "m"));
         }
         for procedure in [Procedure::Bare, Procedure::Paged] {
             tokio::spawn(run_events_procedure(
@@ -497,16 +476,12 @@ mod tests {
     /// durable path was fixed for.
     #[test]
     fn a_ring_page_capped_by_max_says_it_stopped_early() {
-        let (ring, capacity) = new_ring(100);
+        let ring = new_ring(100);
         for i in 0..10u64 {
-            push(
-                &ring,
-                capacity,
-                rec(&format!("u{i}"), 100 + i as i64, "web01", "m"),
-            );
+            ring.push(rec(&format!("u{i}"), 100 + i as i64, "web01", "m"));
         }
         let matcher = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
-        let r = ring.lock().unwrap();
+        let r = ring.with(|r| r.clone());
 
         let page = filter_ring(&r, None, None, 3, &matcher);
         assert_eq!(page.items.len(), 3, "capped at max");
@@ -523,16 +498,12 @@ mod tests {
     /// be able to stop.
     #[test]
     fn a_ring_page_that_finished_carries_no_cursor() {
-        let (ring, capacity) = new_ring(100);
+        let ring = new_ring(100);
         for i in 0..3u64 {
-            push(
-                &ring,
-                capacity,
-                rec(&format!("u{i}"), 100 + i as i64, "web01", "m"),
-            );
+            ring.push(rec(&format!("u{i}"), 100 + i as i64, "web01", "m"));
         }
         let matcher = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
-        let r = ring.lock().unwrap();
+        let r = ring.with(|r| r.clone());
 
         let page = filter_ring(&r, None, None, 50, &matcher);
         assert_eq!(page.items.len(), 3);
@@ -545,16 +516,12 @@ mod tests {
     /// forever — the failure mode inverted.
     #[test]
     fn exactly_max_matches_with_nothing_behind_is_complete() {
-        let (ring, capacity) = new_ring(100);
+        let ring = new_ring(100);
         for i in 0..3u64 {
-            push(
-                &ring,
-                capacity,
-                rec(&format!("u{i}"), 100 + i as i64, "web01", "m"),
-            );
+            ring.push(rec(&format!("u{i}"), 100 + i as i64, "web01", "m"));
         }
         let matcher = crate::search::LogMatcher::new(None, None, None, None, None).unwrap();
-        let r = ring.lock().unwrap();
+        let r = ring.with(|r| r.clone());
 
         let page = filter_ring(&r, None, None, 3, &matcher);
         assert_eq!(page.items.len(), 3);
@@ -564,12 +531,13 @@ mod tests {
 
     #[test]
     fn push_evicts_oldest_past_capacity() {
-        let (ring, capacity) = new_ring(0); // clamps to MIN_EVENTS_RING_CAPACITY
+        let ring = new_ring(0);
+        let capacity = ring.capacity(); // clamps to MIN_EVENTS_RING_CAPACITY
         assert_eq!(capacity, MIN_EVENTS_RING_CAPACITY);
         for i in 0..(capacity + 10) {
-            push(&ring, capacity, rec(&format!("u{i}"), i as i64, "h", "m"));
+            ring.push(rec(&format!("u{i}"), i as i64, "h", "m"));
         }
-        let r = ring.lock().unwrap();
+        let r = ring.with(|r| r.clone());
         assert_eq!(r.len(), capacity);
         assert_eq!(r.front().unwrap().ts, 10, "oldest ten evicted");
     }

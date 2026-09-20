@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`@rpc/netflow/flows/page` — a truncated flow read can say it was
+  truncated** (#1156). `flows` replies a bare `Vec<FlowRecord>` from a ring of
+  2048 records with a default page of 500, so on a busy exporter most calls
+  stop early and none could say so. `flows` cannot be changed in place (RFC
+  08 §3), so the envelope is a sibling, exactly as `logs/events/page` (#1147):
+  `{items, next_cursor, partial, scanned}`, every selector `flows` accepts,
+  `limit=` as the alias of `max=`, the cursor the last emitted record's
+  `timestamp`. The `exporter=` selector is percent-decoded on both. Registry
+  `netflow` 1.3 → 1.4, `registry.lock` +1 line (additive).
+
 - **The system-view test — a producer the GUI was not compiled with, stated as
   a test the tree can run** (#1254, the decision gate of #1253). `fake-sensor`
   is not a `Protocol` variant and has no registry TOML; the fixture in
@@ -58,6 +68,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release. `Publisher` still takes `&str`, on purpose: a suffix is a path of
   literal segments and chunks, and its typed spelling is the generated
   registry builders, whose adoption is a different change.
+
+- **The small shapes every sensor re-implemented, once** (#1156, part of
+  #1059; what was still real of the six bullets). `zensight_sensor_core::json`
+  — the lenient `serde_json::Value` readers bmc, pve and container each
+  carried, with the difference the copies had been making silently now a
+  *name*: `text`/`number` are strict (Redfish), `text_lenient`/`number_lenient`
+  accept a number-as-string (Proxmox, podman), `first_number`/`first_uint` are
+  the alias table, `flag` reads bool/number/string with the API's own truthy
+  set. `zensight_sensor_core::ring::BoundedRing<T>` — the
+  `Arc<Mutex<VecDeque<T>>>` + evict-past-capacity push the logs event ring and
+  the netflow flow ring both spelled, with the capacity stored beside the deque
+  so a push cannot be given the wrong one. Verified and *not* done, on the
+  issue: `resolved_source()` was already one function (fourteen one-line
+  delegates); the "three poll-scheduler copies" are three different shapes
+  (probe fans out under a semaphore, bmc is sequential, snmp is a supervised
+  per-device task fleet) with nothing shared worth lifting; `RpcRequest::param`
+  already percent-decodes (#1122); the abort–sleep–drain shutdown and an
+  in-flight artifact's terminal state need their own investigation.
 
 - **One `Publish` contract over both publisher tiers** (#1155, the trait;
   part of #1059). `zensight_common::PublisherRegistry` and

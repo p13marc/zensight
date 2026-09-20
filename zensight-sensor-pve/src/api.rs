@@ -649,33 +649,25 @@ impl PveClient {
 // through these helpers rather than through serde is what keeps a cosmetic
 // upstream change from silencing the sensor.
 
+// Lenient, on purpose (#1156): the Proxmox API serves an id as `140` on one
+// release and `"140"` on the next, and a load average as `"1.20"`. The strict
+// spellings live beside these in `zensight_sensor_core::json`; this crate
+// says which it means at each call.
+
 fn text(v: &Value, key: &str) -> Option<String> {
-    match v.get(key)? {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
-        Value::Number(n) => Some(n.to_string()),
-        _ => None,
-    }
+    zensight_sensor_core::json::text_lenient(v, key)
 }
 
 fn num(v: &Value, key: &str) -> Option<f64> {
-    match v.get(key)? {
-        Value::Number(n) => n.as_f64(),
-        Value::String(s) => s.parse().ok(),
-        _ => None,
-    }
+    zensight_sensor_core::json::number_lenient(v, key)
 }
 
 fn flag_value(v: &Value) -> bool {
-    match v {
-        Value::Bool(b) => *b,
-        Value::Number(n) => n.as_f64().is_some_and(|f| f != 0.0),
-        Value::String(s) => parse_flag(s),
-        _ => false,
-    }
+    zensight_sensor_core::json::flag_value(v, parse_flag)
 }
 
 fn flag(v: &Value, key: &str) -> bool {
-    v.get(key).is_some_and(flag_value)
+    zensight_sensor_core::json::flag(v, key, parse_flag)
 }
 
 /// A vzdump task names its guest in `id`. On some releases that is the bare

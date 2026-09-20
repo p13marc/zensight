@@ -662,7 +662,7 @@ async fn main() -> Result<()> {
     // served from `@rpc/logs/events`, never streamed on the telemetry bus. When
     // the durable store is on, historical (`from`/`to`/`after_uid`) queries are
     // answered from it; recent ones from the ring.
-    let (event_ring, event_ring_capacity) = query::new_ring(syslog_config.events_ring_capacity);
+    let event_ring = query::new_ring(syslog_config.events_ring_capacity);
     // Both sibling procedures, one walk each (#1147). `events` keeps its
     // `Vec<LogRecord>` contract for callers already built against it;
     // `events/page` answers the same selectors in the RFC 05 §3.2 envelope, so
@@ -819,7 +819,7 @@ async fn main() -> Result<()> {
                     if let Some((record, count)) = to_emit {
                         emit_line(
                             &record, count, include_raw, &template_loop,
-                            &event_ring, event_ring_capacity, &publish_health,
+                            &event_ring, &publish_health,
                             &store_tx_loop, &store_counters_loop,
                         ).await;
                     }
@@ -830,7 +830,7 @@ async fn main() -> Result<()> {
                     {
                         emit_line(
                             &record, count, include_raw, &template_loop,
-                            &event_ring, event_ring_capacity, &publish_health,
+                            &event_ring, &publish_health,
                             &store_tx_loop, &store_counters_loop,
                         ).await;
                     }
@@ -859,7 +859,6 @@ async fn emit_line(
     include_raw: bool,
     template: &Option<Arc<template::TemplateAggregator>>,
     event_ring: &query::EventRing,
-    event_ring_capacity: usize,
     health: &Arc<zensight_sensor_core::SensorHealth>,
     store_tx: &Option<tokio::sync::mpsc::Sender<zensight_common::LogRecord>>,
     store_counters: &Option<Arc<store::StoreCounters>>,
@@ -899,7 +898,7 @@ async fn emit_line(
         {
             store::StoreCounters::inc(&c.dropped);
         }
-        query::push(event_ring, event_ring_capacity, record);
+        event_ring.push(record);
         health.record_metrics_published(1);
     }
 }

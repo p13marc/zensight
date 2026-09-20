@@ -99,12 +99,16 @@ async fn main() -> Result<()> {
     // raw records are pull-only detail, never streamed).
     let ring = rollup::new_ring();
     if publish_flows {
-        let flows_key = zensight_common::command::query_key("netflow", "flows");
-        tokio::spawn(rollup::serve_flows(
-            session.clone(),
-            flows_key,
-            ring.clone(),
-        ));
+        // Both sibling procedures, one walk each (#1156): `flows` keeps its
+        // `Vec<FlowRecord>` contract; `flows/page` answers the same selectors
+        // in the RFC 05 §3.2 envelope, so a truncated walk can say so.
+        for procedure in [rollup::Procedure::Bare, rollup::Procedure::Paged] {
+            tokio::spawn(rollup::serve_flows(
+                session.clone(),
+                ring.clone(),
+                procedure,
+            ));
+        }
     }
 
     // Intake: fold each record into the rollups + the ring; publish the
@@ -170,7 +174,7 @@ async fn main() -> Result<()> {
                         .and_then(|s| s.interval(&record.exporter_name));
                     rollups.ingest(&record, n);
                     if publish_flows {
-                        rollup::push(&ring, record);
+                        ring.push(record);
                     }
                 }
                 _ = tick.tick(), if publish_stats => {

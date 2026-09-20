@@ -868,10 +868,7 @@ pub fn thermal_readings(body: Option<&Value>) -> Vec<ThermalSensor> {
 
 /// A legacy embedded array (`Power.PowerSupplies`, `Thermal.Fans`).
 fn array(body: Option<&Value>, key: &str) -> Vec<Value> {
-    body.and_then(|b| b.get(key))
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
+    zensight_sensor_core::json::array(body, key)
 }
 
 fn status(v: &Value) -> (Health, State) {
@@ -887,12 +884,10 @@ fn status(v: &Value) -> (Health, State) {
     (health, state)
 }
 
+/// Strict (#1156): Redfish names are strings or nothing, and a number here
+/// would be a shape we do not understand rather than a value.
 fn text(v: &Value, key: &str) -> Option<String> {
-    v.get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    zensight_sensor_core::json::text(v, key)
 }
 
 /// A number from any of several member names, in preference order.
@@ -901,10 +896,13 @@ fn text(v: &Value, key: &str) -> Option<String> {
 /// modern spelling of `PowerInputWatts`/`LastPowerOutputWatts`), and a vendor
 /// may serve either. Absent from all of them stays absent.
 fn number(v: &Value, keys: &[&str]) -> Option<f64> {
+    // The alias table is the shared shape (#1156); the nested `Reading`
+    // member is Redfish's own spelling of a sensor value and stays here.
     keys.iter().find_map(|k| {
-        v.get(*k).and_then(|n| {
-            n.as_f64()
-                .or_else(|| n.get("Reading").and_then(Value::as_f64))
+        zensight_sensor_core::json::number(v, k).or_else(|| {
+            v.get(*k)
+                .and_then(|n| n.get("Reading"))
+                .and_then(Value::as_f64)
         })
     })
 }
@@ -1026,7 +1024,7 @@ pub fn parse_chassis(id: &str, v: &Value, surface: RedfishSurface) -> Chassis {
 /// mind.
 /// An unsigned integer from any of several member names, in preference order.
 fn uint(v: &Value, keys: &[&str]) -> Option<u64> {
-    keys.iter().find_map(|k| v.get(*k).and_then(Value::as_u64))
+    zensight_sensor_core::json::first_uint(v, keys)
 }
 
 /// One physical drive (#1140).
