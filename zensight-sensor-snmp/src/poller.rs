@@ -1138,7 +1138,11 @@ fn slug_metric(name: &str) -> String {
         return name.to_string();
     }
     name.split('/')
-        .map(|c| zenkey::Chunk::slug(c).as_str().to_string())
+        .map(|c| {
+            zensight_sensor_core::key::device_chunk(c)
+                .as_str()
+                .to_string()
+        })
         .collect::<Vec<_>>()
         .join("/")
 }

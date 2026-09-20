@@ -94,7 +94,11 @@ impl Publisher {
 
     /// Build a full key expression from a suffix.
     ///
-    /// Debug-asserts that `suffix` doesn't contain double slashes.
+    /// Debug-asserts that `suffix` doesn't contain double slashes; the real
+    /// check is downstream, on every put — `zensight_common::metric_guard`
+    /// refuses a key outside the v1 grammar in release as well as debug
+    /// (#1153), so a chunk that skipped [`crate::key::device_chunk`] is loud
+    /// wherever it happens.
     pub fn build_key(&self, suffix: &str) -> String {
         debug_assert!(!suffix.contains("//"), "key suffix must not contain '//'");
         if suffix.is_empty() {

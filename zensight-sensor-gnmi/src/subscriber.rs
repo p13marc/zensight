@@ -429,13 +429,17 @@ impl GnmiSubscriber {
         let subject = elements
             .iter()
             .filter(|e| !e.is_empty())
-            .map(|e| zenkey::Chunk::slug(e).as_str().to_string())
+            .map(|e| {
+                zensight_sensor_core::key::device_chunk(e)
+                    .as_str()
+                    .to_string()
+            })
             .collect::<Vec<_>>()
             .join("/");
         format!(
             "{}/{}/{}",
             self.telemetry_prefix,
-            zenkey::Chunk::slug(&self.target.name).as_str(),
+            zensight_sensor_core::key::device_chunk(&self.target.name).as_str(),
             subject
         )
     }

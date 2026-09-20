@@ -49,6 +49,23 @@
 //! [`unslug_for_display`], which gives back `/var/lib/docker` — the *true*
 //! path, which is strictly better than the old `var_lib_docker` that could
 //! have been either of two mounts.
+//!
+//! # The second half (#1153, the API move)
+//!
+//! The lossy and illegal slugs above were replaced in #1249. What remained was
+//! that six crates still spelled `zenkey::Chunk::slug` themselves at twenty
+//! sites, and that the only production-time check on a built key —
+//! `zensight_common::metric_guard` — *waved through* any key that was not a
+//! v1 key at all (a malformed origin, a bare name), so the worst-formed keys
+//! were invisible exactly where it mattered. (An illegal or empty chunk
+//! *inside* a registered subject was already refused there, chunk by chunk —
+//! #559.) Now every producer slug is [`device_chunk`] (the name says what
+//! the value is, and there is one place to grep), and the guard refuses a key
+//! outside the v1 grammar on every put: a `debug_assert!` in tests, a
+//! once-per-key `warn!` in release — cheap, since the guard already parsed
+//! the key. `Publisher` still takes `&str`: a suffix is a *path* of literal
+//! segments and chunks, and the typed spelling of that path is the generated
+//! `zensight_common::registry` builders, whose adoption is a different change.
 
 use zenkey::Chunk;
 

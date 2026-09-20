@@ -9,8 +9,9 @@ use crate::unit::UnitSample;
 /// Slug a unit name into a legal key-expression chunk (#843).
 ///
 /// A unit name is foreign data, and the boundary where foreign data becomes
-/// grammar-legal is `Chunk::slug` (RFC 03 §2's injective `_xNN_` escape) —
-/// not a hand-rolled character map. The hand-rolled one this replaces had
+/// grammar-legal is `zensight_sensor_core::key::device_chunk` — `Chunk::slug`,
+/// RFC 03 §2's injective escape, and nothing else (#1153) — not a hand-rolled
+/// character map. The hand-rolled one this replaces had
 /// both defects the RFC warns about: it never folded case, so any unit with
 /// an uppercase letter (`NetworkManager.service` — much of a stock host)
 /// produced a chunk the grammar refuses, panicking the collector in debug
@@ -21,7 +22,9 @@ use crate::unit::UnitSample;
 /// Already-legal names (`sshd.service`) stay byte-identical, and the raw
 /// name always rides the point's `unit` label, so nothing readable is lost.
 pub fn sanitize_unit(name: &str) -> String {
-    zenkey::Chunk::slug(name).as_str().to_string()
+    zensight_sensor_core::key::device_chunk(name)
+        .as_str()
+        .to_string()
 }
 
 /// Build the per-unit telemetry points for one watched unit. Every point carries

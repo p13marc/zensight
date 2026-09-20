@@ -194,7 +194,9 @@ impl Poller {
         let chassis = crate::chassis_chunk(&endpoint.name, &sweep.chassis.id);
 
         for psu in &sweep.supplies {
-            let id = zenkey::Chunk::slug(&psu.id).as_str().to_string();
+            let id = zensight_sensor_core::key::device_chunk(&psu.id)
+                .as_str()
+                .to_string();
             let labels = [("psu", psu.id.clone())];
             self.publish_point(
                 &chassis,
@@ -226,7 +228,9 @@ impl Poller {
         }
 
         for fan in &sweep.fans {
-            let id = zenkey::Chunk::slug(&fan.id).as_str().to_string();
+            let id = zensight_sensor_core::key::device_chunk(&fan.id)
+                .as_str()
+                .to_string();
             if let Some(rpm) = fan.rpm {
                 self.publish_point(
                     &chassis,
@@ -242,7 +246,9 @@ impl Poller {
         }
 
         for sensor in &sweep.thermal {
-            let id = zenkey::Chunk::slug(&sensor.id).as_str().to_string();
+            let id = zensight_sensor_core::key::device_chunk(&sensor.id)
+                .as_str()
+                .to_string();
             let labels = [("sensor", sensor.id.clone())];
             for (suffix, value) in [
                 ("celsius", sensor.celsius),
@@ -269,7 +275,9 @@ impl Poller {
         // nowhere else, so `chassis-health` fired saying "the BMC reports a
         // fault" and named nothing an operator could act on.
         for drive in &sweep.drives {
-            let id = zenkey::Chunk::slug(&drive.id).as_str().to_string();
+            let id = zensight_sensor_core::key::device_chunk(&drive.id)
+                .as_str()
+                .to_string();
             if let Some(pct) = drive.life_left_percent {
                 self.publish_point(
                     &chassis,
@@ -285,7 +293,9 @@ impl Poller {
         }
 
         for dimm in &sweep.memory {
-            let id = zenkey::Chunk::slug(&dimm.id).as_str().to_string();
+            let id = zensight_sensor_core::key::device_chunk(&dimm.id)
+                .as_str()
+                .to_string();
             if let Some(key) = self.state_key(&["chassis", &chassis, "memory", &id]) {
                 self.states.publish_serializable(&key, dimm).await.ok();
             }
@@ -294,9 +304,12 @@ impl Poller {
         // The redundancy GROUP's own verdict (#1140), beside the per-member
         // copy the supplies and fans already carry.
         for group in &sweep.redundancy {
-            let id = zenkey::Chunk::slug(format!("{}-{}", group.subsystem, group.id))
-                .as_str()
-                .to_string();
+            let id = zensight_sensor_core::key::device_chunk(format!(
+                "{}-{}",
+                group.subsystem, group.id
+            ))
+            .as_str()
+            .to_string();
             if let Some(key) = self.state_key(&["chassis", &chassis, "redundancy", &id]) {
                 self.states.publish_serializable(&key, group).await.ok();
             }

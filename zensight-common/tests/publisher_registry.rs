@@ -27,18 +27,30 @@ async fn declares_once_per_key_and_reuses() {
 
     // Two puts on the same key → one declared publisher.
     registry
-        .put("pubreg-test/a", b"one".to_vec(), QosClass::Telemetry)
+        .put(
+            "v1/h-0123456789ab/state/sysinfo/pubreg-test/a",
+            b"one".to_vec(),
+            QosClass::Telemetry,
+        )
         .await
         .unwrap();
     registry
-        .put("pubreg-test/a", b"two".to_vec(), QosClass::Telemetry)
+        .put(
+            "v1/h-0123456789ab/state/sysinfo/pubreg-test/a",
+            b"two".to_vec(),
+            QosClass::Telemetry,
+        )
         .await
         .unwrap();
     assert_eq!(registry.len().await, 1, "same key must reuse one publisher");
 
     // A distinct key declares a second publisher.
     registry
-        .put("pubreg-test/b", b"x".to_vec(), QosClass::Alert)
+        .put(
+            "v1/h-0123456789ab/state/sysinfo/pubreg-test/b",
+            b"x".to_vec(),
+            QosClass::Alert,
+        )
         .await
         .unwrap();
     assert_eq!(registry.len().await, 2);
@@ -54,7 +66,10 @@ async fn declares_once_per_key_and_reuses() {
     // Reliable/Block. The rule is now one class per key, and the case below
     // pins what happens when a caller breaks it.
     registry
-        .delete("pubreg-test/a", QosClass::Telemetry)
+        .delete(
+            "v1/h-0123456789ab/state/sysinfo/pubreg-test/a",
+            QosClass::Telemetry,
+        )
         .await
         .unwrap();
     assert_eq!(registry.len().await, 2);
@@ -73,10 +88,19 @@ async fn deleting_under_a_second_class_is_caught() {
     let registry = PublisherRegistry::new(session);
 
     registry
-        .put("pubreg-mismatch/a", b"one".to_vec(), QosClass::Telemetry)
+        .put(
+            "v1/h-0123456789ab/state/sysinfo/pubreg-mismatch/a",
+            b"one".to_vec(),
+            QosClass::Telemetry,
+        )
         .await
         .unwrap();
-    let _ = registry.delete("pubreg-mismatch/a", QosClass::Alert).await;
+    let _ = registry
+        .delete(
+            "v1/h-0123456789ab/state/sysinfo/pubreg-mismatch/a",
+            QosClass::Alert,
+        )
+        .await;
 }
 
 /// #811: every baseline put is counted (messages and payload bytes) into the
@@ -89,12 +113,16 @@ async fn puts_are_counted_into_the_shared_counters() {
     assert_eq!(counters.published_total(), 0);
 
     registry
-        .put("pubreg-count/a", vec![0u8; 100], QosClass::Telemetry)
+        .put(
+            "v1/h-0123456789ab/state/sysinfo/pubreg-count/a",
+            vec![0u8; 100],
+            QosClass::Telemetry,
+        )
         .await
         .unwrap();
     registry
         .put_encoded(
-            "pubreg-count/b",
+            "v1/h-0123456789ab/state/sysinfo/pubreg-count/b",
             vec![0u8; 50],
             QosClass::Alert,
             zenoh::bytes::Encoding::APPLICATION_JSON,

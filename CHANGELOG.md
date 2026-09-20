@@ -47,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pve::FLEET_RULES` name the tables the pollers had been computing by
   exclusion.
 
+- **`device_chunk` is the only slug, and the metric guard refuses a key that
+  is not v1 at all** (#1153, the API move; part of #1059). The lossy and
+  illegal slugs went in #1249; what remained was six crates spelling
+  `zenkey::Chunk::slug` themselves at twenty sites, and a production-time
+  check that returned early on a key it could not parse. Every producer slug
+  is now `zensight_sensor_core::key::device_chunk` — one name, one place to
+  grep — and `metric_guard` treats a non-v1 key the way it treats an
+  unregistered subject: a `debug_assert!` in tests, a once-per-key `warn!` in
+  release. `Publisher` still takes `&str`, on purpose: a suffix is a path of
+  literal segments and chunks, and its typed spelling is the generated
+  registry builders, whose adoption is a different change.
+
 ### Fixed
 
 - **A graded alert outside the poller's rule table was published and never
@@ -61,6 +73,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   alerts in grade order and stopped, so the four #1141 node/Ceph alerts the
   fixture fires had been published after them and never asserted. It reads
   all nine now.
+
+- **A key outside the v1 grammar was published without a word** (#1153). The
+  metric guard, the one check every put runs, returned early when the key did
+  not parse — so a malformed origin or a bare name went on the wire where no
+  `v1/**` pattern subscriber could ever match it, and nothing said so. An
+  illegal or empty *chunk* inside a registered subject was already refused
+  (#559); this closes the case below it.
 
 ## [0.14.0] - 2026-09-20
 
