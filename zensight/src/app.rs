@@ -11988,6 +11988,233 @@ mod zrec_replay_tests {
     }
 }
 
+/// The **system-view test** (#1254) — the decision gate of #1253.
+///
+/// The property under test is that the whole pipeline — intake, model, default
+/// view, honesty, definition + scripts, derived subscription — works for a
+/// producer *this build knows nothing about*. No view-function test can state
+/// that: its state type would have to be built from the missing fact
+/// (`DeviceId::fixture(Protocol::…)`), proving nothing. So this is the one
+/// justified exception to `docs/testing.md`'s "test view functions
+/// independently", keyed to `tests/fixtures/fake-sensor/`.
+///
+/// **The ratchet.** The target test is real and red, and it runs on every CI
+/// run inverted with `#[should_panic(expected = "GATE n/…")]`. The expected
+/// string *is* the epic's status: each phase advances the panic one gate,
+/// which makes the substring stop matching, which makes the test red until the
+/// implementer advances the string. When the last gate passes the attribute is
+/// deleted. Drift in either direction fails the build; nothing is `#[ignore]`d
+/// and nothing is a leg somebody has to remember to run. Placeholder panics
+/// for seams that do not exist yet are *replaced*, never deleted, when the
+/// ratchet reaches them.
+///
+/// The `zrec_replay_tests` RULES apply: never feed `Message::Tick`, never
+/// assert staleness.
+#[cfg(test)]
+mod system_view_tests {
+    use super::*;
+    use crate::mock::fake_sensor::{self, ORIGIN, PRODUCER, SLICE, UNIT};
+    use crate::subscription::decode_sample;
+    use crate::view::fleet::{FleetReply, FleetSweep};
+    use crate::view::specialized::fetch::Fetch;
+
+    /// A demo boot with the demo's own state cleared (as `zrec_replay_tests`).
+    fn app() -> ZenSight {
+        let mut a = ZenSight::boot(true).0;
+        a.demo_mode = false;
+        a.dashboard.devices.clear();
+        a.sensor_health.clear();
+        a.known_sensors.clear();
+        a.entities = Default::default();
+        a
+    }
+
+    /// The slice, handed to the app through the seam the real fleet fetch
+    /// uses — `Message::FleetLoaded` accepts a reply for *any* producer name.
+    fn slice_loaded() -> Message {
+        Message::FleetLoaded(Ok(FleetSweep {
+            replies: vec![FleetReply {
+                origin: ORIGIN.into(),
+                producer: PRODUCER.into(),
+                toml: SLICE.into(),
+            }],
+            elided: 0,
+            bound: 0,
+        }))
+    }
+
+    /// GATE 1/intake → #1255, #1256 · GATE 2/model → #1257 · GATE 3/view →
+    /// #1258 · GATE 4/honesty → #1256 · GATE 5/definition → #1259 · GATE
+    /// 6/subscribe → #1262. Today it dies at gate 1: `TelemetryPoint` cannot
+    /// deserialise a `protocol` outside the closed enum. That failure is the
+    /// finding.
+    #[test]
+    #[should_panic(expected = "GATE 1/intake")]
+    fn a_fictional_producer_renders_from_its_introspect_slice() {
+        let mut a = app();
+
+        // The slice arrives as the fleet fetch would deliver it, and the fleet
+        // view keeps a row for it — the seam accepts a producer it has never
+        // heard of.
+        let _ = a.update(slice_loaded());
+        match &a.fleet.rows {
+            Fetch::Ready(rows) => assert!(
+                rows.iter()
+                    .any(|r| r.producer == PRODUCER && r.origin == ORIGIN),
+                "GATE 1/intake: the fleet fold kept no row for {PRODUCER}"
+            ),
+            other => panic!("GATE 1/intake: the sweep did not fold: {other:?}"),
+        }
+
+        // (a) intake — no sample is dropped at decode …
+        let samples = fake_sensor::samples();
+        assert!(!samples.is_empty(), "the fixture has no samples");
+        let messages: Vec<Message> = samples
+            .iter()
+            .map(|(key, payload)| {
+                decode_sample(key, payload)
+                    .unwrap_or_else(|| panic!("GATE 1/intake: sample dropped at decode: {key}"))
+            })
+            .collect();
+        for msg in messages {
+            let _ = a.update(msg);
+        }
+        // … and a device exists whose producer is the fictional one.
+        let device = a
+            .dashboard
+            .devices
+            .keys()
+            .find(|d| d.source == UNIT && d.origin == ORIGIN)
+            .cloned()
+            .unwrap_or_else(|| panic!("GATE 1/intake: no device {UNIT}@{ORIGIN} after the fold"));
+        assert_eq!(
+            device.protocol.to_string(),
+            PRODUCER,
+            "GATE 1/intake: the device is attributed to the wrong producer"
+        );
+
+        // (b) model — the family instances and the counter-as-rate.
+        // Seam: #1257 derives rows and columns from the slice.
+        panic!("GATE 2/model: no seam yet — #1257 adds the family model and replaces this line");
+
+        // (c) view — with no definition loaded, `simulator(a.view())` after
+        // `Message::SelectDevice(device)` finds a table per family, `41.5 Cel`
+        // beside the reading, `By/s` on the counter row, inlet graded critical,
+        // outlet not, and exhaust ungraded (hottest reading, no limit).
+        // Seam: #1258's default renderers.
+        #[allow(unreachable_code)]
+        {
+            panic!(
+                "GATE 3/view: no seam yet — #1258 adds the default renderers and replaces this line"
+            );
+        }
+
+        // (d) honesty — `humidity/pct` is visible with a "not declared"
+        // finding, not silently absent. Seam: #1256's rendered finding.
+        #[allow(unreachable_code)]
+        {
+            panic!(
+                "GATE 4/honesty: no seam yet — #1256 adds the undeclared-subject finding and replaces this line"
+            );
+        }
+
+        // (e) definition + scripts — the fixture `views.toml` loaded through
+        // `Message::ViewsLoaded`; Rhai labels, sort order, the note on exhaust
+        // only; then an inline `label = { rhai = "loop {}" }` renders the
+        // fallback plus a visible "view script failed" note in bounded time.
+        // Seam: #1259.
+        #[allow(unreachable_code)]
+        {
+            panic!(
+                "GATE 5/definition: no seam yet — #1259 adds views.toml + Rhai and replaces this line"
+            );
+        }
+
+        // (f) subscription — the derived key expressions for the visible
+        // overview are exactly the four the definition needs, not the
+        // firehose; the detail widens to this origin's `fake-sensor/**`; no
+        // definition → `<producer>/**`. Seam: #1262's pure derivation beside
+        // `effective_scopes`.
+        #[allow(unreachable_code)]
+        {
+            panic!(
+                "GATE 6/subscribe: no seam yet — #1262 adds the derived subscription and replaces this line"
+            );
+        }
+    }
+
+    /// The green companion: each of today's gates pinned individually, since
+    /// the ratchet above cannot see past gate 1. Every assertion names the
+    /// phase that deletes it. (Gate 6's pin already exists by name —
+    /// `subscription::tests::test_effective_scopes_empty_is_firehose` — and is
+    /// not duplicated here.)
+    #[test]
+    fn a_fictional_producer_is_dropped_at_three_gates_today() {
+        // Telemetry never reaches `refine_key`: `decode_sample` parses the key
+        // structurally and decodes the payload — and the payload's `protocol`
+        // is a closed enum, so the point is dropped there. #1255 removes the
+        // field from the wire.
+        let telemetry = fake_sensor::samples_of("telemetry");
+        assert!(!telemetry.is_empty());
+        for (key, payload) in &telemetry {
+            assert!(
+                decode_sample(key, payload).is_none(),
+                "{key}: decoded — #1255 has landed; advance the ratchet to GATE 2/model"
+            );
+            let parsed = zensight_common::keyexpr::parse_key(key);
+            assert!(parsed.is_some(), "{key}: the key itself is grammatical");
+        }
+
+        // A state document from an unregistered producer does not exist to
+        // `refine_key` — the right rule for a producer, the wrong one for a
+        // consumer. #1256 routes intake through `parse_key` + the runtime slice.
+        let state = fake_sensor::samples_of("state");
+        assert_eq!(state.len(), 1);
+        for (key, payload) in &state {
+            assert!(
+                zensight_common::keyexpr::refine_key(key).is_none(),
+                "{key}: refined — #1256 has landed"
+            );
+            assert!(decode_sample(key, payload).is_none());
+        }
+
+        // The closed enum is *why* the view `match` has no arm. This stops
+        // compiling when #1255 replaces `DeviceId.protocol` — the correct
+        // signal (#1258 is where the default view takes over).
+        assert!(
+            PRODUCER.parse::<Protocol>().is_err(),
+            "{PRODUCER} parses as a Protocol — the enum is no longer closed"
+        );
+
+        // The fixture itself is well-formed without any registry: the slice
+        // parses as `introspect` would return it, the schema set as `describe`
+        // would, and the definition is TOML (its vocabulary has no parser yet —
+        // #1259).
+        let slice = zenkey::slice::parse_slice(SLICE).expect("slice.toml parses");
+        assert_eq!(slice.name, PRODUCER);
+        assert_eq!(slice.subjects.len(), 4);
+        assert!(
+            slice.service_origin.is_none(),
+            "a host producer, not a service"
+        );
+        let schemas = zensight_common::schema::SchemaSet::parse(fake_sensor::SCHEMAS)
+            .expect("schemas.json parses");
+        assert!(schemas.get("FakeUnitStatus").is_some());
+        let views: toml::Value = toml::from_str(fake_sensor::VIEWS).expect("views.toml is TOML");
+        assert_eq!(views["view"]["producer"].as_str(), Some(PRODUCER));
+        assert_eq!(views["panel"].as_array().map(Vec::len), Some(3));
+
+        // And the fixture must never become a compiled registry: the registry
+        // this build carries has no such producer.
+        assert!(
+            !zensight_common::registry::REGISTRIES
+                .iter()
+                .any(|(name, _)| *name == PRODUCER),
+            "{PRODUCER} is in zensight-common/registry — the fixture leaked into the build"
+        );
+    }
+}
+
 /// The #791 receive-side verdict path: the declared reply type resolves from
 /// the generated registry, and the body judges against the compiled-in
 /// schema table — three states, never a boolean.

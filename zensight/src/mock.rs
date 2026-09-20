@@ -1426,3 +1426,56 @@ mod explorer_demo_tests {
         );
     }
 }
+
+/// The **system-view fixture** (#1254): a producer this GUI was *not* compiled
+/// with. `fake-sensor` is not a [`Protocol`] variant and has no registry TOML
+/// in the workspace; what it has is what the bus would give any consumer — an
+/// `introspect` slice, a `describe` schema set, a `views` definition, and
+/// samples on real `v1/<origin>/<class>/fake-sensor/…` keys.
+///
+/// The files live in `tests/fixtures/fake-sensor/` so that `zensight-common`
+/// (#1255), the GUI phases (#1256–#1262) and any later conformance work read the
+/// same bytes. They are deliberately **not** under `zensight-common/registry/`,
+/// which is `zenkey-build`'s input.
+pub mod fake_sensor {
+    /// The publishing host's origin in every sample key.
+    pub const ORIGIN: &str = "h-0123456789ab";
+    /// The one `{unit}` every sample belongs to.
+    pub const UNIT: &str = "rack7";
+    /// The producer name — chunk 4 of every sample key.
+    pub const PRODUCER: &str = "fake-sensor";
+
+    /// The `introspect` reply: three telemetry families and one state type.
+    pub const SLICE: &str = include_str!("../tests/fixtures/fake-sensor/slice.toml");
+    /// The `describe` reply: one state type, `FakeUnitStatus`.
+    pub const SCHEMAS: &str = include_str!("../tests/fixtures/fake-sensor/schemas.json");
+    /// The `views` reply — the design's §6.1 vocabulary with Rhai in
+    /// `label`/`note`/`sort`. No parser reads it yet (#1259).
+    pub const VIEWS: &str = include_str!("../tests/fixtures/fake-sensor/views.toml");
+    const SAMPLES: &str = include_str!("../tests/fixtures/fake-sensor/samples.jsonl");
+
+    /// Every sample, in fold order, as `(key, payload bytes)` — exactly what a
+    /// subscriber hands `decode_sample`. Payloads are JSON: the decoder sniffs
+    /// the first byte, so the fixture does not have to commit to CBOR.
+    pub fn samples() -> Vec<(String, Vec<u8>)> {
+        SAMPLES
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .map(|line| {
+                let v: serde_json::Value =
+                    serde_json::from_str(line).expect("fake-sensor sample line is JSON");
+                let key = v["key"].as_str().expect("sample has a key").to_string();
+                let payload = serde_json::to_vec(&v["payload"]).expect("sample payload re-encodes");
+                (key, payload)
+            })
+            .collect()
+    }
+
+    /// The samples of one class, by the key's chunk 3 (`telemetry` / `state`).
+    pub fn samples_of(class: &str) -> Vec<(String, Vec<u8>)> {
+        samples()
+            .into_iter()
+            .filter(|(k, _)| k.split('/').nth(2) == Some(class))
+            .collect()
+    }
+}

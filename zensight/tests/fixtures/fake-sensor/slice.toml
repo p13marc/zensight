@@ -1,0 +1,52 @@
+# The `introspect` reply of a producer this GUI was NOT compiled with (#1254).
+#
+# System-view fixture. It must never enter `zensight-common/registry/` — that
+# directory is `zenkey-build`'s input, and a fixture there would be compiled
+# into the very registry it has to be absent from.
+[registry]
+version = "1.0"
+app = "zensight"
+convention = 1
+
+[producer]
+name = "fake-sensor"
+description = "a producer this GUI was NOT compiled with — system-view fixture; must never enter zensight-common/registry"
+
+# A two-var family with a sibling limit: the temperature and the limit its own
+# hardware declares, so a default renderer can grade one against the other
+# without a GUI constant.
+[[subject]]
+path = "{unit}/temp/{sensor}/celsius"
+class = "telemetry"
+type = "TelemetryPoint"
+kind = "gauge"
+unit = "Cel"
+since = "1.0"
+
+[[subject]]
+path = "{unit}/temp/{sensor}/upper_critical_c"
+class = "telemetry"
+type = "TelemetryPoint"
+kind = "gauge"
+unit = "Cel"
+since = "1.0"
+
+# A one-var counter family: presented as a rate, unit from the slice.
+[[subject]]
+path = "{unit}/uplink/rx_bytes"
+class = "telemetry"
+type = "TelemetryPoint"
+kind = "counter"
+unit = "By"
+since = "1.0"
+
+# One state document type, described by `schemas.json`.
+[[subject]]
+path = "{unit}/status"
+class = "state"
+type = "FakeUnitStatus"
+since = "1.0"
+
+[[procedure]]
+path = "introspect"
+kind = "read"
