@@ -148,7 +148,7 @@ fn test_syslog_to_otel_log() {
         .collect(),
     );
 
-    assert!(is_log_exportable(&point.value, "snmp"));
+    assert!(is_log_exportable(&point.value, "logs"));
 
     let log_record = LogRecord::from_telemetry("logs", &point);
     assert!(log_record.is_some());
@@ -383,7 +383,7 @@ fn test_filter_combined() {
 
     assert!(filter.should_include("snmp", &point1));
     assert!(!filter.should_include("snmp", &point2));
-    assert!(!filter.should_include("snmp", &point3));
+    assert!(!filter.should_include("sysinfo", &point3));
 }
 
 #[test]
@@ -490,11 +490,11 @@ fn test_full_syslog_flow() {
     );
 
     // Should be log exportable
-    assert!(is_log_exportable(&point.value, "snmp"));
+    assert!(is_log_exportable(&point.value, "logs"));
     assert!(!is_metric_exportable(&point.value));
 
     // Should produce valid log record
-    let record = LogRecord::from_telemetry("snmp", &point).expect("Should create log record");
+    let record = LogRecord::from_telemetry("logs", &point).expect("Should create log record");
 
     assert_eq!(record.hostname, "server01");
     assert_eq!(record.body, "Failed password for invalid user admin");
