@@ -7,6 +7,172 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-09-20
+
+### Changed — BREAKING
+
+This is the complete list of what breaks in this release, as
+[`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md) requires. A change written up
+under another heading is indexed here with its consequence; the rest are
+written up in place.
+
+**Read this section first, then `### Removed`, then `### Deprecated`.** And
+note the standing advice in `COMPATIBILITY.md`: *expect exported series names
+to be the thing that breaks your dashboards, not the bus.* This release moves
+more of them than any before it.
+
+#### Keys and exported series that move
+
+Four sensors re-key families. Recording rules, dashboards and anything that
+names these series need updating. The bus itself keeps working — every
+in-tree consumer resolves keys rather than assuming them.
+
+- **`sysinfo` slugs mount points, hwmon labels, RAPL zones and batteries
+  reversibly** (#1153) — written up under `### Fixed`. The old reduction was
+  **lossy**: `/var/lib/docker` and `/var/lib_docker` both became
+  `var_lib_docker`, so two filesystems published to one key and the later one
+  won each interval.
+
+  | was | is |
+  |---|---|
+  | `disk/root/…` | `disk/x-_x2f/…` |
+  | `disk/var/…` | `disk/x-_x2fvar/…` |
+  | `sensors/coretemp/package_id_0/…` | `sensors/coretemp/x-_x50ackage_x20id_x200/…` |
+  | `power/rapl/intel-rapl_0/…` | `power/rapl/x-intel-rapl_x3a0/…` |
+  | `battery/bat0/…` | `battery/x-_x42_x41_x540/…` |
+
+  Interfaces, disks and most chips are **unchanged**: a name that was already a
+  legal chunk passes through untouched. The Prometheus/OTel `device` attribute
+  is *decoded*, so it now reads `/var/lib/docker` where it read the ambiguous
+  `var_lib_docker` — those labels get better, not worse.
+
+- **`bmc`'s `{chassis}` chunk is `{endpoint}-{Redfish chassis id}`** (#1130) —
+  written up under `### Fixed`. `rack-a-1-1`, not `rack-a-1`. Every chassis of
+  an enclosure previously wrote the *endpoint's* keys, so on a blade chassis or
+  a four-node Twin they overwrote each other every sweep and only the first was
+  graded — a failed supply on chassis 2 was actively **resolved** each cycle.
+
+- **`pve`'s non-shared storage `{store}` chunk is `{node}-{name}`
+  unconditionally** (#1132) — written up under `### Fixed`. A single-node
+  deployment's `storage/local-lvm` becomes `storage/pve-local-lvm`. It was
+  previously disambiguated only when one sweep happened to see a duplicate, so
+  the key depended on what else was visible that cycle.
+
+- **`sysinfo`'s `process/{rank}/{cpu,memory}` is retired** (#1070, registry
+  1.9). It was defended in the registry as bounded and stable, and was neither.
+  `process/1/cpu` is whoever is burning the most CPU *this tick*, so the series
+  was a max-envelope over unrelated processes that a chart draws happily and no
+  reader can question. And the Prometheus mapping turns point labels into series
+  labels, so every process that ever entered the top N minted a new
+  `{rank="1",pid="8471",…}` series — an unbounded cardinality leak from the
+  sensor whose job is to notice leaks. `collect.processes` defaulting off limited
+  the blast radius, not the shape.
+
+  Retire-and-sibling needed no sibling: the replacement already existed on both
+  sides. `@rpc/sysinfo/processes` has always served the per-pid detail — richer
+  than this ever was (rss/vsz/threads/io/state/uid) — and the GUI already had a
+  process explorer reading it beside the streamed card, which is now gone.
+  `system/processes_{total,zombie}` still stream. `collect.top_processes` keeps
+  its meaning: it is the reply's default `top` when a caller names none.
+
+- **`zensight_container_restart_count` is now
+  `zensight_container_restart_count_total`** (#1071). The Prometheus exposition
+  appends `_total` to a counter that does not already carry it, so this one
+  family's exported name moves when its type is corrected. The other four keep
+  their names and change only their `# TYPE` line — from `gauge` to `counter`,
+  which is what makes them usable. A dashboard or recording rule keyed on the
+  old name needs re-pointing; one keyed on the point's `container` label is
+  unaffected.
+
+#### Behaviour that changes
+
+- **The GUI's alert rule engine is removed** (#934, epic #901) — under
+  `### Removed`. Alerting belongs to the sensors and the catalog; rules
+  configured in the GUI are not carried over.
+- **Acknowledgement and silence become a projection of the bus** (#925, epic
+  #900) — under `### Added`. Local ack/silence state is gone; both are fleet
+  state that every consumer sees.
+- **The GUI's topology graph is read from the catalog, not derived in the
+  view** (#919, epic #899) — under `### Changed`. `EdgeKind` is renamed on the
+  wire: `L2Adjacency` → `L2Adjacent`, `Gateway` → `GatewayOf`.
+- **Every remaining sensor adopts thresholds** (#931, epic #901) — under
+  `### Deprecated`, with the per-sensor deprecations. `ThresholdsConfig`'s
+  `source` was documented as matchable and was not; it matches now, so a rule
+  that silently applied fleet-wide may start scoping to one host.
+- **Sentinel expectations gain `recover_after_secs`** (#932, epic #901) —
+  under `### Added`. Breaking only for code constructing the four expectation
+  structs directly; the field is defaulted for config.
+
+#### Rust API
+
+- **`HostEntity` carries `origins: Vec<String>`** (#1007) — under `### Added`.
+  RFC 06 §5.1 has required the origin → entity join since v1.0 and the type did
+  not have it. Readers of an older catalog are unaffected (`serde(default)`);
+  code *constructing* a `HostEntity` gains a field.
+
+#### Local state, and a config that now refuses
+
+- **The GUI's metric cache is rebuilt on first launch after this** (#904).
+  Schema v3 re-types two tables and changes what a series is called, so a v2
+  file cannot be read and is moved aside to `metrics.redb.schema-v<n>` with a
+  logged warning, exactly as a pre-v2 file and an older redb file format
+  already were. Nothing else is affected: it is a per-viewer cache of a stream
+  the bus still carries, and the durable fleet history it shadows is moving to
+  a service (#898) that this makes possible.
+
+  What changed in it (v3 and v4 together — the cache is rebuilt once):
+
+  - **A series is `<origin>/<producer>/<subject>`** — the wire key minus the
+    class chunk — where it was
+    `<protocol>/<origin>/<source>|<metric>`. That is the identity a reader can
+    derive from a sample alone, which is what lets the GUI's cache and the
+    fleet historian name the same series the same way without a catalog
+    between them.
+  - **`metrics` rows carry `(id, kind, source, metric)`**, not a bare id. The
+    kind because a counter reset and a gauge that fell are the same negative
+    delta once every value is an `f64`; the other two because the new path
+    carries neither, and recovering them from it would mean un-slugging a
+    proxy producer's device chunk — a guess, in the code that decides which
+    host a chart belongs to.
+  - **`metrics` rows also carry the series' `unit`** (v4, #907). A `range`
+    reply declares a `unit` field, and a declared field that is structurally
+    always absent is a lie in the schema. The caller that cannot supply it from
+    elsewhere is exactly the one that matters: a chart opening on a fleet whose
+    sensors are quiet has no live sample to read it from. Absent still means
+    *unknown*, never *dimensionless* — today only the SNMP sensor declares
+    units on its telemetry points.
+  - **`samples` values are `{last, min, max}` buckets.** `last` is still the
+    value and the tier semantics are unchanged; the range is there so a coarse
+    tier can say a spike happened. An hour bucket that reported only its
+    closing value showed a gauge that touched 400 and settled at 12 as twelve,
+    flat.
+
+  The schema marker is now read in its own transaction **before** any other
+  table is opened. Re-typing a table makes `open_table` fail with a redb *table
+  type mismatch*, which is not the error the "wrong layout, move it aside" path
+  recognises — settling the schema question in the same transaction that opened
+  the tables was fine while every version bump kept the types, and would have
+  turned the first one that did not into a GUI silently running memory-only on
+  every launch.
+
+- **gnmi: `tls.skip_verify` is refused at startup** (#1137). It was documented
+  as "disables server-certificate validation — development only", shipped in
+  `configs/gnmi.json5`, and did **nothing**: the connect path logged a warning
+  and built the same TLS config. An operator set it, read the warning
+  confirming it was off, and watched the connection keep failing
+  `UnknownIssuer` while the backoff climbed to 300 s — with no per-target error
+  document, only the log line they had already dismissed.
+
+  A flag that cannot do what it says refuses loudly rather than sitting inert,
+  which is the call `bmc` already makes for `ipmi`, and the refusal names
+  `ca_cert`: a switch's own self-signed certificate works there, which is what
+  an operator reaching for `skip_verify` actually needs. With
+  `tls.enabled: false` there is nothing to verify, so the flag stays inert
+  rather than a lie and a config carrying it still starts.
+
+
+
+
 ### Added
 
 - **`@rpc/logs/events/page` — a truncated search can finally say it was
@@ -829,8 +995,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   as debug, plus a `debug_assert!`. The publisher is still reused, because
   tearing one down mid-flight would lose what is in flight and could not
   un-send what has already gone; the rule is the caller's obligation, and now
-  it is an audible one. **No call site in the tree trips it today**, which is
-  why this is a closed trap rather than a repair.
+  it is an audible one. **One call site did trip it** — the registry's own reuse
+  test deleted a key under a second class, which is the worst version: a
+  tombstone under the wrong class is an alert's *resolve* riding a droppable
+  publisher, so a resolved alert can stay firing forever.
 
 - **Five sensors published their framework documents in a format the
   deployment had not asked for** (#1155). `SensorRunner` hard-coded
@@ -1682,22 +1850,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read, so a kernel built without IPv6 is an absent table rather than a failed
   observation.
 
-### Changed — BREAKING
-
-- **gnmi: `tls.skip_verify` is refused at startup** (#1137). It was documented
-  as "disables server-certificate validation — development only", shipped in
-  `configs/gnmi.json5`, and did **nothing**: the connect path logged a warning
-  and built the same TLS config. An operator set it, read the warning
-  confirming it was off, and watched the connection keep failing
-  `UnknownIssuer` while the backoff climbed to 300 s — with no per-target error
-  document, only the log line they had already dismissed.
-
-  A flag that cannot do what it says refuses loudly rather than sitting inert,
-  which is the call `bmc` already makes for `ipmi`, and the refusal names
-  `ca_cert`: a switch's own self-signed certificate works there, which is what
-  an operator reaching for `skip_verify` actually needs. With
-  `tls.enabled: false` there is nothing to verify, so the flag stays inert
-  rather than a lie and a config carrying it still starts.
 
 ### Fixed
 
@@ -2659,35 +2811,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   retries (`zensight-correlator/tests/*`) or probes and hands out
   (`zensight-sensor-logs/tests/harness`, #1004); this one did neither.
 
-### Changed — BREAKING
 
 
-- **`sysinfo`'s `process/{rank}/{cpu,memory}` is retired** (#1070, registry
-  1.9). It was defended in the registry as bounded and stable, and was neither.
-  `process/1/cpu` is whoever is burning the most CPU *this tick*, so the series
-  was a max-envelope over unrelated processes that a chart draws happily and no
-  reader can question. And the Prometheus mapping turns point labels into series
-  labels, so every process that ever entered the top N minted a new
-  `{rank="1",pid="8471",…}` series — an unbounded cardinality leak from the
-  sensor whose job is to notice leaks. `collect.processes` defaulting off limited
-  the blast radius, not the shape.
-
-  Retire-and-sibling needed no sibling: the replacement already existed on both
-  sides. `@rpc/sysinfo/processes` has always served the per-pid detail — richer
-  than this ever was (rss/vsz/threads/io/state/uid) — and the GUI already had a
-  process explorer reading it beside the streamed card, which is now gone.
-  `system/processes_{total,zombie}` still stream. `collect.top_processes` keeps
-  its meaning: it is the reply's default `top` when a caller names none.
-
-
-- **`zensight_container_restart_count` is now
-  `zensight_container_restart_count_total`** (#1071). The Prometheus exposition
-  appends `_total` to a counter that does not already carry it, so this one
-  family's exported name moves when its type is corrected. The other four keep
-  their names and change only their `# TYPE` line — from `gauge` to `counter`,
-  which is what makes them usable. A dashboard or recording rule keyed on the
-  old name needs re-pointing; one keyed on the point's `container` label is
-  unaffected.
 
 
 ### Changed
@@ -6349,8 +6474,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   token are two encodings of one vocabulary rather than two enums to keep in
   step.
 
-### Changed — BREAKING
-
 Three further breaking changes in this release are written up under the section
 they belong to rather than here. They are indexed below so that this heading is
 the complete list of what breaks — which is what `docs/COMPATIBILITY.md` says it
@@ -6365,48 +6488,6 @@ is, and what the CI guard checks for:
   (#919, epic #899) — under `### Changed`.
 
 
-- **The GUI's metric cache is rebuilt on first launch after this** (#904).
-  Schema v3 re-types two tables and changes what a series is called, so a v2
-  file cannot be read and is moved aside to `metrics.redb.schema-v<n>` with a
-  logged warning, exactly as a pre-v2 file and an older redb file format
-  already were. Nothing else is affected: it is a per-viewer cache of a stream
-  the bus still carries, and the durable fleet history it shadows is moving to
-  a service (#898) that this makes possible.
-
-  What changed in it (v3 and v4 together — the cache is rebuilt once):
-
-  - **A series is `<origin>/<producer>/<subject>`** — the wire key minus the
-    class chunk — where it was
-    `<protocol>/<origin>/<source>|<metric>`. That is the identity a reader can
-    derive from a sample alone, which is what lets the GUI's cache and the
-    fleet historian name the same series the same way without a catalog
-    between them.
-  - **`metrics` rows carry `(id, kind, source, metric)`**, not a bare id. The
-    kind because a counter reset and a gauge that fell are the same negative
-    delta once every value is an `f64`; the other two because the new path
-    carries neither, and recovering them from it would mean un-slugging a
-    proxy producer's device chunk — a guess, in the code that decides which
-    host a chart belongs to.
-  - **`metrics` rows also carry the series' `unit`** (v4, #907). A `range`
-    reply declares a `unit` field, and a declared field that is structurally
-    always absent is a lie in the schema. The caller that cannot supply it from
-    elsewhere is exactly the one that matters: a chart opening on a fleet whose
-    sensors are quiet has no live sample to read it from. Absent still means
-    *unknown*, never *dimensionless* — today only the SNMP sensor declares
-    units on its telemetry points.
-  - **`samples` values are `{last, min, max}` buckets.** `last` is still the
-    value and the tier semantics are unchanged; the range is there so a coarse
-    tier can say a spike happened. An hour bucket that reported only its
-    closing value showed a gauge that touched 400 and settled at 12 as twelve,
-    flat.
-
-  The schema marker is now read in its own transaction **before** any other
-  table is opened. Re-typing a table makes `open_table` fail with a redb *table
-  type mismatch*, which is not the error the "wrong layout, move it aside" path
-  recognises — settling the schema question in the same transaction that opened
-  the tables was fine while every version bump kept the types, and would have
-  turned the first one that did not into a GUI silently running memory-only on
-  every launch.
 
 ### Changed
 

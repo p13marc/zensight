@@ -814,6 +814,37 @@ jobs:
             exit 0
           fi
 
+          # THE RELEASE PR (#1090). `git tag --points-at HEAD` is empty on a
+          # pull_request, so `name` is still "Unreleased" — and the release
+          # commit has just renamed [Unreleased] to [X.Y.Z] and opened a fresh
+          # empty one. The heading is in [X.Y.Z], exactly where it belongs, and
+          # this step failed every release PR at the moment it was cut. That is
+          # the same failure the tag lookup above exists to prevent, one event
+          # type over; it went unnoticed because RELEASING.md §3 also offers
+          # "push and merge fast-forward", which skips pull_request entirely.
+          #
+          # So: if [Unreleased] carries no heading, look in the newest versioned
+          # section — but ONLY when that section is for a release that does not
+          # exist yet ($newest != $prev). That is what makes this a release
+          # commit rather than a licence to leave a `!` commit undocumented: on
+          # an ordinary PR the newest section IS $prev, and the fallback does
+          # not fire.
+          if [ "$name" = "Unreleased" ]; then
+            newest=$(grep -oE '^## \[[0-9]+\.[0-9]+\.[0-9]+\]' CHANGELOG.md \
+              | head -1 | tr -d '#[] ')
+            if [ -n "$newest" ] && [ "$newest" != "$prev" ]; then
+              awk -v want="## [$newest]" '
+                index($0, want) == 1 { f = 1; next }
+                /^## \[/ { f = 0 }
+                f' CHANGELOG.md > /tmp/changelog-release-section.md
+              if grep -qxF '### Changed — BREAKING' /tmp/changelog-release-section.md; then
+                echo "release commit: [Unreleased] is empty and '## [$newest]' (untagged, newer than $prev) has the heading; $(wc -l < /tmp/changelog-breaking.txt) breaking commit(s)"
+                exit 0
+              fi
+              echo "--- release-PR fallback: '## [$newest]' exists but has no breaking heading either"
+            fi
+          fi
+
           echo "::error::These commits since $prev are marked breaking, but '## [$name]' has no '### Changed — BREAKING' section. Every breaking change is listed under that heading (docs/COMPATIBILITY.md) — write the entry there, or index it there if it is written up under another heading:"
           cat /tmp/changelog-breaking.txt
           # A guard that only says "no" is a guard someone disables. These three
