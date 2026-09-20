@@ -82,24 +82,42 @@ jobs:
           api="http://10.10.0.30:3000/api/v1/repos/${GITHUB_REPOSITORY}"
           # One runner, jobs queue serially across every open PR, so the tag's
           # own CI run can take a long while even to APPEAR. 80 * 60s.
+          # ONLY ci.yml's OWN STATUSES, never the combined state (#1090).
+          #
+          # `.state` is Forgejo's combined state over EVERY status on the
+          # commit — and this workflow's five jobs (gate, release, images,
+          # flatpak, checksums) each post a `pending` status the moment the run
+          # is queued, `Release / gate` among them. Combined state is `pending`
+          # while anything is pending, so it could never become `success` while
+          # this job was the thing asking: the gate waited for itself, spun to
+          # [80/80] and timed out. It deadlocked on its first real use, cutting
+          # 0.14.0, with the log reading `combined state=pending over 18/6`.
+          #
+          # So filter to contexts this gate is actually about — `CI / …` — and
+          # judge those. Deduped by context, newest wins, because a commit that
+          # was a PR head carries both `(pull_request)` and `(push)` copies of
+          # each job and both are legitimate evidence. `want` still comes from
+          # counting ci.yml's jobs, so too-few-reported is still caught: that
+          # false-green is what #1095 built this for and it is not weakened.
           for i in $(seq 80); do
             body=$(curl -sf --config "$cfg" "$api/commits/$sha/status" || echo '{}')
-            state=$(printf '%s' "$body" | jq -r '.state // "none"')
-            n=$(printf '%s' "$body" | jq -r '(.statuses // []) | length')
-            echo "[$i/80] combined state=$state over $n/$want status(es)"
-            case "$state" in
-              success)
-                if [ "$n" -ge "$want" ]; then
-                  printf '%s' "$body" | jq -r '.statuses[] | "  \(.context): \(.status)"'
-                  echo "CI is green on $sha over all $n statuses — publishing"
-                  exit 0
-                fi
-                echo "  green so far, but only $n of $want jobs have reported — still waiting" ;;
-              failure|error)
-                echo "::error::CI is $state on $sha; refusing to publish this release"
-                printf '%s' "$body" | jq -r '.statuses[] | "  \(.context): \(.status)"'
-                exit 1 ;;
-            esac
+            ci=$(printf '%s' "$body" | jq -c '
+              [ .statuses // [] | .[] | select(.context | startswith("CI / ")) ]
+              | group_by(.context) | map(max_by(.created_at // ""))')
+            n=$(printf '%s' "$ci" | jq -r 'length')
+            bad=$(printf '%s' "$ci" | jq -r '[.[] | select(.status=="failure" or .status=="error")] | length')
+            good=$(printf '%s' "$ci" | jq -r '[.[] | select(.status=="success")] | length')
+            echo "[$i/80] ci.yml statuses: $good/$n success, $bad failed (need >= $want reporting, all green)"
+            if [ "$bad" -gt 0 ]; then
+              echo "::error::CI is red on $sha; refusing to publish this release"
+              printf '%s' "$ci" | jq -r '.[] | "  \(.context): \(.status)"'
+              exit 1
+            fi
+            if [ "$n" -ge "$want" ] && [ "$good" -eq "$n" ]; then
+              printf '%s' "$ci" | jq -r '.[] | "  \(.context): \(.status)"'
+              echo "CI is green on $sha over all $n of its own statuses — publishing"
+              exit 0
+            fi
             sleep 60
           done
 
