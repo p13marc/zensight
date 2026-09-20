@@ -521,11 +521,11 @@ mod tests {
     #[test]
     fn rc_capped_reads_growth_not_the_absolute_counter() {
         use crate::view::device::DeviceDetailState;
-        use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
+        use zensight_common::{TelemetryPoint, TelemetryValue};
 
         fn state_with(samples: &[u64]) -> DeviceDetailState {
             let mut state = DeviceDetailState::new(crate::message::DeviceId {
-                protocol: Protocol::Parallax,
+                producer: "parallax".into(),
                 origin: "h-000000000000".to_string(),
                 source: "cam-host".to_string(),
             });
@@ -568,7 +568,7 @@ mod tests {
         use iced_test::simulator;
 
         let mut state = DeviceDetailState::new(crate::message::DeviceId {
-            protocol: zensight_common::Protocol::Parallax,
+            producer: "parallax".into(),
             origin: "h-000000000000".to_string(),
             source: "cam-host".to_string(),
         });

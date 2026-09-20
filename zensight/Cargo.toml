@@ -17,7 +17,10 @@ path = "src/main.rs"
 [dependencies]
 zenkey = { workspace = true }
 # The fleet engine behind the Fleet view (#745) — GUI only, never a sensor dep.
-zenkey-fleet = { workspace = true }
+# `decode` for `describe_sweep` and the schema-aware intake (#1256): the
+# GUI judges a document from a producer it was not compiled with against
+# that producer's own served schema set.
+zenkey-fleet = { workspace = true, features = ["decode"] }
 zensight-common.workspace = true
 # The tiered metric/log/event store, extracted from this binary in #904.
 # `blob` adds the zblob content-store adapter the debug-report download uses.

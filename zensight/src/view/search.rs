@@ -169,7 +169,7 @@ pub fn search<'a>(devices: impl Iterator<Item = &'a DeviceState>, query: &str) -
     }
     let mut scored: Vec<(i32, SearchHit)> = Vec::new();
     for device in devices {
-        let proto = device.id.protocol.to_string().to_lowercase();
+        let proto = device.id.producer.clone().to_lowercase();
         let source = device.id.source.to_lowercase();
         for (metric, point) in &device.metrics {
             let path = format!("{proto}/{source}/{}", metric.to_lowercase());
@@ -188,8 +188,8 @@ pub fn search<'a>(devices: impl Iterator<Item = &'a DeviceState>, query: &str) -
     // Rank by score (desc), then by path for a stable, deterministic order.
     scored.sort_by(|(sa, a), (sb, b)| {
         sb.cmp(sa).then_with(|| {
-            (a.device.protocol, &a.device.source, &a.metric).cmp(&(
-                b.device.protocol,
+            (&a.device.producer, &a.device.source, &a.metric).cmp(&(
+                &b.device.producer,
                 &b.device.source,
                 &b.metric,
             ))
@@ -255,7 +255,7 @@ pub fn search_entities(
                 .clone()
                 .or_else(|| e.fqdn.clone())
                 .unwrap_or_else(|| e.entity_id.clone());
-            let device = e.members.iter().find_map(crate::entity::member_key);
+            let device = e.members.first().map(crate::entity::member_key);
             scored.push((
                 score,
                 EntityHit {
@@ -341,8 +341,8 @@ pub fn global_search_panel<'a>(
                 label.push_str(" · stale");
             }
             let element: Element<'_, Message> = match hit.device {
-                Some((protocol, source)) => button(text(label).size(font::CAPTION))
-                    .on_press(Message::SelectDeviceNamed { protocol, source })
+                Some((producer, source)) => button(text(label).size(font::CAPTION))
+                    .on_press(Message::SelectDeviceNamed { producer, source })
                     .width(Length::Fill)
                     .padding([space::XS, space::SM])
                     .style(iced::widget::button::text)
@@ -391,7 +391,7 @@ pub fn global_search_panel<'a>(
     for hit in hits {
         let label = format!(
             "{}/{} · {} = {}",
-            hit.device.protocol, hit.device.source, hit.metric, hit.value
+            hit.device.producer, hit.device.source, hit.metric, hit.value
         );
         list = list.push(
             button(text(label).size(font::CAPTION))
@@ -424,7 +424,7 @@ mod tests {
     use zensight_common::{Protocol, TelemetryPoint, TelemetryValue};
 
     fn dev(source: &str, proto: Protocol, metrics: &[(&str, f64)]) -> DeviceState {
-        let id = DeviceId::fixture(proto, source.to_string());
+        let id = DeviceId::fixture(proto.as_str(), source.to_string());
         let mut d = DeviceState::new(id.clone());
         for (m, v) in metrics {
             d.metrics.insert(
@@ -480,7 +480,7 @@ mod tests {
         for i in 0..(MAX_RESULTS + 50) {
             metrics.push((format!("queue/{i}"), i as f64));
         }
-        let id = DeviceId::fixture(Protocol::Snmp, "r1".to_string());
+        let id = DeviceId::fixture("snmp", "r1".to_string());
         let mut d = DeviceState::new(id);
         for (m, v) in &metrics {
             d.metrics.insert(
@@ -582,7 +582,7 @@ mod tests {
         assert_eq!(hits[0].label, "web01");
         assert_eq!(
             hits[0].device,
-            Some((zensight_common::Protocol::Sysinfo, "web01".to_string()))
+            Some(("sysinfo".to_string(), "web01".to_string()))
         );
         assert!(!hits[0].stale);
         // Passive-DNS name hit, with provenance in the sublabel.

@@ -1118,10 +1118,10 @@ fn warn_color() -> iced::Color {
 mod tests {
     use super::*;
     use crate::message::DeviceId;
-    use zensight_common::{Protocol, TelemetryPoint};
+    use zensight_common::TelemetryPoint;
 
     fn state_with(metrics: &[(&str, f64)]) -> DeviceDetailState {
-        let mut s = DeviceDetailState::new(DeviceId::fixture(Protocol::Systemd, "server01"));
+        let mut s = DeviceDetailState::new(DeviceId::fixture("systemd", "server01"));
         for (m, v) in metrics {
             s.metrics.insert(
                 (*m).to_string(),

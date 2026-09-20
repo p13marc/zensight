@@ -1016,10 +1016,26 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         };
     }
 
-    let (_, protocol, subject) = refine_key(key)?;
+    // Only the two document classes reach here; a plane key is not a sample
+    // this subscriber is ever handed.
+    let class = match parsed.class {
+        ClassOrPlane::Class(c) => c,
+        ClassOrPlane::Plane(_) => return None,
+    };
+    let tail: Vec<&str> = parsed.subject.to_vec();
+    let producer = zensight_common::keyexpr::producer_name(key)?;
+
+    // The registry's parse direction for the producers this build was
+    // compiled with; the structural path for every other producer (#1256).
+    // `refine_key` is the right rule for a *producer* — its own subjects are
+    // its registry's — and the wrong one for a consumer, which sees the whole
+    // fleet's.
+    let Some((_, protocol, subject)) = refine_key(key) else {
+        return decode_structural(key, payload, class, origin, producer, &tail);
+    };
 
     // Events class (#536): append-only records — SNMP trap records today.
-    if matches!(parsed.class, ClassOrPlane::Class(Class::Events)) {
+    if matches!(class, Class::Events) {
         return match subject {
             zensight_common::registry::AnySubject::Snmp(
                 zensight_common::registry::snmp::Subject::Trap { .. },
@@ -1037,22 +1053,10 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                     None
                 }
             },
-            // #1128: `Trap` is the only registered events subject today, so
-            // this arm drops nothing yet — which is exactly why it is worth
-            // fixing now. It used to be a bare `_ => None`: the next producer
-            // to publish an events subject would have had it discarded here,
-            // silently, with the registry, the conformance judges and the bus
-            // explorer all agreeing the key was fine. A `debug!` naming the
-            // subject turns a silent drop into one grep.
-            other => {
-                tracing::debug!(
-                    key = %key,
-                    subject = ?other,
-                    "events-plane subject has no decode arm in the frontend — \
-                     dropping the sample; add one in decode_sample"
-                );
-                None
-            }
+            // #1128 made this drop loud; #1256 makes it not a drop: a
+            // registered events subject without a typed arm is held as a
+            // structural record, like an unregistered producer's.
+            _ => decode_structural(key, payload, class, origin, producer, &tail),
         };
     }
 
@@ -1070,7 +1074,12 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         };
     }
 
-    match ZensightState::of(&subject)? {
+    // A registered producer's state subject the GUI maps to no type used to
+    // be dropped here, silently; it is a document now (#1256).
+    let Some(state) = ZensightState::of(&subject) else {
+        return decode_structural(key, payload, class, origin, producer, &tail);
+    };
+    match state {
         ZensightState::Common(CommonState::Health) => {
             decode!(HealthSnapshot, Message::HealthSnapshotReceived)
         }
@@ -1157,6 +1166,85 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         ZensightState::Common(CommonState::CatalogEdge { .. }) => {
             decode!(zensight_common::relation::Edge, Message::EdgeReceived)
         }
+    }
+}
+
+/// The structural path (#1256): a document from a producer or a subject the
+/// compiled registry has no type for.
+///
+/// The payload is decoded as a value — CBOR or JSON by first-byte sniff; a
+/// payload that is neither is the one thing still dropped, and it is logged.
+/// Under an unregistered producer the framework vocabulary (RFC 06 §3)
+/// still means what it means everywhere: a `health` document is a
+/// [`HealthSnapshot`] and a `sensor` document a [`SensorInfo`], so those
+/// take the typed arms; an `alert/{key}` is tried as an [`Alert`] and, when
+/// its `protocol` is outside the closed enum, held as a document instead of
+/// being lost (the four service-tier producers of #1202 get variants; a
+/// third party's alert is shown, not decoded). Everything else is a
+/// [`Message::Document`] or a [`Message::Event`], judged at fold time.
+fn decode_structural(
+    key: &str,
+    payload: &[u8],
+    class: Class,
+    origin: String,
+    producer: String,
+    tail: &[&str],
+) -> Option<Message> {
+    let value = match decode_auto::<serde_json::Value>(payload) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                key = %key,
+                "Failed to decode a document structurally — neither JSON nor CBOR"
+            );
+            return None;
+        }
+    };
+    let subject = tail.join("/");
+    match class {
+        Class::Events => Some(Message::Event {
+            origin,
+            producer,
+            subject,
+            value,
+        }),
+        Class::State => {
+            if let Some((family, _)) = crate::intake::common_family_of(tail) {
+                use zenkey::CommonFamily;
+                match family {
+                    CommonFamily::Health => {
+                        if let Ok(snapshot) =
+                            serde_json::from_value::<HealthSnapshot>(value.clone())
+                        {
+                            return Some(Message::HealthSnapshotReceived(snapshot));
+                        }
+                    }
+                    CommonFamily::Sensor => {
+                        if let Ok(info) = serde_json::from_value::<SensorInfo>(value.clone()) {
+                            return Some(Message::SensorInfoReceived(info));
+                        }
+                    }
+                    CommonFamily::Alert => {
+                        if let Ok(alert) = serde_json::from_value::<Alert>(value.clone()) {
+                            return Some(Message::AlertReceived {
+                                origin: Some(origin),
+                                alert,
+                            });
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Some(Message::Document {
+                origin,
+                producer,
+                subject,
+                value,
+            })
+        }
+        // Handled before the refine — telemetry never reaches this function.
+        Class::Telemetry => None,
     }
 }
 
@@ -1636,21 +1724,97 @@ mod tests {
         ));
     }
 
-    /// An unregistered subject does not decode. This is the property the
-    /// registry buys (RFC 08 §1) and it is why #468 had to delete the
-    /// `{metric...}` catch-all first.
+    /// An unregistered subject does not decode *typed* — the property the
+    /// registry buys (RFC 08 §1), and why #468 had to delete the
+    /// `{metric...}` catch-all first. Since #1256 it is not dropped either:
+    /// it is held as a [`Message::Document`], and the fold judges it against
+    /// the producer's runtime slice, which is where "not declared" is said.
     #[test]
-    fn unregistered_subjects_do_not_decode() {
-        assert!(decode_sample("v1/h-3fa9c2d41b7e/state/netlink/bogus", b"{}").is_none());
+    fn unregistered_subjects_decode_structurally() {
+        match decode_sample("v1/h-3fa9c2d41b7e/state/netlink/bogus", b"{}") {
+            Some(Message::Document {
+                origin,
+                producer,
+                subject,
+                value,
+            }) => {
+                assert_eq!(origin, "h-3fa9c2d41b7e");
+                assert_eq!(producer, "netlink");
+                assert_eq!(subject, "bogus");
+                assert_eq!(value, serde_json::json!({}));
+            }
+            other => panic!("expected a Document, got {other:?}"),
+        }
         // `device/<device>/liveness` documents: the GUI used to have a decode
         // arm for these, but no producer has ever published one (device liveness
         // rides the liveliness *token* plane, `state/<producer>/device/<d>/alive`,
-        // which `parse_device_liveliness` handles). It is not registered, so it
-        // no longer parses — the dead arm is gone.
-        assert!(
+        // which `parse_device_liveliness` handles). Not registered, so not
+        // typed — the dead arm is gone — and held as a document like any other.
+        assert!(matches!(
             decode_sample(
                 "v1/h-3fa9c2d41b7e/state/netlink/device/dev1/liveness",
                 b"{}"
+            ),
+            Some(Message::Document { subject, .. }) if subject == "device/dev1/liveness"
+        ));
+    }
+
+    /// The structural path (#1256): a producer the compiled registry never
+    /// heard of decodes — its state as a document, its events as records,
+    /// and its framework documents (`health`, `sensor`) typed by the
+    /// vocabulary alone. A payload that is neither JSON nor CBOR is the one
+    /// thing still dropped.
+    #[test]
+    fn an_unknown_producer_decodes_structurally() {
+        let doc = br#"{"unit":"rack7","mode":"run"}"#;
+        assert!(matches!(
+            decode_sample("v1/h-3fa9c2d41b7e/state/fake-sensor/rack7/status", doc),
+            Some(Message::Document { producer, subject, .. })
+                if producer == "fake-sensor" && subject == "rack7/status"
+        ));
+        assert!(matches!(
+            decode_sample("v1/h-3fa9c2d41b7e/events/fake-sensor/rack7/boot", doc),
+            Some(Message::Event { producer, subject, .. })
+                if producer == "fake-sensor" && subject == "rack7/boot"
+        ));
+        // An instance suffix names the base producer, as everywhere (RFC 03 §1.5).
+        assert!(matches!(
+            decode_sample("v1/h-3fa9c2d41b7e/state/fake-sensor-2/rack7/status", doc),
+            Some(Message::Document { producer, .. }) if producer == "fake-sensor"
+        ));
+        // A health document under an unknown producer is a HealthSnapshot.
+        let health = serde_json::to_vec(&HealthSnapshot {
+            sensor: "fake-sensor".into(),
+            status: zensight_common::HealthStatus::Healthy,
+            uptime_secs: 1,
+            devices_total: 0,
+            devices_responding: 0,
+            devices_failed: 0,
+            last_poll_duration_ms: 0,
+            errors_last_hour: 0,
+            metrics_published: 0,
+            host_id: None,
+            source: Some("rack7".into()),
+            self_stats: None,
+            last_success_unix_ms: None,
+            dead_workers: Vec::new(),
+            last_error: None,
+        })
+        .unwrap();
+        assert!(matches!(
+            decode_sample("v1/h-3fa9c2d41b7e/state/fake-sensor/health", &health),
+            Some(Message::HealthSnapshotReceived(_))
+        ));
+        // A junk health document is still held, as a document, not lost.
+        assert!(matches!(
+            decode_sample("v1/h-3fa9c2d41b7e/state/fake-sensor/health", b"{\"x\":1}"),
+            Some(Message::Document { subject, .. }) if subject == "health"
+        ));
+        // Neither JSON nor CBOR: dropped, the one remaining drop.
+        assert!(
+            decode_sample(
+                "v1/h-3fa9c2d41b7e/state/fake-sensor/rack7/status",
+                b"\x00\x01"
             )
             .is_none()
         );

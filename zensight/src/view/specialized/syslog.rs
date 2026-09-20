@@ -1788,7 +1788,6 @@ fn section_style(t: &Theme) -> container::Style {
 mod tests {
     use super::*;
     use crate::message::DeviceId;
-    use zensight_common::Protocol;
 
     /// #555: multiple selected units can't be expressed in one bundle request,
     /// so the mapping drops the unit filter and the caveat is surfaced.
@@ -2197,7 +2196,7 @@ mod tests {
 
     #[test]
     fn test_syslog_view_renders() {
-        let device_id = DeviceId::fixture(Protocol::Logs, "server01");
+        let device_id = DeviceId::fixture("logs", "server01");
         let state = DeviceDetailState::new(device_id);
         let filter_state = SyslogFilterState::default();
         let _view = syslog_event_view(&state, &filter_state, &[]);

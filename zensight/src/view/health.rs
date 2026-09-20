@@ -272,7 +272,7 @@ mod tests {
         use zensight_common::Protocol;
 
         let facet = |proto: Protocol, status: DeviceStatus| {
-            let mut d = DeviceState::new(DeviceId::fixture(proto, "h"));
+            let mut d = DeviceState::new(DeviceId::fixture(proto.as_str(), "h"));
             d.update_from_liveness(status, 0, None);
             d
         };

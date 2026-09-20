@@ -515,12 +515,12 @@ fn entity_cell<'a>(
             if EntityStore::is_stale(e, now_ms) {
                 label.push_str(" · stale");
             }
-            match e.members.iter().find_map(crate::entity::member_key) {
-                Some((protocol, source)) => container(
+            match e.members.first().map(crate::entity::member_key) {
+                Some((producer, source)) => container(
                     button(text(label).size(font::CAPTION))
                         .padding([2, 6])
                         .style(iced::widget::button::text)
-                        .on_press(Message::SelectDeviceNamed { protocol, source }),
+                        .on_press(Message::SelectDeviceNamed { producer, source }),
                 )
                 .width(Length::Fixed(170.0))
                 .into(),
@@ -861,8 +861,8 @@ mod tests {
         // Named, not handled: the chip knows the host, not who published it (#474).
         assert!(msgs.iter().any(|m| matches!(
             m,
-            Message::SelectDeviceNamed { protocol, source }
-                if source == "web01" && *protocol == zensight_common::Protocol::Sysinfo
+            Message::SelectDeviceNamed { producer, source }
+                if source == "web01" && producer == "sysinfo"
         )));
     }
 

@@ -26,6 +26,57 @@ Views that need per-protocol drill-downs live under `view/specialized/`
 with a `*_detail.rs` tabbed detail panel. Cross-protocol summary panels live
 under `view/overview/`.
 
+### Producer-agnostic intake (#1256)
+
+A device is named by its **producer** — chunk 4 of every key it publishes —
+not by the closed `Protocol` enum: `DeviceId { producer: String, origin,
+source }`. The enum is asked only where a bespoke surface exists
+(`DeviceId::protocol()` / `is()`): the specialized view dispatch, a tab's
+prefetch, an icon. Everything generic keys on the name, so a producer this
+GUI was not compiled with — a newer sensor, a third party's — gets a device,
+a dashboard card, an overview tab (`icons::for_producer` renders the generic
+mark; the tab label is the producer's own name) and the generic device view,
+instead of being dropped at decode.
+
+Its state documents are held too. `decode_sample` tries the compiled
+registry's parse direction first and, when that names nothing — an
+unregistered producer, or a registered producer's subject the GUI maps to no
+type — decodes the payload **structurally** into `Message::Document` (state)
+or `Message::Event` (events). The framework vocabulary still means what it
+means everywhere: an unregistered producer's `health` and `sensor` documents
+take the typed arms; its `alert/{key}` is tried as an `Alert` and held as a
+document when its `protocol` is outside the enum. A payload that is neither
+JSON nor CBOR is the one thing still dropped, and it is logged.
+
+Documents are judged **at fold time**, in `update`, against the **runtime
+registry**: every `introspect` reply of the last fleet sweep as a
+`zenkey_fleet::SliceSet`, and every producer's `describe` reply as its
+`SchemaSet` (fetched after each sweep for the producers not yet described,
+`Message::SchemasLoaded`). `intake::judge` answers three things per
+document — the declared type, the schema verdict (the shared three-state
+badge: valid, invalid with the violation named, or *why* it was not checked)
+and whether the subject is declared at all — and `intake::declared` answers
+the last for every telemetry subject a device publishes. Fold time rather
+than decode time is what makes the late joiner work: the subscriptions are up
+before the first sweep answers, so a document that arrives before its slice
+is re-judged when the slice lands.
+
+What the generic device view then says (gate 4 of #1254, the honesty gate):
+a **not declared** marker beside every metric whose subject the producer's
+own slice does not declare, with a banner listing them; a banner when the
+producer **declares no slice** at all (a finding about the fleet, worded as
+such, and only once a sweep has answered — before that "no slice" is "not
+asked yet"); a **Documents** section, one card per held document with its
+subject, type or "untyped", verdict badge and declared/no-slice badge above
+the value; and an **Events** section of caption rows. Documents attach to a
+device when `(origin, producer)` match and the subject is under the device's
+source, or when the device is the only one its producer has on that origin.
+Documents never create a device.
+
+Two things the intake does *not* do yet: derive the family model from the
+slice (gate 2, #1257 — the ratchet in `app::system_view_tests` stops there
+today) and render a producer's `views.toml` (gate 5, #1259).
+
 ## Routing: `CurrentView`
 
 `CurrentView` (in `src/app.rs`) enumerates the routable views:
@@ -820,15 +871,18 @@ things are load-bearing:
   below it are the last ones given — above them, not below, because that is the
   order they are read in.
 
-**Protocol overviews** (`view/overview/`) — one fleet aggregate per protocol,
+**Protocol overviews** (`view/overview/`) — one fleet aggregate per producer,
 selected by the tab strip above the dashboard.
 
-The tab strip is built from **the protocols that have devices**, ordered by
-`TAB_ORDER` and then by name. `TAB_ORDER` is an ordering hint and nothing more.
-Before #1128 it was the whole list, frozen at nine, and every protocol added
-since had a match arm in `render_protocol_overview` that could never run — for
-the pve sensor, its entire life. If you add a sensor, you may add it to
-`TAB_ORDER` for placement; if you forget, it still appears.
+The tab strip is built from **the producers that have devices**, by name
+(#1256), ordered by `TAB_ORDER` and then by name. `TAB_ORDER` is an ordering
+hint and nothing more. Before #1128 it was the whole list, frozen at nine, and
+every protocol added since had a match arm in `render_protocol_overview` that
+could never run — for the pve sensor, its entire life. If you add a sensor,
+you may add it to `TAB_ORDER` for placement; if you forget, it still appears —
+and so does a producer this build was never compiled with, labelled by its
+own name and rendered by the generic table. The dashboard's producer filter
+row is the same list, alphabetical.
 
 **PVE** (`overview/pve.rs`, #1128) — backup freshness, quorum, overcommit.
 The backup table walks the **guests** and joins their backups, never the

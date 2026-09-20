@@ -149,7 +149,10 @@ pub fn specialized_view<'a>(
     artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
     entity: Option<&zensight_common::HostEntity>,
 ) -> Option<Element<'a, Message>> {
-    match state.device_id.protocol {
+    // A producer outside the closed enum has no bespoke view; the generic
+    // body renders it (#1256). So does any enum member without an arm below.
+    let protocol = state.device_id.protocol()?;
+    match protocol {
         Protocol::Snmp => Some(snmp::snmp_device_view(state)),
         Protocol::Sysinfo => Some(sysinfo::sysinfo_host_view(state, entity)),
         Protocol::Logs => None, // Syslog needs filter state, handled separately
@@ -193,6 +196,9 @@ pub fn specialized_view<'a>(
         // (#910). A tab of its own would show its health document, which the
         // Sensors card already does.
         Protocol::Historian => None,
+        // No `_` arm: every enum member decides here, explicitly, whether it
+        // has a tab. A new variant that forgets is a compile error, which is
+        // the point.
     }
 }
 
@@ -204,20 +210,4 @@ pub fn syslog_view<'a>(
     host_logs: &[SyslogMessage],
 ) -> Element<'a, Message> {
     syslog::syslog_event_view(state, filter_state, host_logs)
-}
-
-/// Check if a protocol has a specialized view available.
-pub fn has_specialized_view(protocol: Protocol) -> bool {
-    // Keep this list in lockstep with the `None` arms above — a `true` here
-    // for a `None` protocol offers a tab that renders nothing.
-    !matches!(
-        protocol,
-        Protocol::Opcua
-            | Protocol::Hostspec
-            | Protocol::Pve
-            | Protocol::Bmc
-            | Protocol::Container
-            | Protocol::Probe
-            | Protocol::Historian
-    )
 }

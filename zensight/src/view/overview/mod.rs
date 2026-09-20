@@ -32,8 +32,10 @@ use crate::view::tokens::font;
 /// State for the overview section.
 #[derive(Debug, Clone)]
 pub struct OverviewState {
-    /// Which protocol overview is currently selected (None = collapsed).
-    pub selected_protocol: Option<Protocol>,
+    /// Which producer's overview is currently selected (None = collapsed).
+    /// A name since #1256: a producer without a bespoke overview gets the
+    /// generic table.
+    pub selected_producer: Option<String>,
     /// Whether the overview section is expanded.
     pub expanded: bool,
 }
@@ -41,20 +43,20 @@ pub struct OverviewState {
 impl Default for OverviewState {
     fn default() -> Self {
         Self {
-            selected_protocol: None,
+            selected_producer: None,
             expanded: true,
         }
     }
 }
 
 impl OverviewState {
-    /// Select a protocol for overview.
-    pub fn select_protocol(&mut self, protocol: Protocol) {
-        if self.selected_protocol == Some(protocol) {
+    /// Select a producer for overview.
+    pub fn select_producer(&mut self, producer: String) {
+        if self.selected_producer.as_deref() == Some(producer.as_str()) {
             // Toggle off if already selected
-            self.selected_protocol = None;
+            self.selected_producer = None;
         } else {
-            self.selected_protocol = Some(protocol);
+            self.selected_producer = Some(producer);
             self.expanded = true;
         }
     }
@@ -70,19 +72,13 @@ pub fn overview_section<'a>(
     state: &'a OverviewState,
     devices: &'a HashMap<DeviceId, DeviceState>,
     snmp: snmp::SnmpOverviewData<'a>,
-    firing_by_protocol: &'a HashMap<Protocol, usize>,
+    firing_by_protocol: &'a HashMap<String, usize>,
 ) -> Element<'a, Message> {
-    // Count devices by protocol
-    let protocol_counts = count_devices_by_protocol(devices);
+    // Count devices by producer
+    let protocol_counts = count_devices_by_producer(devices);
 
-    // Only show protocols that have devices
-    let available_protocols: Vec<Protocol> = protocol_counts
-        .iter()
-        .filter(|(_, count)| **count > 0)
-        .map(|(proto, _)| *proto)
-        .collect();
-
-    if available_protocols.is_empty() {
+    // Only show producers that have devices
+    if !protocol_counts.values().any(|count| *count > 0) {
         return column![].into();
     }
 
@@ -109,74 +105,62 @@ pub fn overview_section<'a>(
     let tabs = render_protocol_tabs(state, &protocol_counts);
 
     // Selected protocol content
-    let content: Element<'a, Message> = if let Some(protocol) = state.selected_protocol {
+    let content: Element<'a, Message> = if let Some(producer) = state.selected_producer.as_deref() {
         let protocol_devices: HashMap<&DeviceId, &DeviceState> = devices
             .iter()
-            .filter(|(id, _)| id.protocol == protocol)
+            .filter(|(id, _)| id.producer == producer)
             .collect();
 
         // Firing-alert headline tile (#582), same for every protocol tab:
         // count of this protocol's firing external alerts, clicking through
         // to the Alerts view pre-filtered to it.
-        let firing = firing_by_protocol.get(&protocol).copied().unwrap_or(0);
-        let alert_tile: Element<'a, Message> = if firing > 0 {
-            button(
-                text(format!(
-                    "{firing} firing alert{} →",
-                    if firing == 1 { "" } else { "s" }
-                ))
-                .size(font::CAPTION)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).status_error()),
-                }),
-            )
-            .on_press(Message::OpenAlertsForProtocol(protocol))
-            .style(iced::widget::button::text)
-            .into()
-        } else {
-            text("No firing alerts")
-                .size(font::CAPTION)
-                .style(|t: &Theme| text::Style {
-                    color: Some(theme::colors(t).text_muted()),
-                })
+        // An alert names its producer as the closed enum, so a producer
+        // outside it has no firing count to show — and no Alerts filter to
+        // open (#1256).
+        let firing = firing_by_protocol.get(producer).copied().unwrap_or(0);
+        let alert_tile: Element<'a, Message> =
+            if let (true, Ok(protocol)) = (firing > 0, producer.parse::<Protocol>()) {
+                button(
+                    text(format!(
+                        "{firing} firing alert{} →",
+                        if firing == 1 { "" } else { "s" }
+                    ))
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).status_error()),
+                    }),
+                )
+                .on_press(Message::OpenAlertsForProtocol(protocol))
+                .style(iced::widget::button::text)
                 .into()
-        };
+            } else {
+                text("No firing alerts")
+                    .size(font::CAPTION)
+                    .style(|t: &Theme| text::Style {
+                        color: Some(theme::colors(t).text_muted()),
+                    })
+                    .into()
+            };
 
-        let body = match protocol {
-            Protocol::Snmp => snmp::snmp_overview(&protocol_devices, snmp),
-            Protocol::Sysinfo => sysinfo::sysinfo_overview(&protocol_devices),
-            Protocol::Logs => syslog::syslog_overview(&protocol_devices),
-            Protocol::Netflow => netflow::netflow_overview(&protocol_devices),
-            Protocol::Modbus => modbus::modbus_overview(&protocol_devices),
-            Protocol::Gnmi => gnmi::gnmi_overview(&protocol_devices),
-            Protocol::Netlink => netlink::netlink_overview(&protocol_devices),
-            Protocol::Netring => netring::netring_overview(&protocol_devices),
-            Protocol::Opcua => generic_overview(&protocol_devices, "OPC-UA nodes"),
-            Protocol::Systemd => generic_overview(&protocol_devices, "systemd units"),
-            Protocol::Parallax => generic_overview(&protocol_devices, "video streams"),
-            Protocol::Hostspec => generic_overview(&protocol_devices, "host assertions"),
-            // #818: one device per guest, plus the hypervisor itself. The
-            // generic table already renders exactly that; a bespoke view is a
-            // follow-up, not a blocker for the sensor existing.
-            Protocol::Pve => pve::pve_overview(&protocol_devices),
-            // #953: one device per managed chassis. The generic table renders
-            // the watts, the RPM and the temperatures; a chassis-shaped tab
-            // (a bay diagram, redundancy groups) is a follow-up, not a
-            // blocker for the sensor existing.
-            Protocol::Bmc => generic_overview(&protocol_devices, "chassis"),
-            // #819: one device per container. The generic table renders the
-            // gauges; a container-shaped tab (image digests, health, restart
-            // history) is a follow-up, not a blocker.
-            Protocol::Container => containers::container_overview(&protocol_devices),
+        // A producer the GUI was compiled with may have a bespoke overview;
+        // everything else — an enum member without one, or a producer outside
+        // the enum entirely (#1256) — gets the generic device table.
+        let body = match producer.parse::<Protocol>().ok() {
+            Some(Protocol::Snmp) => snmp::snmp_overview(&protocol_devices, snmp),
+            Some(Protocol::Sysinfo) => sysinfo::sysinfo_overview(&protocol_devices),
+            Some(Protocol::Logs) => syslog::syslog_overview(&protocol_devices),
+            Some(Protocol::Netflow) => netflow::netflow_overview(&protocol_devices),
+            Some(Protocol::Modbus) => modbus::modbus_overview(&protocol_devices),
+            Some(Protocol::Gnmi) => gnmi::gnmi_overview(&protocol_devices),
+            Some(Protocol::Netlink) => netlink::netlink_overview(&protocol_devices),
+            Some(Protocol::Netring) => netring::netring_overview(&protocol_devices),
+            // #818: one device per guest, plus the hypervisor itself.
+            Some(Protocol::Pve) => pve::pve_overview(&protocol_devices),
+            // #819: one device per container.
+            Some(Protocol::Container) => containers::container_overview(&protocol_devices),
             // #820: one device per configured target.
-            Protocol::Probe => probe::probe_overview(&protocol_devices),
-            // #898: the historian is one device per running instance, and what
-            // it has to say about itself is its health document and its store
-            // statistics — not a device table. The generic view renders the
-            // gauges it does publish; the history it holds is read through
-            // `@rpc/historian/range` from the charts that need it, not from a
-            // tab of its own.
-            Protocol::Historian => generic_overview(&protocol_devices, "historians"),
+            Some(Protocol::Probe) => probe::probe_overview(&protocol_devices),
+            _ => generic_overview(&protocol_devices, generic_label(producer)),
         };
         column![alert_tile, body].spacing(8).into()
     } else {
@@ -222,52 +206,44 @@ pub fn overview_section<'a>(
 /// built from the protocols actually present, and this array only says which
 /// come first. A protocol nobody added here still gets a tab — after the listed
 /// ones, in name order — so the next sensor cannot be silently invisible.
-const TAB_ORDER: [Protocol; 9] = [
-    Protocol::Sysinfo,
-    Protocol::Snmp,
-    Protocol::Logs,
-    Protocol::Netflow,
-    Protocol::Modbus,
-    Protocol::Gnmi,
-    Protocol::Netlink,
-    Protocol::Netring,
-    Protocol::Opcua,
+const TAB_ORDER: [&str; 9] = [
+    "sysinfo", "snmp", "logs", "netflow", "modbus", "gnmi", "netlink", "netring", "opcua",
 ];
 
-/// The protocols to show tabs for: everything with at least one device,
+/// The producers to show tabs for: everything with at least one device,
 /// [`TAB_ORDER`] first and the rest after it in name order.
-fn tab_protocols(counts: &HashMap<Protocol, usize>) -> Vec<Protocol> {
-    let mut present: Vec<Protocol> = counts
+fn tab_producers(counts: &HashMap<String, usize>) -> Vec<String> {
+    let mut present: Vec<String> = counts
         .iter()
         .filter(|&(_, &n)| n > 0)
-        .map(|(&p, _)| p)
+        .map(|(p, _)| p.clone())
         .collect();
     present.sort_by_key(|p| {
         (
             TAB_ORDER.iter().position(|q| q == p).unwrap_or(usize::MAX),
-            protocol_short_name(*p),
+            producer_short_name(p),
         )
     });
     present
 }
 
-/// Render the protocol tabs.
+/// Render the producer tabs.
 fn render_protocol_tabs<'a>(
     state: &'a OverviewState,
-    counts: &HashMap<Protocol, usize>,
+    counts: &HashMap<String, usize>,
 ) -> Element<'a, Message> {
-    let tabs: Vec<Element<'a, Message>> = tab_protocols(counts)
+    let tabs: Vec<Element<'a, Message>> = tab_producers(counts)
         .into_iter()
-        .map(|proto| {
-            let count = counts.get(&proto).copied().unwrap_or(0);
-            let is_selected = state.selected_protocol == Some(proto);
+        .map(|producer| {
+            let count = counts.get(&producer).copied().unwrap_or(0);
+            let is_selected = state.selected_producer.as_deref() == Some(producer.as_str());
 
-            let icon = icons::protocol_icon(proto, IconSize::Small);
+            let icon = icons::for_producer(&producer, IconSize::Small);
             let label =
-                text(format!("{} ({})", protocol_short_name(proto), count)).size(font::CAPTION);
+                text(format!("{} ({})", producer_short_name(&producer), count)).size(font::CAPTION);
 
             let btn = button(row![icon, label].spacing(6).align_y(Alignment::Center))
-                .on_press(Message::SelectOverviewProtocol(proto))
+                .on_press(Message::SelectOverviewProducer(producer))
                 .padding([6, 12])
                 .style(if is_selected {
                     iced::widget::button::primary
@@ -279,10 +255,7 @@ fn render_protocol_tabs<'a>(
         })
         .collect();
 
-    Row::with_children(tabs)
-        .spacing(8)
-        .align_y(Alignment::Center)
-        .into()
+    Row::with_children(tabs).spacing(8).wrap().into()
 }
 
 /// A minimal count-and-health overview for protocols without richer aggregates
@@ -329,35 +302,56 @@ fn muted(t: &Theme) -> text::Style {
     }
 }
 
-/// Count devices by protocol.
-fn count_devices_by_protocol(devices: &HashMap<DeviceId, DeviceState>) -> HashMap<Protocol, usize> {
+/// Count devices by producer.
+fn count_devices_by_producer(devices: &HashMap<DeviceId, DeviceState>) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
     for device_id in devices.keys() {
-        *counts.entry(device_id.protocol).or_insert(0) += 1;
+        *counts.entry(device_id.producer.clone()).or_insert(0) += 1;
     }
     counts
 }
 
-/// Get a short display name for a protocol.
-fn protocol_short_name(protocol: Protocol) -> &'static str {
-    match protocol {
-        Protocol::Snmp => "SNMP",
-        Protocol::Sysinfo => "Sysinfo",
-        Protocol::Logs => "Logs",
-        Protocol::Netflow => "NetFlow",
-        Protocol::Modbus => "Modbus",
-        Protocol::Gnmi => "gNMI",
-        Protocol::Opcua => "OPC-UA",
-        Protocol::Netlink => "Netlink",
-        Protocol::Netring => "Netring",
-        Protocol::Systemd => "systemd",
-        Protocol::Parallax => "Parallax",
-        Protocol::Hostspec => "hostspec",
-        Protocol::Pve => "PVE",
-        Protocol::Bmc => "BMC",
-        Protocol::Container => "Containers",
-        Protocol::Probe => "Probes",
-        Protocol::Historian => "History",
+/// The tab label for a producer: a curated short name for the enum members,
+/// the producer name itself for everyone else (#1256).
+fn producer_short_name(producer: &str) -> String {
+    match producer.parse::<Protocol>() {
+        Ok(Protocol::Snmp) => "SNMP",
+        Ok(Protocol::Sysinfo) => "Sysinfo",
+        Ok(Protocol::Logs) => "Logs",
+        Ok(Protocol::Netflow) => "NetFlow",
+        Ok(Protocol::Modbus) => "Modbus",
+        Ok(Protocol::Gnmi) => "gNMI",
+        Ok(Protocol::Opcua) => "OPC-UA",
+        Ok(Protocol::Netlink) => "Netlink",
+        Ok(Protocol::Netring) => "Netring",
+        Ok(Protocol::Systemd) => "systemd",
+        Ok(Protocol::Parallax) => "Parallax",
+        Ok(Protocol::Hostspec) => "hostspec",
+        Ok(Protocol::Pve) => "PVE",
+        Ok(Protocol::Bmc) => "BMC",
+        Ok(Protocol::Container) => "Containers",
+        Ok(Protocol::Probe) => "Probes",
+        Ok(Protocol::Historian) => "History",
+        Err(()) => return producer.to_string(),
+    }
+    .to_string()
+}
+
+/// What the generic table calls the rows of a producer without a bespoke
+/// overview — the enum members' labels as they were, and the producer's own
+/// name for one outside the enum.
+fn generic_label(producer: &str) -> &str {
+    match producer.parse::<Protocol>() {
+        Ok(Protocol::Opcua) => "OPC-UA nodes",
+        Ok(Protocol::Systemd) => "systemd units",
+        Ok(Protocol::Parallax) => "video streams",
+        Ok(Protocol::Hostspec) => "host assertions",
+        // #953: one device per managed chassis.
+        Ok(Protocol::Bmc) => "chassis",
+        // #898: one device per running instance; the history it holds is
+        // read through `@rpc/historian/range` from the charts that need it.
+        Ok(Protocol::Historian) => "historians",
+        _ => producer,
     }
 }
 
@@ -368,7 +362,7 @@ mod tests {
     #[test]
     fn test_overview_state_default() {
         let state = OverviewState::default();
-        assert!(state.selected_protocol.is_none());
+        assert!(state.selected_producer.is_none());
         assert!(state.expanded);
     }
 
@@ -376,12 +370,12 @@ mod tests {
     fn test_select_protocol_toggle() {
         let mut state = OverviewState::default();
 
-        state.select_protocol(Protocol::Snmp);
-        assert_eq!(state.selected_protocol, Some(Protocol::Snmp));
+        state.select_producer("snmp".to_string());
+        assert_eq!(state.selected_producer, Some("snmp".to_string()));
 
         // Selecting same protocol toggles off
-        state.select_protocol(Protocol::Snmp);
-        assert_eq!(state.selected_protocol, None);
+        state.select_producer("snmp".to_string());
+        assert_eq!(state.selected_producer, None);
     }
 
     #[test]
@@ -406,16 +400,16 @@ mod tests {
     #[test]
     fn a_protocol_nobody_listed_still_gets_a_tab() {
         let mut counts = HashMap::new();
-        counts.insert(Protocol::Sysinfo, 3);
-        counts.insert(Protocol::Pve, 2);
-        counts.insert(Protocol::Container, 7);
-        counts.insert(Protocol::Bmc, 1);
+        counts.insert("sysinfo".to_string(), 3);
+        counts.insert("pve".to_string(), 2);
+        counts.insert("container".to_string(), 7);
+        counts.insert("bmc".to_string(), 1);
 
-        let tabs = tab_protocols(&counts);
-        for p in [Protocol::Pve, Protocol::Container, Protocol::Bmc] {
+        let tabs = tab_producers(&counts);
+        for p in ["pve", "container", "bmc"] {
             assert!(
-                tabs.contains(&p),
-                "{p:?} has devices and is not in TAB_ORDER — it must still get a tab"
+                tabs.iter().any(|t| t == p),
+                "{p} has devices and is not in TAB_ORDER — it must still get a tab"
             );
         }
         assert_eq!(tabs.len(), 4);
@@ -425,25 +419,40 @@ mod tests {
     #[test]
     fn tab_order_is_honoured_and_unlisted_protocols_follow_it() {
         let mut counts = HashMap::new();
-        counts.insert(Protocol::Netring, 1);
-        counts.insert(Protocol::Sysinfo, 1);
-        counts.insert(Protocol::Pve, 1);
-        counts.insert(Protocol::Bmc, 1);
+        counts.insert("netring".to_string(), 1);
+        counts.insert("sysinfo".to_string(), 1);
+        counts.insert("pve".to_string(), 1);
+        counts.insert("bmc".to_string(), 1);
 
-        let tabs = tab_protocols(&counts);
-        assert_eq!(tabs[0], Protocol::Sysinfo, "TAB_ORDER[0] leads");
-        assert_eq!(tabs[1], Protocol::Netring, "then the later listed one");
+        let tabs = tab_producers(&counts);
+        assert_eq!(tabs[0], "sysinfo", "TAB_ORDER[0] leads");
+        assert_eq!(tabs[1], "netring", "then the later listed one");
         // The unlisted two follow, in name order — deterministic, so the tab
         // strip does not reshuffle itself between polls.
-        assert_eq!(&tabs[2..], &[Protocol::Bmc, Protocol::Pve]);
+        assert_eq!(&tabs[2..], &["bmc", "pve"]);
+    }
+
+    /// A producer this GUI was not compiled with gets a tab like any other
+    /// (#1256), labelled by its own name, after the listed ones.
+    #[test]
+    fn a_producer_outside_the_enum_gets_a_tab() {
+        let mut counts = HashMap::new();
+        counts.insert("sysinfo".to_string(), 1);
+        counts.insert("fake-sensor".to_string(), 1);
+        let tabs = tab_producers(&counts);
+        assert_eq!(tabs, vec!["sysinfo".to_string(), "fake-sensor".to_string()]);
+        assert_eq!(producer_short_name("fake-sensor"), "fake-sensor");
+        assert_eq!(producer_short_name("pve"), "PVE");
+        assert_eq!(generic_label("fake-sensor"), "fake-sensor");
+        assert_eq!(generic_label("bmc"), "chassis");
     }
 
     /// A protocol with no devices gets no tab, listed or not.
     #[test]
     fn a_protocol_with_no_devices_gets_no_tab() {
         let mut counts = HashMap::new();
-        counts.insert(Protocol::Sysinfo, 1);
-        counts.insert(Protocol::Snmp, 0);
-        assert_eq!(tab_protocols(&counts), vec![Protocol::Sysinfo]);
+        counts.insert("sysinfo".to_string(), 1);
+        counts.insert("snmp".to_string(), 0);
+        assert_eq!(tab_producers(&counts), vec!["sysinfo".to_string()]);
     }
 }

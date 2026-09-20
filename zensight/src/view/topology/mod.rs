@@ -256,7 +256,7 @@ impl TopologyState {
         // sysinfo/netlink so netflow exporters and gNMI/SNMP/Modbus gear also
         // appear; syslog/netring are overlays (logs / flow edges), not nodes.
         for (device_id, device_state) in devices {
-            if !is_node_protocol(device_id.protocol) {
+            if !is_node_protocol(&device_id.producer) {
                 continue;
             }
 
@@ -327,7 +327,7 @@ impl TopologyState {
                     }
                     None => node.ips = Vec::new(),
                 }
-                node.protocols.insert(device_id.protocol);
+                node.protocols.insert(device_id.producer.clone());
                 node.metric_count += device_state.metric_count;
                 node.update_from_metrics(&device_state.metrics);
             }
@@ -1162,7 +1162,7 @@ impl TopologyState {
     /// protocol, so the jump lands on a real device even for netlink-only hosts
     /// (#83). The caller pairs this with the node id (a host *name*) and
     /// resolves the pair to a device handle; a node knows no origin (#474).
-    pub fn node_primary_protocol(&self, node_id: &NodeId) -> Option<zensight_common::Protocol> {
+    pub fn node_primary_protocol(&self, node_id: &NodeId) -> Option<String> {
         self.nodes.get(node_id).map(primary_protocol)
     }
 }
@@ -1841,7 +1841,7 @@ mod tests {
                 };
                 if id == "a" {
                     // The neighbor table is attributed to netlink hosts.
-                    node.protocols.insert(zensight_common::Protocol::Netlink);
+                    node.protocols.insert("netlink".to_string());
                 }
                 state.nodes.insert(id.to_string(), node);
             }
@@ -1896,7 +1896,7 @@ mod tests {
     #[test]
     fn new_node_does_not_reshuffle_existing_layout() {
         let device = |source: &str| {
-            let id = DeviceId::fixture(Protocol::Sysinfo, source);
+            let id = DeviceId::fixture("sysinfo", source);
             (id.clone(), DeviceState::new(id))
         };
         let mut devices: HashMap<DeviceId, DeviceState> = [device("host-a")].into();
@@ -2191,7 +2191,7 @@ mod tests {
 
         let mut devices: HashMap<DeviceId, DeviceState> = HashMap::new();
         let mut add = |proto: Protocol, source: &str, metrics: usize| {
-            let id = DeviceId::fixture(proto, source);
+            let id = DeviceId::fixture(proto.as_str(), source);
             let mut d = DeviceState::new(id.clone());
             d.metric_count = metrics;
             devices.insert(id, d);
@@ -2226,8 +2226,8 @@ mod tests {
 
         // Merged host carries both protocols and the summed metric tally.
         let server = state.nodes.get("server01").unwrap();
-        assert!(server.protocols.contains(&Protocol::Sysinfo));
-        assert!(server.protocols.contains(&Protocol::Netlink));
+        assert!(server.protocols.contains("sysinfo"));
+        assert!(server.protocols.contains("netlink"));
         assert_eq!(server.metric_count, 15);
 
         // Re-running doesn't double-count the per-host metric tally.

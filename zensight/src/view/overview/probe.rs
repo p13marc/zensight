@@ -244,10 +244,10 @@ fn stat<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zensight_common::{Protocol, TelemetryPoint};
+    use zensight_common::TelemetryPoint;
 
     fn dev(vantage: &str, metrics: &[(&str, f64)]) -> (DeviceId, DeviceState) {
-        let id = DeviceId::fixture(Protocol::Probe, vantage);
+        let id = DeviceId::fixture("probe", vantage);
         let mut state = DeviceState::new(id.clone());
         for (metric, v) in metrics {
             state.metrics.insert(

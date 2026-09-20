@@ -13,7 +13,7 @@ use crate::view::alerts::AlertFilterPreset;
 use crate::view::groups::GroupsState;
 use crate::view::icons::{self, IconSize};
 use crate::view::tokens::font;
-use zensight_common::{LinkProfile, Protocol};
+use zensight_common::LinkProfile;
 
 /// Persistent settings that are saved to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,9 +57,10 @@ pub struct PersistentSettings {
     /// Favorited metrics (#27), keyed `protocol/source/metric`.
     #[serde(default)]
     pub favorite_metrics: Vec<String>,
-    /// Selected overview protocol tab.
+    /// Selected overview tab, by producer name (a string since #1256; the
+    /// enum serialised to the same lowercase name, so a saved file reloads).
     #[serde(default)]
-    pub overview_selected_protocol: Option<Protocol>,
+    pub overview_selected_protocol: Option<String>,
     /// Whether the overview section is expanded.
     #[serde(default = "default_overview_expanded")]
     pub overview_expanded: bool,

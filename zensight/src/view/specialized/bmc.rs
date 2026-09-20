@@ -285,10 +285,10 @@ mod tests {
     use super::*;
     use crate::message::DeviceId;
     use iced_test::simulator;
-    use zensight_common::{Protocol, TelemetryPoint};
+    use zensight_common::TelemetryPoint;
 
     fn device(metrics: &[(&str, f64)]) -> DeviceDetailState {
-        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Bmc, "bmc01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("bmc", "bmc01"));
         for (metric, v) in metrics {
             state.metrics.insert(
                 (*metric).to_string(),

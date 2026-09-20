@@ -54,7 +54,7 @@ fn render_header(state: &DeviceDetailState) -> Element<'_, Message> {
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
-    let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
+    let protocol_icon = icons::for_producer(&state.device_id.producer, IconSize::Large);
     let device_name = text(&state.device_id.source).size(font::TITLE);
 
     let metric_count = text(format!("{} paths", state.metrics.len())).size(font::BODY);
@@ -302,7 +302,6 @@ fn section_style(t: &Theme) -> container::Style {
 mod tests {
     use super::*;
     use crate::message::DeviceId;
-    use zensight_common::Protocol;
 
     #[test]
     fn test_format_value() {
@@ -323,14 +322,14 @@ mod tests {
 
     #[test]
     fn test_gnmi_view_renders() {
-        let device_id = DeviceId::fixture(Protocol::Gnmi, "spine01");
+        let device_id = DeviceId::fixture("gnmi", "spine01");
         let state = DeviceDetailState::new(device_id);
         let _view = gnmi_streaming_view(&state);
     }
 
     #[test]
     fn test_gnmi_view_with_metrics() {
-        let device_id = DeviceId::fixture(Protocol::Gnmi, "spine01");
+        let device_id = DeviceId::fixture("gnmi", "spine01");
         let mut state = DeviceDetailState::new(device_id);
 
         // Add some test metrics

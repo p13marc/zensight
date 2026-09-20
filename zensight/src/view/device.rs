@@ -43,6 +43,9 @@ struct MetricTableRow {
     is_chartable: bool,
     /// Whether this metric is currently in the chart.
     is_in_chart: bool,
+    /// Whether the producer's slice declares this metric's subject (#1256).
+    /// `false` renders the "not declared" marker beside the name.
+    declared: bool,
     /// Whether this metric is favorited/pinned on this device (#27).
     is_favorite: bool,
     /// Trend indicator: "up", "down", "stable", or empty.
@@ -132,6 +135,16 @@ pub struct DeviceDetailState {
     pub origin: Option<String>,
     /// Whether the link is currently focused on *this* host (#476).
     pub focused: bool,
+    /// Subjects the producer's slice does not declare — the honesty finding
+    /// (#1256, gate 4), projected from the dashboard's device state.
+    pub undeclared: crate::intake::Undeclared,
+    /// `Some(false)` when the fleet holds no slice for this producer; `None`
+    /// before a sweep has answered (#1256).
+    pub slice_known: Option<bool>,
+    /// State documents held for this device, by subject (#1256).
+    pub documents: std::collections::BTreeMap<String, crate::intake::DocumentState>,
+    /// Events-class records for this device, oldest first (#1256).
+    pub events: VecDeque<crate::intake::EventState>,
 }
 
 impl DeviceDetailState {
@@ -169,6 +182,10 @@ impl DeviceDetailState {
             specialized_tab: Default::default(),
             origin: None,
             focused: false,
+            undeclared: Default::default(),
+            slice_known: None,
+            documents: std::collections::BTreeMap::new(),
+            events: VecDeque::new(),
         }
     }
 
@@ -575,7 +592,7 @@ impl DeviceDetailState {
             csv.push_str(&format!(
                 "{},{},{},{},{},{},{}\n",
                 point.timestamp,
-                self.device_id.protocol,
+                self.device_id.producer,
                 escape_csv(&point.source),
                 escape_csv(&point.metric),
                 escape_csv(&value_str),
@@ -614,7 +631,7 @@ impl DeviceDetailState {
                 csv.push_str(&format!(
                     "{},{},{},{},{},{}\n",
                     point.timestamp,
-                    self.device_id.protocol,
+                    self.device_id.producer,
                     escape_csv(&point.source),
                     escape_csv(&point.metric),
                     escape_csv(&value_str),
@@ -678,9 +695,11 @@ pub struct FacetTab {
     /// origin is unknown, so it has no handle and cannot be opened (#474). It
     /// still shows, greyed, so the host's full sensor set stays visible.
     pub id: Option<DeviceId>,
-    /// The member's `source` — the label shown when two facets share a protocol.
+    /// The member's `source` — the label shown when two facets share a producer.
     pub source: String,
-    pub protocol: Protocol,
+    /// The producer name (a string since #1256 — a facet of a sensor the GUI
+    /// was not compiled with is still a facet).
+    pub producer: String,
     pub status: DeviceStatus,
     /// Whether this facet is the one currently open.
     pub active: bool,
@@ -691,7 +710,7 @@ impl FacetTab {
     /// come off the handle, so they cannot drift from it.
     pub fn live(id: DeviceId, status: DeviceStatus, active: bool) -> Self {
         Self {
-            protocol: id.protocol,
+            producer: id.producer.clone(),
             source: id.source.clone(),
             id: Some(id),
             status,
@@ -722,7 +741,8 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
     tabs = tabs.push(text("Facets").size(font::BODY));
     // Same protocol on several facets (different sources correlated into one
     // host) → append the source so the tabs stay distinguishable.
-    let dup_protocols = crate::view::host::duplicated_protocols(facets.iter().map(|f| f.protocol));
+    let dup_protocols =
+        crate::view::host::duplicated_protocols(facets.iter().map(|f| f.producer.as_str()));
     for f in facets {
         // Copy out the data the widgets need so the strip owns it (Element<'static>)
         // and doesn't borrow `facets`.
@@ -737,12 +757,12 @@ fn facet_tab_strip(facets: &[FacetTab]) -> Option<Element<'static, Message>> {
             });
         let mut label = row![
             dot,
-            icons::protocol_icon::<Message>(f.protocol, IconSize::Small),
-            text(f.protocol.display_name()).size(font::BODY),
+            icons::for_producer::<Message>(&f.producer, IconSize::Small),
+            text(crate::message::producer_display_name(&f.producer)).size(font::BODY),
         ]
         .spacing(5)
         .align_y(Alignment::Center);
-        if dup_protocols.contains(&f.protocol) {
+        if dup_protocols.contains(f.producer.as_str()) {
             label = label.push(text(format!("· {}", f.source)).size(font::BODY).style(
                 |t: &Theme| text::Style {
                     color: Some(crate::view::theme::colors(t).text_muted()),
@@ -848,7 +868,7 @@ fn device_content<'a>(
     artifact: Option<crate::view::artifact_fetch::ArtifactCtx<'a>>,
     entity: Option<&HostEntity>,
 ) -> Element<'a, Message> {
-    if state.device_id.protocol == Protocol::Logs {
+    if state.device_id.is(Protocol::Logs) {
         return specialized::syslog_view(state, syslog_filter, host_logs);
     }
     if let Some(view) = specialized::specialized_view(state, artifact, entity) {
@@ -1079,7 +1099,7 @@ pub fn device_view_with_syslog_filter<'a>(
 
     // For syslog devices, use the specialized view with filter state + the
     // host's recent log stream (so drilling in shows history, not just latest).
-    if state.device_id.protocol == Protocol::Logs {
+    if state.device_id.is(Protocol::Logs) {
         return with_device_nav(
             state,
             specialized::syslog_view(state, syslog_filter, host_logs),
@@ -1118,10 +1138,209 @@ fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let metrics = render_metrics_list(state);
 
-    column![chart_section, metrics]
-        .spacing(10)
-        .padding(20)
+    let mut body = column![]
+        .spacing(crate::view::tokens::space::SM)
+        .padding(crate::view::tokens::space::LG);
+    if let Some(finding) = intake_findings(state) {
+        body = body.push(finding);
+    }
+    body = body.push(chart_section).push(metrics);
+    if !state.documents.is_empty() {
+        body = body.push(render_documents(state));
+    }
+    if !state.events.is_empty() {
+        body = body.push(render_events(state));
+    }
+    body.into()
+}
+
+/// The exact words the "not declared" marker uses — one widget, one string,
+/// so a test can find it and a reader can grep it.
+pub const UNDECLARED_MARKER: &str = "not declared";
+
+fn undeclared_marker<'a>() -> Element<'a, Message> {
+    text(UNDECLARED_MARKER)
+        .size(font::MICRO)
+        .style(|t: &Theme| text::Style {
+            color: Some(crate::view::theme::colors(t).warning()),
+        })
         .into()
+}
+
+/// The intake findings for a device (#1256, gate 4): the producer declares
+/// no slice at all, or declares a slice that does not cover what it
+/// publishes. Each names the party at fault. `None` when there is nothing
+/// to say — which is the normal case, and must render nothing.
+fn intake_findings(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let mut lines: Vec<Element<'_, Message>> = Vec::new();
+    if state.slice_known == Some(false) {
+        lines.push(
+            text(format!(
+                "{} publishes {} subject{} and declares no slice — nothing on the bus \
+                 answered introspect for it, so none of them can be judged",
+                state.device_id.producer,
+                state.metrics.len(),
+                if state.metrics.len() == 1 { "" } else { "s" },
+            ))
+            .size(font::CAPTION)
+            .into(),
+        );
+    }
+    if !state.undeclared.is_empty() {
+        let listed: Vec<&str> = state
+            .undeclared
+            .subjects
+            .iter()
+            .map(String::as_str)
+            .take(8)
+            .collect();
+        let more = state.undeclared.len().saturating_sub(listed.len());
+        let tail = if more > 0 {
+            format!(" and {more} more")
+        } else {
+            String::new()
+        };
+        // The marker is its own widget — a badge, dot plus the exact words —
+        // so it reads the same here as beside a row, and a test can find it.
+        lines.push(
+            row![
+                crate::view::components::badge(
+                    crate::view::theme::STATUS_UNKNOWN,
+                    UNDECLARED_MARKER
+                ),
+                text(format!(
+                    "{} subject{} published by {} and not declared by its slice: {}{tail}",
+                    state.undeclared.len(),
+                    if state.undeclared.len() == 1 { "" } else { "s" },
+                    state.device_id.producer,
+                    listed.join(", "),
+                ))
+                .size(font::CAPTION),
+            ]
+            .spacing(crate::view::tokens::space::SM)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+    if lines.is_empty() {
+        return None;
+    }
+    let column = lines
+        .into_iter()
+        .fold(column![].spacing(crate::view::tokens::space::XS), |c, l| {
+            c.push(l)
+        });
+    Some(
+        container(column)
+            .padding(crate::view::tokens::space::SM)
+            .width(Length::Fill)
+            .style(|t: &Theme| container::Style {
+                background: Some(iced::Background::Color(
+                    crate::view::theme::colors(t).background_weak(),
+                )),
+                border: iced::Border {
+                    color: crate::view::theme::colors(t).warning(),
+                    width: 1.0,
+                    radius: 4.0.into(),
+                },
+                ..Default::default()
+            })
+            .into(),
+    )
+}
+
+/// The state documents held for a device (#1256): one card per subject with
+/// what the intake knows — the declared type or "untyped", the schema
+/// verdict as the shared three-state badge, and whether the subject was
+/// declared at all — above the value, pretty-printed and clipped.
+fn render_documents(state: &DeviceDetailState) -> Element<'_, Message> {
+    use crate::intake::Declared;
+    use crate::view::components::badge;
+    const CLIP: usize = 2_000;
+
+    let mut col =
+        column![text("Documents").size(font::EMPHASIS)].spacing(crate::view::tokens::space::SM);
+    for doc in state.documents.values() {
+        let type_label: Element<'_, Message> = match &doc.type_name {
+            Some(ty) => text(ty.clone()).size(font::CAPTION).into(),
+            None => text("untyped")
+                .size(font::CAPTION)
+                .style(|t: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(t).text_muted()),
+                })
+                .into(),
+        };
+        let mut head = row![
+            text(doc.subject.clone()).size(font::BODY),
+            type_label,
+            crate::view::components::verdict::verdict_badge(&doc.verdict),
+        ]
+        .spacing(crate::view::tokens::space::SM)
+        .align_y(Alignment::Center);
+        match doc.declared {
+            Declared::Yes => {}
+            Declared::No => {
+                head = head.push(badge(crate::view::theme::STATUS_UNKNOWN, UNDECLARED_MARKER));
+            }
+            Declared::NoSlice => {
+                head = head.push(badge(crate::view::theme::STATUS_UNKNOWN, "no slice"));
+            }
+        }
+        let mut pretty = serde_json::to_string_pretty(&doc.value).unwrap_or_default();
+        if pretty.len() > CLIP {
+            let cut = pretty
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= CLIP)
+                .last()
+                .unwrap_or(0);
+            pretty.truncate(cut);
+            pretty.push_str("\n…");
+        }
+        let card = column![
+            head,
+            text(pretty).size(font::CAPTION).font(iced::Font::MONOSPACE),
+            text(format!("as of {}", format_timestamp(doc.received_ms)))
+                .size(font::MICRO)
+                .style(|t: &Theme| text::Style {
+                    color: Some(crate::view::theme::colors(t).text_muted()),
+                }),
+        ]
+        .spacing(crate::view::tokens::space::XS);
+        col = col.push(crate::view::components::card(card));
+    }
+    col.into()
+}
+
+/// The events-class records held for a device (#1256): caption rows,
+/// newest last, the value on one line.
+fn render_events(state: &DeviceDetailState) -> Element<'_, Message> {
+    const CLIP: usize = 200;
+    let mut col =
+        column![text("Events").size(font::EMPHASIS)].spacing(crate::view::tokens::space::XS);
+    for ev in &state.events {
+        let mut line = serde_json::to_string(&ev.value).unwrap_or_default();
+        if line.len() > CLIP {
+            let cut = line
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= CLIP)
+                .last()
+                .unwrap_or(0);
+            line.truncate(cut);
+            line.push('…');
+        }
+        col = col.push(
+            text(format!(
+                "{} · {} · {}",
+                format_timestamp(ev.received_ms),
+                ev.subject,
+                line
+            ))
+            .size(font::CAPTION),
+        );
+    }
+    col.into()
 }
 
 /// Render the shared nav header: Back / prev / next / protocol icon / name /
@@ -1154,7 +1373,7 @@ fn render_header<'a>(
         .padding([4, 10])
         .style(iced::widget::button::secondary);
 
-    let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
+    let protocol_icon = icons::for_producer(&state.device_id.producer, IconSize::Large);
     // On the host shell, prefer the entity's resolved name over the raw
     // per-sensor source id (#350).
     let display_name: &str = identity
@@ -1501,6 +1720,7 @@ fn build_metric_table_rows(state: &DeviceDetailState) -> Vec<MetricTableRow> {
                 timestamp: format_timestamp(point.timestamp),
                 is_chartable: state.is_metric_chartable(name),
                 is_in_chart: state.is_metric_in_chart(name),
+                declared: !state.undeclared.metrics.contains(name),
                 is_favorite: state.is_favorite(name),
                 trend,
                 is_stale,
@@ -1619,7 +1839,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
             let name = row.name.clone();
             let name_display = row.name;
             // Make the name clickable to select for chart
-            if row.is_chartable {
+            let label: Element<'_, Message> = if row.is_chartable {
                 button(text(name_display).size(font::CAPTION))
                     .on_press(Message::SelectMetricForChart(name))
                     .style(if row.is_in_chart {
@@ -1631,7 +1851,17 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                     .into()
             } else {
                 text(name_display).size(font::CAPTION).into()
+            };
+            if row.declared {
+                return label;
             }
+            // The honesty marker (#1256): a subject the producer's own slice
+            // does not declare is shown, and says so — never silently
+            // absent, never silently the same as a declared one.
+            row![label, undeclared_marker()]
+                .spacing(crate::view::tokens::space::SM)
+                .align_y(Alignment::Center)
+                .into()
         },
     )
     .width(Length::FillPortion(3));
@@ -1833,12 +2063,104 @@ fn value_type_name(value: &TelemetryValue) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zensight_common::Protocol;
+
+    /// The honesty finding (#1256, gate 4): a device with an undeclared
+    /// subject renders the marker; one without renders no such word.
+    #[test]
+    fn undeclared_marker_renders_only_when_there_is_something_undeclared() {
+        use iced_test::simulator;
+        let mut state = DeviceDetailState::new(DeviceId::fixture("fake-sensor", "rack7"));
+        state.update(make_test_point("rack7/temp/inlet/celsius"));
+        state.update(make_test_point("rack7/humidity/pct"));
+        state.slice_known = Some(true);
+        {
+            let mut ui = simulator(generic_device_view(&state));
+            assert!(
+                ui.find(UNDECLARED_MARKER).is_err(),
+                "nothing undeclared, no marker"
+            );
+        }
+
+        state
+            .undeclared
+            .insert("rack7/humidity/pct", "rack7/humidity/pct");
+        let mut ui = simulator(generic_device_view(&state));
+        assert!(ui.find(UNDECLARED_MARKER).is_ok(), "the finding renders");
+    }
+
+    /// No slice at all is a finding about the fleet, worded as such — and
+    /// only once a sweep has answered (`Some(false)`), never before.
+    #[test]
+    fn no_slice_banner_names_the_fleet_not_the_producer() {
+        use iced_test::simulator;
+        let mut state = DeviceDetailState::new(DeviceId::fixture("fake-sensor", "rack7"));
+        state.update(make_test_point("rack7/temp/inlet/celsius"));
+        {
+            let mut ui = simulator(generic_device_view(&state));
+            assert!(
+                ui.find("fake-sensor publishes 1 subject and declares no slice — nothing on the bus answered introspect for it, so none of them can be judged").is_err(),
+                "no sweep yet, no finding"
+            );
+        }
+        state.slice_known = Some(false);
+        let mut ui = simulator(generic_device_view(&state));
+        assert!(
+            ui.find("fake-sensor publishes 1 subject and declares no slice — nothing on the bus answered introspect for it, so none of them can be judged").is_ok()
+        );
+    }
+
+    /// A held document renders its subject, its type (or "untyped"), and
+    /// the shared three-state verdict badge — never a boolean.
+    #[test]
+    fn document_card_shows_type_and_verdict() {
+        use crate::intake::{Declared, DocumentState};
+        use iced_test::simulator;
+        use zensight_common::schema::{NotValidated, Verdict};
+        let mut state = DeviceDetailState::new(DeviceId::fixture("fake-sensor", "rack7"));
+        state.documents.insert(
+            "rack7/status".into(),
+            DocumentState {
+                subject: "rack7/status".into(),
+                type_name: Some("FakeUnitStatus".into()),
+                value: serde_json::json!({"mode": "run"}),
+                verdict: Verdict::NotValidated(NotValidated::NoSchema),
+                declared: Declared::Yes,
+                received_ms: 0,
+            },
+        );
+        state.documents.insert(
+            "rack7/mystery".into(),
+            DocumentState {
+                subject: "rack7/mystery".into(),
+                type_name: None,
+                value: serde_json::json!({}),
+                verdict: Verdict::NotValidated(NotValidated::NoSchema),
+                declared: Declared::No,
+                received_ms: 0,
+            },
+        );
+        let mut ui = simulator(generic_device_view(&state));
+        assert!(ui.find("Documents").is_ok());
+        assert!(ui.find("rack7/status").is_ok());
+        assert!(ui.find("FakeUnitStatus").is_ok());
+        assert!(ui.find("rack7/mystery").is_ok());
+        assert!(ui.find("untyped").is_ok());
+        assert!(
+            ui.find(UNDECLARED_MARKER).is_ok(),
+            "the undeclared document says so"
+        );
+        assert!(
+            ui.find(crate::view::components::verdict::verdict_label(
+                &Verdict::NotValidated(NotValidated::NoSchema)
+            ))
+            .is_ok(),
+            "the verdict badge carries the shared label"
+        );
+    }
 
     #[test]
     fn favorites_toggle_and_pin_to_top_of_sorted_metrics() {
-        let mut state =
-            DeviceDetailState::new(DeviceId::fixture(Protocol::Snmp, "test".to_string()));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("snmp", "test".to_string()));
         for m in ["zzz", "aaa", "mmm"] {
             state.update(make_test_point(m));
         }
@@ -1882,8 +2204,7 @@ mod tests {
 
     #[test]
     fn apply_chart_range_pins_window_and_returns_bounds() {
-        let mut state =
-            DeviceDetailState::new(DeviceId::fixture(Protocol::Snmp, "test".to_string()));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("snmp", "test".to_string()));
         // Valid from < to → pins the chart window and returns the bounds.
         state.chart_from_input = "2026-06-26 14:05".to_string();
         state.chart_to_input = "2026-06-26 14:12".to_string();
@@ -1922,7 +2243,7 @@ mod tests {
     /// series); text/binary and unknown metrics are not.
     #[test]
     fn booleans_and_numbers_are_chartable() {
-        let device_id = DeviceId::fixture(Protocol::Netlink, "h".to_string());
+        let device_id = DeviceId::fixture("netlink", "h".to_string());
         let mut state = DeviceDetailState::new(device_id);
         let mk = |metric: &str, value: TelemetryValue| {
             let mut p = make_test_point(metric);
@@ -1943,7 +2264,7 @@ mod tests {
 
     #[test]
     fn test_history_values_returns_trailing_numeric_series() {
-        let device_id = DeviceId::fixture(Protocol::Sysinfo, "h".to_string());
+        let device_id = DeviceId::fixture("sysinfo", "h".to_string());
         let mut state = DeviceDetailState::new(device_id);
         for (ts, v) in [(1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)] {
             let mut p = make_test_point("cpu/usage");
@@ -1959,7 +2280,7 @@ mod tests {
 
     #[test]
     fn test_history_export_is_time_series_not_snapshot() {
-        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
+        let device_id = DeviceId::fixture("snmp", "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         // Three samples of the same metric over time.
@@ -1985,7 +2306,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_empty_returns_all() {
-        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
+        let device_id = DeviceId::fixture("snmp", "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("cpu/usage"));
@@ -1999,7 +2320,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_substring_match() {
-        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
+        let device_id = DeviceId::fixture("snmp", "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("cpu/usage"));
@@ -2022,7 +2343,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_case_insensitive() {
-        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
+        let device_id = DeviceId::fixture("snmp", "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("CPU/Usage"));
@@ -2044,7 +2365,7 @@ mod tests {
 
     #[test]
     fn test_metric_filter_debounce() {
-        let device_id = DeviceId::fixture(Protocol::Snmp, "test".to_string());
+        let device_id = DeviceId::fixture("snmp", "test".to_string());
         let mut state = DeviceDetailState::new(device_id);
 
         state.update(make_test_point("cpu/usage"));
@@ -2076,7 +2397,7 @@ mod tests {
     }
 
     fn device() -> DeviceDetailState {
-        DeviceDetailState::new(DeviceId::fixture(Protocol::Snmp, "test".to_string()))
+        DeviceDetailState::new(DeviceId::fixture("snmp", "test".to_string()))
     }
 
     #[test]

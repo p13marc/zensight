@@ -121,7 +121,7 @@ fn render_header<'a>(
     .on_press(Message::ClearSelection)
     .style(iced::widget::button::secondary);
 
-    let protocol_icon = icons::protocol_icon(state.device_id.protocol, IconSize::Large);
+    let protocol_icon = icons::for_producer(&state.device_id.producer, IconSize::Large);
     let host_name = text(&state.device_id.source).size(font::TITLE);
 
     // What this host is, from the catalog's entity document (#1019).
@@ -1550,7 +1550,7 @@ fn latency_stat<'a>(label: &'a str, us: u64) -> Element<'a, Message> {
 mod tests {
     use super::*;
     use crate::message::DeviceId;
-    use zensight_common::{Protocol, TelemetryPoint};
+    use zensight_common::TelemetryPoint;
 
     #[test]
     fn test_format_bytes() {
@@ -1571,7 +1571,7 @@ mod tests {
     /// would have painted 60 °C green, fifteen degrees over the line.
     #[test]
     fn a_temperature_is_graded_against_hwmons_own_limits_not_a_fraction_of_crit() {
-        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
         for (metric, v) in [
             ("sensors/nvme/composite/temp", 72.0),
             ("sensors/nvme/composite/max", 70.0),
@@ -1593,7 +1593,7 @@ mod tests {
 
     #[test]
     fn test_sysinfo_view_renders() {
-        let device_id = DeviceId::fixture(Protocol::Sysinfo, "server01");
+        let device_id = DeviceId::fixture("sysinfo", "server01");
         let state = DeviceDetailState::new(device_id);
         // Just verify it doesn't panic
         let _view = sysinfo_host_view(&state, None);
@@ -1629,7 +1629,7 @@ mod tests {
 
     #[test]
     fn process_row_unit_chip_pivots_to_unit() {
-        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
         state.sysinfo_detail.processes = Fetch::Ready(vec![
             proc(42, 100, Some("/system.slice/redis.service")),
             proc(43, 100, Some("/sys/fs/cgroup")), // non-unit cgroup → plain "—"
@@ -1647,7 +1647,7 @@ mod tests {
 
     #[test]
     fn pid_filter_banner_guards_stale_generations() {
-        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
         state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 999, None)]);
         // The pivot expected start_time 100 but pid 42 now has 999 → reused.
         state.sysinfo_detail.pid_filter = Some(PidFilter {
@@ -1673,7 +1673,7 @@ mod tests {
 
     #[test]
     fn pid_filter_live_match_shows_only_that_process() {
-        let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
+        let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
         state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 100, None), proc(7, 5, None)]);
         state.sysinfo_detail.pid_filter = Some(PidFilter {
             pid: 42,

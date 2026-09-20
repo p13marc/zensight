@@ -419,6 +419,12 @@ in a log.
   generated `TYPE_NAMES` so a gap aborts rather than serving a partial table. A
   consumer goes wire key → subject → type → schema → value with nothing
   producer-specific compiled in (`zenkey-fleet`'s `SchemaStore`/`decode_sample`).
+  The GUI does that walk since #1256: a document from a producer it was not
+  compiled with is decoded structurally and judged at fold time against the
+  fleet's `introspect` slices and `describe` schema sets — the declared type,
+  the three-state verdict, and whether the subject is declared at all — and
+  what could not be judged says why (see `zensight/docs/views.md`,
+  "Producer-agnostic intake").
   Every producer put also stamps the sample `Encoding`
   (`application/cbor`/`application/json` from `Format::encoding()`), so
   consumers resolve payloads from metadata before falling back to sniffing.

@@ -47,12 +47,12 @@ pub struct Host<'a> {
 /// Identity priority for a host's primary facet (sysinfo > netlink > netring >
 /// logs/syslog > everything else). Mirrors topology's `primary_protocol` and
 /// extends it across all protocols. Lower sorts first.
-pub fn protocol_priority(p: Protocol) -> u8 {
-    match p {
-        Protocol::Sysinfo => 0,
-        Protocol::Netlink => 1,
-        Protocol::Netring => 2,
-        Protocol::Logs => 3,
+pub fn protocol_priority(producer: &str) -> u8 {
+    match producer.parse::<Protocol>() {
+        Ok(Protocol::Sysinfo) => 0,
+        Ok(Protocol::Netlink) => 1,
+        Ok(Protocol::Netring) => 2,
+        Ok(Protocol::Logs) => 3,
         _ => 4,
     }
 }
@@ -62,8 +62,8 @@ pub fn protocol_priority(p: Protocol) -> u8 {
 /// host as the host-run one). Callers use this to disambiguate same-protocol
 /// facet badges/tabs by appending the facet's `source`. Pure over any protocol
 /// iterator so both the dashboard cards and the facet tab strip share it.
-pub fn duplicated_protocols(protocols: impl Iterator<Item = Protocol>) -> HashSet<Protocol> {
-    let mut counts: HashMap<Protocol, usize> = HashMap::new();
+pub fn duplicated_protocols<'a>(protocols: impl Iterator<Item = &'a str>) -> HashSet<&'a str> {
+    let mut counts: HashMap<&'a str, usize> = HashMap::new();
     for p in protocols {
         *counts.entry(p).or_insert(0) += 1;
     }
@@ -135,9 +135,9 @@ pub fn aggregate<'a>(devices: &[&'a DeviceState], entities: &'a EntityStore) -> 
         .map(|(key, mut facets)| {
             // Primary-first: identity priority, then protocol for stability.
             facets.sort_by(|a, b| {
-                protocol_priority(a.id.protocol)
-                    .cmp(&protocol_priority(b.id.protocol))
-                    .then(a.id.protocol.cmp(&b.id.protocol))
+                protocol_priority(&a.id.producer)
+                    .cmp(&protocol_priority(&b.id.producer))
+                    .then(a.id.producer.cmp(&b.id.producer))
             });
             let (display_name, entity) = match &key {
                 HostKey::Entity(id) => {
@@ -193,7 +193,7 @@ mod tests {
     use zensight_common::MemberClaim;
 
     fn facet(proto: Protocol, source: &str, status: DeviceStatus) -> DeviceState {
-        let mut d = DeviceState::new(DeviceId::fixture(proto, source));
+        let mut d = DeviceState::new(DeviceId::fixture(proto.as_str(), source));
         d.update_from_liveness(status, 0, None);
         d.metric_count = 3;
         d
@@ -243,7 +243,7 @@ mod tests {
         assert_eq!(hosts.len(), 2);
         let h1 = hosts.iter().find(|h| h.display_name == "host1").unwrap();
         assert_eq!(h1.facets.len(), 2);
-        assert_eq!(h1.primary().id.protocol, Protocol::Sysinfo);
+        assert_eq!(h1.primary().id.producer, "sysinfo");
         assert_eq!(h1.metric_count(), 6);
         assert!(h1.entity.is_none());
         assert_eq!(h1.key, HostKey::Source("host1".into()));
@@ -287,19 +287,14 @@ mod tests {
 
     #[test]
     fn duplicated_protocols_flags_only_repeats() {
-        let protos = [
-            Protocol::Sysinfo,
-            Protocol::Sysinfo,
-            Protocol::Netlink,
-            Protocol::Sysinfo,
-        ];
+        let protos = ["sysinfo", "netlink", "sysinfo"];
         let dups = duplicated_protocols(protos.into_iter());
         assert_eq!(dups.len(), 1);
-        assert!(dups.contains(&Protocol::Sysinfo));
-        assert!(!dups.contains(&Protocol::Netlink));
+        assert!(dups.contains("sysinfo"));
+        assert!(!dups.contains("netlink"));
 
         // No repeats (or nothing at all) → empty set.
-        assert!(duplicated_protocols([Protocol::Snmp, Protocol::Logs].into_iter()).is_empty());
+        assert!(duplicated_protocols(["snmp", "logs"].into_iter()).is_empty());
         assert!(duplicated_protocols(std::iter::empty()).is_empty());
     }
 

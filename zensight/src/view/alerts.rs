@@ -1283,13 +1283,13 @@ fn render_incident<'a>(
     // honest answer rather than a guess. `alerts` is severity-sorted, so the
     // metric is the worst one's.
     if let Some(first) = incident.alerts.first() {
-        let protocol = first.protocol;
+        let producer = first.protocol.to_string();
         let source = incident.source.to_string();
         let metric = first.labels.get("metric").cloned();
         header = header.push(
             button(text("View").size(font::CAPTION))
                 .on_press(Message::InvestigateAlert {
-                    protocol,
+                    producer,
                     source,
                     metric,
                 })
