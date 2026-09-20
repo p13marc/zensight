@@ -335,8 +335,9 @@ because entity docs publish once (on evidence arrival), not on a cadence.
 
 An exact-value assertion on fixture content is a reviewable violation of this
 section. Synthetic traffic / fault injection (`zenkey_fleet::Synth`) is
-deliberately deferred: it sits behind the fleet `decode` feature, which the
-GUI build keeps off.
+available — the GUI turns the fleet `decode` feature on since #1256, for the
+`describe` sweep behind the schema-aware intake — and unused: nothing in the
+suite has needed generated traffic yet.
 
 ## Best practices
 
@@ -348,11 +349,12 @@ is the deliberate exception: `system_view_tests` in `src/app.rs`, keyed to
 producer this build was not compiled with, from nothing but what the bus says
 about it (its `introspect` slice, `describe` schemas, `views` definition). No
 view-function test can state that, because its state type would have to be
-built from the missing fact (`DeviceId::fixture(Protocol::…)`), proving
-nothing. Keep exactly one such test per architectural invariant.
+built from the missing fact (a `DeviceId` was the closed enum until #1256),
+proving nothing. Keep exactly one such test per architectural invariant.
 
 It is **red by design**, and it runs on every CI run as a ratchet rather than
-an `#[ignore]` nobody runs: `#[should_panic(expected = "GATE 1/intake")]`,
+an `#[ignore]` nobody runs: `#[should_panic(expected = "GATE 2/model")]`
+(gate 1 passed with #1255 and #1256),
 where the body is the real requirement in six gates (intake, model, view,
 honesty, definition + scripts, subscription), each assertion prefixed with its
 gate label, and each seam that does not exist yet an honest
@@ -361,9 +363,11 @@ epic's status: a phase that lands moves the panic one gate on, the substring
 stops matching, the build goes red, and the implementer advances the string.
 When the last gate passes, `should_panic` reports "did not panic" and the
 attribute is deleted. Drift in either direction fails the build. A green
-companion in the same module pins each of today's gates individually, since the
-ratchet cannot see past the first. This is the `zensight` crate's first
-`should_panic`; the idiom is the workspace's (24 sites elsewhere).
+companion in the same module pins what the ratchet cannot see past the
+current gate — gate 1's intake positively, and gate 4's honesty finding,
+which the ratchet only reaches once gate 3 passes. This is the `zensight`
+crate's first `should_panic`; the idiom is the workspace's (24 sites
+elsewhere).
 
 ### 1. Test view functions independently
 

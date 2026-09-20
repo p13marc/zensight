@@ -39,7 +39,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files carry over with no `SCHEMA_VERSION` bump. The GUI's per-device JSON
   export loses its `protocol` member; the CSV column keeps it, from the device.
 
+- **The GUI's device is named by its producer, not the closed `Protocol`
+  enum** (#1256, gate 1 and gate 4 of #1253). `DeviceId.protocol: Protocol`
+  is `producer: String`; `DeviceId::new`/`fixture` take a name;
+  `Reading::device_id()` is infallible; `entity::MemberKey` is
+  `(String, String)`, so a correlator member of a sensor this build never
+  heard of finds its host instead of being dropped; `Message::SelectDeviceNamed`,
+  `InvestigateAlert`, `ToggleProducerFilter` and `SelectOverviewProducer`
+  carry names. The bespoke surfaces — specialized views, tab prefetch, icons
+  — ask `DeviceId::protocol()` and fall back to the generic rendering; the
+  four exhaustive `match`es over `Protocol` in the views are gone, so a new
+  variant (#1202's service-tier producers next) compiles fleet-wide. The
+  dashboard's filter row and the overview tab strip list producers by name,
+  alphabetically after `TAB_ORDER`, including one outside the enum. The
+  persisted `overview_selected_protocol` is a string (the enum serialised to
+  the same lowercase name, so a saved settings file reloads).
+
 ### Added
+
+- **Producer-agnostic intake: a document the GUI has no type for is held and
+  judged, not dropped** (#1256). `decode_sample` tries the compiled registry
+  first; a state document from an unregistered producer — or a registered
+  producer's subject the GUI mapped to nothing, which used to vanish silently
+  — decodes structurally into `Message::Document`, an events record into
+  `Message::Event`; an unregistered producer's `health`/`sensor` documents
+  are typed by the framework vocabulary alone. The fold judges every document
+  against the **runtime registry** — the fleet sweep's `introspect` slices
+  (`zenkey_fleet::SliceSet`) and each producer's `describe` reply
+  (`Message::SchemasLoaded`, fetched after every sweep for the producers not
+  yet described; the GUI turns `zenkey-fleet`'s `decode` feature on for it) —
+  and says three things per document: the declared type, the three-state
+  schema verdict, and whether the subject is declared. Judged at fold time, so
+  a document that arrives before its slice (the normal case) is re-judged
+  when the slice lands. The generic device view renders the honesty findings
+  (#1254 gate 4): a **not declared** marker and banner for the telemetry
+  subjects the producer's own slice does not declare, a banner when it
+  declares no slice at all (a finding about the fleet, only once a sweep has
+  answered), a Documents section with type and verdict per card, and an
+  Events section. Bounded: 256 undeclared subjects per device, 512 documents
+  per `(origin, producer)`, a 256-record event ring. The system-view ratchet
+  advances to `GATE 2/model`; its companion pins intake and honesty
+  positively. Known: an unregistered producer's *alert* is held as a
+  document, since `Alert.protocol` is still the enum — #1202's four
+  service-tier variants cover the in-tree daemons.
 
 - **`@rpc/netflow/flows/page` — a truncated flow read can say it was
   truncated** (#1156). `flows` replies a bare `Vec<FlowRecord>` from a ring of
