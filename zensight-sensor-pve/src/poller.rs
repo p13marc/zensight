@@ -620,7 +620,9 @@ impl Poller {
         for n in &sweep.nodes {
             // Operator-chosen, so it is slugged before it reaches a key — the
             // same foreign-value boundary #843 established for units.
-            let chunk = zenkey::Chunk::slug(&n.name).as_str().to_string();
+            let chunk = zensight_sensor_core::key::device_chunk(&n.name)
+                .as_str()
+                .to_string();
             let labels = [("node".to_string(), n.name.clone())]
                 .into_iter()
                 .collect::<std::collections::HashMap<_, _>>();
@@ -659,7 +661,9 @@ impl Poller {
 
         // ── Scheduled backup jobs (#1141) ───────────────────────────────────
         for j in &sweep.schedules {
-            let chunk = zenkey::Chunk::slug(&j.id).as_str().to_string();
+            let chunk = zensight_sensor_core::key::device_chunk(&j.id)
+                .as_str()
+                .to_string();
             if let Some(key) = state_key(&["backup", "job", &chunk, "schedule"])
                 && let Err(e) = self.states.publish_serializable(&key, j).await
             {
@@ -722,9 +726,9 @@ impl Poller {
             // `storage/pve1-local-lvm` to `storage/local-lvm` and the old
             // state document became an LWW ghost nothing would ever overwrite.
             let slug = if p.shared {
-                zenkey::Chunk::slug(&p.storage)
+                zensight_sensor_core::key::device_chunk(&p.storage)
             } else {
-                zenkey::Chunk::slug(format!("{}-{}", p.node, p.storage))
+                zensight_sensor_core::key::device_chunk(format!("{}-{}", p.node, p.storage))
             };
             let stem = format!("storage/{slug}");
             for (suffix, value) in [
@@ -816,7 +820,7 @@ impl Poller {
         }
 
         for j in &sweep.backup_jobs {
-            let slug = zenkey::Chunk::slug(&j.node);
+            let slug = zensight_sensor_core::key::device_chunk(&j.node);
             if let Some(t) = &j.last_task {
                 for (suffix, value) in [
                     ("ok", if t.ok { 1.0 } else { 0.0 }),

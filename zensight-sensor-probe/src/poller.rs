@@ -334,7 +334,7 @@ impl Poller {
         for r in results {
             // The operator's name is a foreign value and is slugged before it
             // can reach a key — the #843 boundary.
-            let slug = zenkey::Chunk::slug(&r.name).to_string();
+            let slug = zensight_sensor_core::key::device_chunk(&r.name).to_string();
             let mut labels = HashMap::new();
             labels.insert("target".to_string(), r.target.clone());
             labels.insert("kind".to_string(), r.kind.to_string());

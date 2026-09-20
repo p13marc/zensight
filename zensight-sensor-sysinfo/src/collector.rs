@@ -185,7 +185,7 @@ impl SystemCollector {
             }
             // Operator-facing and kernel-supplied, so slugged before it can
             // reach a key — the #843 boundary.
-            let slug = zenkey::Chunk::slug(&info.card).to_string();
+            let slug = zensight_sensor_core::key::device_chunk(&info.card).to_string();
             if let Ok(key) =
                 zensight_sensor_core::v1::for_producer("sysinfo").state_key(&["gpu", &slug])
             {

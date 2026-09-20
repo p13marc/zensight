@@ -62,10 +62,8 @@
 /// it drops out moves every series of the survivor, and its old state document
 /// becomes an LWW ghost nothing ever overwrites.
 ///
-/// (When #1153's `device_chunk()` lands in `sensor-core`, this is the caller
-/// it should replace.)
 pub fn chassis_chunk(endpoint: &str, chassis_id: &str) -> String {
-    zenkey::Chunk::slug(format!("{endpoint}-{chassis_id}"))
+    zensight_sensor_core::key::device_chunk(format!("{endpoint}-{chassis_id}"))
         .as_str()
         .to_string()
 }
@@ -75,7 +73,9 @@ pub fn chassis_chunk(endpoint: &str, chassis_id: &str) -> String {
 /// not answer produced no chassis list, so there is nothing else to name it
 /// with.
 pub fn endpoint_chunk(endpoint: &str) -> String {
-    zenkey::Chunk::slug(endpoint).as_str().to_string()
+    zensight_sensor_core::key::device_chunk(endpoint)
+        .as_str()
+        .to_string()
 }
 
 pub mod alerts;

@@ -242,7 +242,7 @@ impl Poller {
         for c in containers {
             // Operator-facing and foreign, so it is slugged before it can
             // reach a key — the #843 boundary.
-            let slug = zenkey::Chunk::slug(&c.name).to_string();
+            let slug = zensight_sensor_core::key::device_chunk(&c.name).to_string();
             let mut labels = HashMap::new();
             labels.insert("container".to_string(), c.name.clone());
             labels.insert("image".to_string(), c.image.reference.clone());
@@ -485,7 +485,7 @@ fn relation(host_id: &str, c: &ContainerInfo, now_ms: i64) -> RelationshipEviden
         kind: RelationKind::Runs,
         from: EndpointClaim::host(host_id),
         to: EndpointClaim {
-            device: Some(zenkey::Chunk::slug(&c.name).to_string()),
+            device: Some(zensight_sensor_core::key::device_chunk(&c.name).to_string()),
             ips: c.ips.clone(),
             name: Some(c.name.clone()),
             ..Default::default()
