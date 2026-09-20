@@ -1847,6 +1847,7 @@ async fn polled_device_publishes_identity_evidence() {
                 zensight_sensor_core::v1::for_producer("snmp").telemetry_prefix(),
                 zensight_common::Format::Json,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+                Default::default(),
             )
             .with_qos(zensight_common::QosClass::Evidence),
         ),

@@ -552,6 +552,7 @@ pub async fn rig(device: DeviceConfig) -> TestRig {
             zensight_sensor_core::v1::for_producer("snmp").telemetry_prefix(),
             Format::Json,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            Default::default(),
         )
         .with_qos(zensight_common::QosClass::HealthLiveness),
     ));

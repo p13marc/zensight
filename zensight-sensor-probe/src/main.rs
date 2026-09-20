@@ -82,8 +82,8 @@ async fn main() -> Result<()> {
             zensight_sensor_core::v1::for_producer("probe").telemetry_prefix(),
             format,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            runner.publisher().counters(),
         )
-        .with_counters(runner.publisher().counters())
         .with_qos(zensight_sensor_probe::poller::STATE_QOS),
     );
 
@@ -213,7 +213,12 @@ async fn main() -> Result<()> {
         states,
         pc.alerts.enabled.then(|| reporter.clone()),
         runner.health(),
-        zensight_sensor_core::relation::RelationSet::new("probe", runner.session().clone(), format),
+        zensight_sensor_core::relation::RelationSet::new(
+            "probe",
+            runner.session().clone(),
+            format,
+            runner.publisher().counters(),
+        ),
     )?;
     runner.spawn(poller.run());
 

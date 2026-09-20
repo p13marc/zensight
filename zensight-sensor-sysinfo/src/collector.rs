@@ -117,19 +117,15 @@ impl SystemCollector {
     }
 
     /// Install the operator's threshold evaluator on this collector's own
-    /// publisher registry (#931).
+    /// publisher registry (#931) — handed to `threshold::adopt` (#1155).
     ///
     /// sysinfo builds its registry here rather than taking the runner's, and
     /// publishes through `PublisherRegistry::put_point` — so an observer set
     /// only on `runner.publisher()` would have watched a path this sensor's
     /// 138 metric families never take. It would have looked installed and
     /// evaluated nothing.
-    pub fn with_thresholds(
-        self,
-        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
-    ) -> Self {
-        self.registry.set_observer(observer);
-        self
+    pub fn registry(&self) -> &zensight_common::PublisherRegistry {
+        &self.registry
     }
 
     /// Attach a threshold-alert evaluator driving the shared `AlertReporter`.

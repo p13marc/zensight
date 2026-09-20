@@ -337,7 +337,9 @@ undroppable becomes droppable and nothing says so.
 
 The registry now records the declared class beside the publisher and reports a
 mismatch: a `warn!` naming the key and both classes, in release as well as
-debug, plus a `debug_assert!` so a test hits it hard. The publisher is still
+debug, plus a `debug_assert!` so a test hits it hard. The advanced tier
+(`zensight_sensor_core::AdvancedPublisherRegistry`) records and reports the
+same way since the `Publish` trait unified the two (#1155). The publisher is still
 reused — tearing one down mid-flight would lose what is in flight and could not
 un-send what has already gone — so **the rule is a caller's obligation**: pick
 one class per key and keep it.

@@ -132,10 +132,10 @@ async fn main() -> Result<()> {
         tracing::info!("Sysinfo threshold alerting enabled");
     }
 
-    // The operator's threshold rules (#931), installed on the collector's own
-    // registry — not the runner's publisher, which sysinfo's telemetry never
-    // touches.
-    let evaluator = zensight_sensor_core::threshold::adopt(
+    // The operator's threshold rules (#931), installed through `adopt` on the
+    // collector's own registry (#1155) — not the runner's publisher alone,
+    // which sysinfo's telemetry never touches.
+    let _thresholds = zensight_sensor_core::threshold::adopt(
         &mut runner,
         Protocol::Sysinfo,
         reporter,
@@ -145,11 +145,10 @@ async fn main() -> Result<()> {
                 zensight_common::PROFILE.host_id(),
             ))
         },
-        &[],
+        &[collector.registry()],
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    collector = collector.with_thresholds(evaluator);
     runner.spawn(async move {
         collector.run().await;
     });

@@ -18,7 +18,7 @@ and — more usefully — what is still not covered.
 
 | Check | Direction | When | Covers |
 |---|---|---|---|
-| [`metric_guard`](../src/metric_guard.rs) | published ⊆ registered, and every published key parses as v1 (#1153) | run time, every put | subjects, chunks |
+| [`metric_guard`](../src/metric_guard.rs) | published ⊆ registered, and every published key parses as v1 (#1153) | run time, every put and delete, both tiers (#1155) | subjects, chunks |
 | `tests/registry_conformance.rs` (per sensor) | published ⊆ registered | CI | subjects |
 | [`served`](../src/served.rs) | registered ⊆ served | run time, before `alive` | **procedures** |
 | [`registry_audit`](../src/registry_audit.rs) | registered ⊆ emittable | CI | **subjects** |

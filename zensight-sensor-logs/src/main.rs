@@ -253,9 +253,9 @@ async fn main() -> Result<()> {
     };
     // The operator's threshold rules over this producer's own telemetry (#931):
     // ingest ratios, derived per-unit rates, template counts, store gauges.
-    // Installed on the plain registry those four paths publish through — the
-    // runner's `Publisher` sees none of them.
-    let threshold_evaluator = zensight_sensor_core::threshold::adopt(
+    // Installed through `adopt` on the plain registry those four paths publish
+    // through (#1155) — the runner's `Publisher` sees none of them.
+    let _thresholds = zensight_sensor_core::threshold::adopt(
         &mut runner,
         Protocol::Logs,
         alert_reporter.clone(),
@@ -265,11 +265,10 @@ async fn main() -> Result<()> {
                 zensight_common::PROFILE.host_id(),
             ))
         },
-        &[],
+        &[&*registry],
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    registry.set_observer(threshold_evaluator);
 
     if syslog_config.error_budget.enabled && !syslog_config.derived {
         tracing::warn!(
@@ -723,8 +722,8 @@ async fn main() -> Result<()> {
                 zensight_sensor_core::v1::for_producer("logs").telemetry_prefix(),
                 format,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+                runner.publisher().counters(),
             )
-            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         );
         let refresh = std::time::Duration::from_secs(syslog_config.evidence.refresh_secs.max(1));

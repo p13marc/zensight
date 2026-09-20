@@ -140,3 +140,18 @@ async fn puts_are_counted_into_the_shared_counters() {
     assert_eq!(counters.dropped_total(), 3);
     assert_eq!(counters.evicted_total(), 1);
 }
+
+/// A tombstone runs the registry guard like a put (#1155): an unregistered
+/// telemetry key is refused whether a value or a delete rides it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[should_panic(expected = "unregistered telemetry subject")]
+async fn deleting_an_unregistered_telemetry_key_is_caught() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let registry = PublisherRegistry::new(session);
+    let _ = registry
+        .delete(
+            "v1/h-0123456789ab/telemetry/sysinfo/not/a/real/metric",
+            QosClass::Telemetry,
+        )
+        .await;
+}

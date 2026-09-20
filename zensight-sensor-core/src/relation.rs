@@ -93,7 +93,15 @@ pub struct SyncOutcome {
 }
 
 impl RelationSet {
-    pub fn new(producer: &'static str, session: Arc<Session>, format: Format) -> Self {
+    /// `counters` is the sensor's shared set (`runner.publisher().counters()`):
+    /// this registry used to mint its own, so every relation claim in the
+    /// tree went uncounted (#1155).
+    pub fn new(
+        producer: &'static str,
+        session: Arc<Session>,
+        format: Format,
+        counters: Arc<zensight_common::PublishCounters>,
+    ) -> Self {
         RelationSet {
             producer,
             registry: AdvancedPublisherRegistry::new(
@@ -104,6 +112,7 @@ impl RelationSet {
                 // not its history. The history of a relationship is the
                 // catalog's edge document, not this feed.
                 crate::AdvancedPublisherConfig::cache_only(1),
+                counters,
             )
             .with_qos(zensight_common::QosClass::Evidence),
             published: BTreeMap::new(),

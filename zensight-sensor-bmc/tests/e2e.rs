@@ -948,6 +948,7 @@ async fn every_chassis_of_an_enclosure_gets_its_own_keys_and_its_own_verdict() {
             zensight_sensor_core::v1::for_producer("bmc").telemetry_prefix(),
             format,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            Default::default(),
         )
         .with_qos(zensight_sensor_bmc::poller::STATE_QOS),
     );

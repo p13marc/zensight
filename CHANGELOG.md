@@ -59,6 +59,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   literal segments and chunks, and its typed spelling is the generated
   registry builders, whose adoption is a different change.
 
+- **One `Publish` contract over both publisher tiers** (#1155, the trait;
+  part of #1059). `zensight_common::PublisherRegistry` and
+  `zensight_sensor_core::AdvancedPublisherRegistry` had grown apart on things a
+  caller cannot see. Both now implement `Publish`: the registry guard on every
+  put **and every delete**; deliveries counted after the put into a counter
+  set the caller supplies; one class per key, reported on mismatch on both
+  tiers; one observer seam. `AdvancedPublisherRegistry::new` takes the
+  counters (`with_counters` is gone), `RelationSet::new` takes them too, and
+  `threshold::install`/`adopt`'s `extra` takes any `&dyn Publish` — so
+  netflow, logs, sysinfo and netlink hand their registry to `adopt` instead of
+  installing the evaluator a second time by hand. One `PublishStats`, not two.
+
 ### Fixed
 
 - **A graded alert outside the poller's rule table was published and never
@@ -80,6 +92,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `v1/**` pattern subscriber could ever match it, and nothing said so. An
   illegal or empty *chunk* inside a registered subject was already refused
   (#559); this closes the case below it.
+
+- **Three advanced-tier paths skipped the registry guard, one registry counted
+  into nothing, and a class mismatch was silent on that tier** (#1155). The
+  guard ran only in `build_key`, so `publish_to_key`, `publish_serializable`
+  and `tombstone` — the paths every evidence, relation and state-document feed
+  uses — published unchecked, and the baseline `delete` did the same.
+  `AdvancedPublisherRegistry` minted a fresh counter set unless told otherwise,
+  and `RelationSet` never told it: every relation claim in the tree was
+  uncounted in `published_total`. And a key declared as `Telemetry` and later
+  tombstoned or put as `Alert` rode the first class with no warning — the
+  #1155 rule existed on one tier only. All three are closed by construction.
 
 ## [0.14.0] - 2026-09-20
 

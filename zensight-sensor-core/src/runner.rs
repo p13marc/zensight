@@ -685,9 +685,9 @@ impl<C: SensorConfig> SensorRunner<C> {
                 self.config.producer().to_string(),
                 Format::Json,
                 crate::advanced_publisher::AdvancedPublisherConfig::cache_only(1),
+                self.publisher.counters(),
             )
-            .with_qos(zensight_common::QosClass::Evidence)
-            .with_counters(self.publisher.counters());
+            .with_qos(zensight_common::QosClass::Evidence);
             let name = self.name.clone();
             let version = self.version.clone();
             let producer_name = self.config.producer().to_string();

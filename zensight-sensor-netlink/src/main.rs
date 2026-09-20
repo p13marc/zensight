@@ -126,14 +126,23 @@ async fn main() -> Result<()> {
     };
     let reporter = Arc::new(reporter);
 
+    let collector = Collector::new(
+        source.clone(),
+        netlink_config.clone(),
+        session,
+        format,
+        runner.publisher().counters(),
+    )
+    .with_health(runner.health());
     // The operator's threshold rules over this sensor's own telemetry (#931).
-    // Installed on the collector's registry, which `Collector::new` builds —
-    // the runner's publisher carries none of netlink's 106 metric families.
+    // Installed through `adopt` on the collector's registry (#1155), which
+    // `Collector::new` builds — the runner's publisher carries none of
+    // netlink's 106 metric families.
     //
     // Distinct from the sentinel's `MetricExpectation` below, which is a
     // statement about the host that this sensor goes and checks; a threshold
     // is a number an operator picked about a metric it publishes.
-    let thresholds = zensight_sensor_core::threshold::adopt(
+    let _thresholds = zensight_sensor_core::threshold::adopt(
         &mut runner,
         Protocol::Netlink,
         reporter.clone(),
@@ -143,20 +152,11 @@ async fn main() -> Result<()> {
                 zensight_common::PROFILE.host_id(),
             ))
         },
-        &[],
+        &[collector.registry()],
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
-    let collector = Collector::new(
-        source.clone(),
-        netlink_config.clone(),
-        session,
-        format,
-        runner.publisher().counters(),
-    )
-    .with_health(runner.health())
-    .with_thresholds(thresholds);
     #[cfg(feature = "ebpf")]
     let collector = collector.with_ebpf(ebpf_state.clone());
     // wg-quick peer labels (#268): parse configured wg-quick files once at start.

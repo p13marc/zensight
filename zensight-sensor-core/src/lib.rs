@@ -49,6 +49,7 @@ mod identity;
 pub mod key;
 mod liveliness;
 pub mod procutil;
+pub mod publish;
 mod publisher;
 pub mod rate;
 pub mod relation;
@@ -82,6 +83,7 @@ pub use health::{
 };
 pub use identity::{HostIdentity, SharedIdentity};
 pub use liveliness::LivelinessManager;
+pub use publish::Publish;
 pub use publisher::{Publisher, RawMediaPublisher};
 pub use report::{DebugBundleSource, REDACTED_MARKER, SimpleBundleSource, is_secret_key, redact};
 pub use runner::SensorRunner;

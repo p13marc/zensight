@@ -109,8 +109,10 @@ pub struct AdvancedPublisherRegistry {
     /// (default [`QosClass::Telemetry`]; override with [`Self::with_qos`] for
     /// must-arrive feeds like evidence).
     qos: QosClass,
-    /// Cached publishers by key expression.
-    publishers: RwLock<HashMap<String, AdvancedPublisher<'static>>>,
+    /// Cached publishers by key expression, each beside the class it was
+    /// **declared** with — so a put under another class is reported (#1155),
+    /// on this tier as on the baseline one.
+    publishers: RwLock<HashMap<String, (AdvancedPublisher<'static>, QosClass)>>,
     /// Watches every point published here (#930).
     ///
     /// This registry is a **second** publish path, independent of
@@ -119,11 +121,12 @@ pub struct AdvancedPublisherRegistry {
     /// installed only on the other one would have missed most of the fleet's
     /// points while looking like it saw them all.
     observer: std::sync::OnceLock<Arc<dyn zensight_common::point_observer::PointObserver>>,
-    /// Publish counters (#1079). Fresh by default; a sensor shares its
-    /// baseline publisher's set through [`Self::with_counters`] so the health
-    /// doc's `published_total` counts this tier too — for netlink, netring,
-    /// snmp and logs this is where the bulk of the telemetry goes, and an
-    /// uncounted bulk path made `published_total` orders of magnitude low.
+    /// Publish counters (#1079). **Supplied at construction, never fresh by
+    /// default** (#1155): a sensor passes its baseline publisher's set so the
+    /// health doc's `published_total` counts this tier too — for netlink,
+    /// netring, snmp and logs this is where the bulk of the telemetry goes,
+    /// and one forgotten `with_counters` made `published_total` orders of
+    /// magnitude low. `RelationSet` had exactly that omission.
     counters: Arc<zensight_common::PublishCounters>,
 }
 
@@ -139,11 +142,18 @@ impl std::fmt::Debug for AdvancedPublisherRegistry {
 
 impl AdvancedPublisherRegistry {
     /// Create a new advanced publisher registry.
+    ///
+    /// `counters` is normally the baseline
+    /// [`Publisher::counters`](crate::Publisher::counters) of the same sensor,
+    /// so every tier's deliveries land in the one number the health doc
+    /// publishes (#1079). It is an argument rather than a builder step so a
+    /// registry cannot be built counting into nothing (#1155).
     pub fn new(
         session: Arc<Session>,
         telemetry_prefix: impl Into<String>,
         format: Format,
         config: AdvancedPublisherConfig,
+        counters: Arc<zensight_common::PublishCounters>,
     ) -> Self {
         Self {
             session,
@@ -153,17 +163,8 @@ impl AdvancedPublisherRegistry {
             qos: QosClass::Telemetry,
             publishers: RwLock::new(HashMap::new()),
             observer: std::sync::OnceLock::new(),
-            counters: Arc::default(),
+            counters,
         }
-    }
-
-    /// Share a publish counter set — normally the baseline
-    /// [`Publisher::counters`](crate::Publisher::counters) of the same sensor,
-    /// so every tier's deliveries land in the one number the health doc
-    /// publishes (#1079).
-    pub fn with_counters(mut self, counters: Arc<zensight_common::PublishCounters>) -> Self {
-        self.counters = counters;
-        self
     }
 
     /// This registry's publish counters.
@@ -191,16 +192,16 @@ impl AdvancedPublisherRegistry {
 
     /// Build a full key expression from a suffix.
     ///
-    /// The advanced tier declares its own publishers rather than going through
-    /// [`zensight_common::PublisherRegistry`], so the registry-conformance
-    /// guard (RFC 08 §5) has to be applied here too.
+    /// The registry-conformance guard (RFC 08 §5) runs on the put, not here
+    /// (#1155): this tier declares its own publishers rather than going
+    /// through [`zensight_common::PublisherRegistry`], and guarding only the
+    /// keys *it* built left `publish_to_key`, `publish_serializable` and
+    /// `tombstone` unchecked.
     fn build_key(&self, suffix: &str) -> String {
         if suffix.is_empty() {
             self.telemetry_prefix.clone()
         } else {
-            let key = format!("{}/{}", self.telemetry_prefix, suffix);
-            zensight_common::metric_guard::check_telemetry_key(&key);
-            key
+            format!("{}/{}", self.telemetry_prefix, suffix)
         }
     }
 
@@ -244,7 +245,7 @@ impl AdvancedPublisherRegistry {
                 message: format!("Failed to create advanced publisher: {}", e),
             })?;
 
-        publishers.insert(key.to_string(), publisher);
+        publishers.insert(key.to_string(), (publisher, self.qos));
 
         tracing::debug!(key = %key, cache_size = %self.config.cache_size, "Created advanced publisher");
 
@@ -267,12 +268,19 @@ impl AdvancedPublisherRegistry {
     /// Publish a telemetry point to a full key (bypassing the prefix), via an
     /// advanced publisher created on first use for that key.
     pub async fn publish_to_key(&self, key: &str, point: &TelemetryPoint) -> Result<()> {
+        self.observe(key, point);
+        let payload =
+            encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
+        self.put_raw_as(key, payload, self.qos, self.format.encoding())
+            .await
+    }
+
+    /// The threshold seam (#930): every point this tier publishes passes the
+    /// installed observer while it is still a `TelemetryPoint`.
+    pub(crate) fn observe(&self, key: &str, point: &TelemetryPoint) {
         if let Some(observer) = self.observer.get() {
             observer.observe_point(key, point);
         }
-        let payload =
-            encode(point, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
-        self.put_raw(key, payload).await
     }
 
     /// Tombstone a full key through its cached advanced publisher.
@@ -283,9 +291,17 @@ impl AdvancedPublisherRegistry {
     /// retired. Retiring through the same publisher that wrote it is what
     /// makes the tombstone as durable as the value it retires.
     pub async fn tombstone(&self, key: &str) -> Result<()> {
+        self.tombstone_as(key, self.qos).await
+    }
+
+    /// [`Self::tombstone`] under an explicit class — reported, not applied,
+    /// when the key was declared under another (#1155). Guarded like a put.
+    pub(crate) async fn tombstone_as(&self, key: &str, asked: QosClass) -> Result<()> {
+        zensight_common::metric_guard::check_telemetry_key(key);
         {
             let publishers = self.publishers.read().await;
-            if let Some(publisher) = publishers.get(key) {
+            if let Some((publisher, declared)) = publishers.get(key) {
+                zensight_common::PublisherRegistry::check_class(key, *declared, asked);
                 return publisher.delete().await.map_err(|e| SensorError::Publish {
                     key: key.to_string(),
                     message: e.to_string(),
@@ -295,10 +311,13 @@ impl AdvancedPublisherRegistry {
         self.get_or_create_publisher(key).await?;
         let publishers = self.publishers.read().await;
         match publishers.get(key) {
-            Some(publisher) => publisher.delete().await.map_err(|e| SensorError::Publish {
-                key: key.to_string(),
-                message: e.to_string(),
-            }),
+            Some((publisher, declared)) => {
+                zensight_common::PublisherRegistry::check_class(key, *declared, asked);
+                publisher.delete().await.map_err(|e| SensorError::Publish {
+                    key: key.to_string(),
+                    message: e.to_string(),
+                })
+            }
             None => Err(SensorError::Publish {
                 key: key.to_string(),
                 message: "publisher vanished between create and use".into(),
@@ -319,19 +338,29 @@ impl AdvancedPublisherRegistry {
     ) -> Result<()> {
         let payload =
             encode(value, self.format).map_err(|e| SensorError::Serialization(e.to_string()))?;
-        self.put_raw(key, payload).await
+        self.put_raw_as(key, payload, self.qos, self.format.encoding())
+            .await
     }
 
     /// Shared put path. Fast path: one read-lock hit on the cached publisher
     /// (the steady state — every publish used to take the write lock first).
-    /// Miss: create, then put under a fresh read lock. Every sample carries
-    /// the format's [`Encoding`] (RFC 08 §7: metadata beats sniffing).
-    async fn put_raw(&self, key: &str, payload: Vec<u8>) -> Result<()> {
-        let encoding = self.format.encoding();
+    /// Miss: create, then put under a fresh read lock. Every sample carries an
+    /// [`Encoding`](zenoh::bytes::Encoding) (RFC 08 §7: metadata beats
+    /// sniffing). The registry guard runs here, on **every** put (#1155), and
+    /// a key declared under another class than `asked` is reported.
+    pub(crate) async fn put_raw_as(
+        &self,
+        key: &str,
+        payload: Vec<u8>,
+        asked: QosClass,
+        encoding: zenoh::bytes::Encoding,
+    ) -> Result<()> {
+        zensight_common::metric_guard::check_telemetry_key(key);
         let bytes = payload.len();
         {
             let publishers = self.publishers.read().await;
-            if let Some(publisher) = publishers.get(key) {
+            if let Some((publisher, declared)) = publishers.get(key) {
+                zensight_common::PublisherRegistry::check_class(key, *declared, asked);
                 publisher
                     .put(payload)
                     .encoding(encoding)
@@ -350,12 +379,13 @@ impl AdvancedPublisherRegistry {
         // not a success: `tombstone` already treats it as one, and a put that
         // returns `Ok(())` without publishing is the one outcome a caller
         // cannot detect (#1079).
-        let Some(publisher) = publishers.get(key) else {
+        let Some((publisher, declared)) = publishers.get(key) else {
             return Err(SensorError::Publish {
                 key: key.to_string(),
                 message: "publisher missing after creation".to_string(),
             });
         };
+        zensight_common::PublisherRegistry::check_class(key, *declared, asked);
         publisher
             .put(payload)
             .encoding(encoding)
@@ -405,30 +435,9 @@ impl AdvancedPublisherRegistry {
     }
 }
 
-/// Statistics from a batch publish operation.
-#[derive(Debug, Default, Clone, Copy)]
-pub struct PublishStats {
-    /// Number of successfully published points.
-    pub success: usize,
-    /// Number of failed publishes.
-    pub failed: usize,
-}
-
-impl PublishStats {
-    /// Total number of attempted publishes.
-    pub fn total(&self) -> usize {
-        self.success + self.failed
-    }
-
-    /// Success rate as a percentage.
-    pub fn success_rate(&self) -> f64 {
-        if self.total() == 0 {
-            100.0
-        } else {
-            (self.success as f64 / self.total() as f64) * 100.0
-        }
-    }
-}
+// One `PublishStats`, not two: the batch outcome is the same shape on both
+// tiers, and this module used to carry a byte-for-byte copy (#1155).
+pub use crate::publisher::PublishStats;
 
 #[cfg(test)]
 mod tests {
@@ -452,17 +461,5 @@ mod tests {
         assert_eq!(config.cache_size, 50);
         assert!(!config.miss_detection);
         assert!(!config.publisher_detection);
-    }
-
-    #[test]
-    fn test_publish_stats() {
-        let mut stats = PublishStats::default();
-        assert_eq!(stats.total(), 0);
-        assert_eq!(stats.success_rate(), 100.0);
-
-        stats.success = 8;
-        stats.failed = 2;
-        assert_eq!(stats.total(), 10);
-        assert_eq!(stats.success_rate(), 80.0);
     }
 }
