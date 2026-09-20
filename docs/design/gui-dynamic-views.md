@@ -13,9 +13,9 @@ we have to think of a plugin system."*
 This document measures how static the GUI actually is and where the coupling
 lives (§1), inventories what the bus already says about itself that the GUI does
 not use (§2), surveys how the industry makes views data-driven (§3), weighs the
-four plugin shapes against each other (§4), and proposes an architecture (§5), a
+five plugin shapes against each other (§4), and proposes an architecture (§5), a
 view-definition format with worked examples (§6), a migration (§7) and a phased
-plan (§8). Sources are in §11.
+plan (§8), then the zenkey dependencies (§11). Sources are in §12.
 
 ---
 
