@@ -273,8 +273,8 @@ async fn main() -> Result<()> {
             zensight_sensor_core::v1::for_producer("parallax").telemetry_prefix(),
             Format::Json,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            runner.publisher().counters(),
         )
-        .with_counters(runner.publisher().counters())
         .with_qos(zensight_common::QosClass::HealthLiveness);
         let report_key: String = zensight_sensor_core::v1::for_producer("parallax")
             .const_state_key(&["discovery"])

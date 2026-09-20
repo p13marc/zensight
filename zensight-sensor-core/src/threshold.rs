@@ -337,10 +337,16 @@ impl ThresholdEvaluator {
 /// registries the sensor publishes through, and spawns the task that turns
 /// transitions into alerts.
 ///
-/// `extra` is for the registries a sensor owns itself —
-/// `AdvancedPublisherRegistry` instances built in its `main.rs` — because the
-/// runner cannot know about those. A sensor that publishes only through
-/// `runner.publisher()` passes an empty slice.
+/// `extra` is for the registries a sensor owns itself — the
+/// `AdvancedPublisherRegistry` or `PublisherRegistry` its telemetry actually
+/// goes through, built in its `main.rs` — because the runner cannot know about
+/// those. Any [`Publish`](crate::Publish) backend goes here (#1155); before
+/// the trait it took only the advanced tier, so every sensor passed `&[]` and
+/// installed the evaluator a second time by hand on the registry that
+/// mattered. A sensor whose registry is born per device or inside a task
+/// after this call (snmp, gnmi, modbus, netring) still installs it there. A
+/// sensor that publishes only through `runner.publisher()` passes an empty
+/// slice.
 ///
 /// The observer is installed **even with no rules in the file config**,
 /// because `@desired` and `@rpc` can add them to a running sensor (#931).
@@ -352,7 +358,7 @@ pub fn install<C: crate::config::SensorConfig>(
     config: ThresholdsConfig,
     protocol: Protocol,
     reporter: Arc<AlertReporter>,
-    extra: &[Arc<crate::AdvancedPublisherRegistry>],
+    extra: &[&dyn crate::Publish],
 ) -> Arc<ThresholdEvaluator> {
     let count = config.rules.len();
     let (evaluator, task) = ThresholdEvaluator::new(config, protocol, reporter);
@@ -390,7 +396,7 @@ pub async fn adopt<C: crate::config::SensorConfig>(
     protocol: Protocol,
     reporter: Arc<AlertReporter>,
     desired_key: zenkey::Key,
-    extra: &[Arc<crate::AdvancedPublisherRegistry>],
+    extra: &[&dyn crate::Publish],
 ) -> crate::Result<Arc<ThresholdEvaluator>> {
     let config = runner.config().thresholds();
     // The same gate both writers run. A file config that is invalid is a

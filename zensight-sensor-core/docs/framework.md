@@ -126,40 +126,55 @@ is the same `h-<12hex>` host id the evidence claims carry.
 
 ## Publishers & the declare-all discipline
 
-`publisher.rs` / `advanced_publisher.rs`. The framework never uses one-shot
-`session.put`; every write goes through a **declared, cached** publisher so keys
-are interned and routing-optimized, and telemetry matches the GUI's
-`AdvancedSubscriber`.
+`publisher.rs` / `advanced_publisher.rs` / `publish.rs`. The framework never
+uses one-shot `session.put`; every write goes through a **declared, cached**
+publisher so keys are interned and routing-optimized, and telemetry matches
+the GUI's `AdvancedSubscriber`.
 
-`Publisher` has two internal paths:
+There are **two tiers, one contract** (#1155 — the `Publish` trait in
+`publish.rs`, implemented by both and by `Publisher`):
 
-- **Telemetry** — `publish` / `publish_to_key` / `publish_batch` go through an
-  `AdvancedPublisherRegistry` of zenoh-ext *advanced* publishers (per-key cache +
-  sample-miss / publisher detection), keyed under the runner's
-  `V1Context::telemetry_prefix()` (`zensight/v1/<origin>/telemetry/<producer>`).
-  This pairing with the GUI's `AdvancedSubscriber` on
-  `zensight/v1/*/telemetry/**` is what gives reliable delivery and late-joiner
-  history/recovery.
-- **State plane** — `publish_raw` / `publish_json` / `delete` (for
-  `state/<producer>/…` documents the GUI reads with a plain subscriber) go
-  through a plain `PublisherRegistry` of declared publishers. Each call takes an
-  explicit `QosClass` — e.g. alerts use `QosClass::Alert` (reliable+block) so a
-  firing/resolved event is never dropped on a lossy link; health uses
-  `QosClass::HealthLiveness` (drop-friendly).
+- **Baseline** — `zensight_common::PublisherRegistry`: one declared publisher
+  per key, an explicit `QosClass` per call — e.g. alerts use `QosClass::Alert`
+  (reliable+block) so a firing/resolved event is never dropped on a lossy link;
+  health uses `QosClass::HealthLiveness` (drop-friendly). `Publisher` — the
+  runner's own, behind `V1Context::telemetry_prefix()` — is this tier:
+  `publish` / `publish_to_key` / `publish_batch` for telemetry, `publish_raw` /
+  `publish_json` / `delete` for state documents.
+- **Advanced** — `AdvancedPublisherRegistry`: zenoh-ext *advanced* publishers
+  (per-key cache + sample-miss / publisher detection), one class per registry
+  (`with_qos`, default `Telemetry`; evidence feeds set `Evidence`). This is
+  where the bulk telemetry of netlink, netring, snmp and logs goes, and what
+  pairs with the GUI's `AdvancedSubscriber` for late-joiner history/recovery.
+  `AdvancedPublisherConfig` controls cache size, miss detection + heartbeat and
+  publisher detection; `cache_only(n)` disables miss/publisher detection so
+  cache-only feeds (identity/evidence) emit no per-key heartbeat. The default
+  heartbeat is a relaxed 5 s. `publish_serializable(key, &T)` publishes any
+  control-plane document with the same cached late-joiner semantics;
+  `tombstone` retires one through the same cached publisher.
 
-`AdvancedPublisherRegistry`:
+What the contract fixes, on both tiers:
 
-- Declares each publisher lazily on first publish to a key and caches it (shared
-  across `Publisher` clones).
-- `AdvancedPublisherConfig` controls cache size, miss detection + heartbeat, and
-  publisher detection. `cache_only(n)` disables miss/publisher detection — cache
-  only — so cache-only feeds (identity/evidence) do **not** emit a per-key
-  heartbeat, which a low-bandwidth link cannot shed. The default heartbeat is a
-  relaxed 5 s (periodic telemetry is superseded by the next sample anyway).
-- `with_qos(class)` overrides the class applied to declared publishers (default
-  `Telemetry`; the identity task sets `Evidence`).
-- `publish_serializable(key, &T)` publishes any serializable control-plane doc
-  (e.g. `SensorInfo`, `HostEvidence`) with the same cached late-joiner semantics.
+- **The registry guard runs on every put and every delete**
+  (`zensight_common::metric_guard`). The advanced tier used to guard only the
+  keys *it* built, so `publish_to_key`, `publish_serializable` and `tombstone`
+  went unchecked; the baseline `delete` did too.
+- **Deliveries are counted after the put succeeds, into a counter set the
+  caller supplies.** `AdvancedPublisherRegistry::new` takes the counters — the
+  sensor passes `runner.publisher().counters()` — so a registry cannot be built
+  counting into nothing. It used to mint a fresh set by default, which is how
+  `RelationSet`'s claims went uncounted and how one forgotten `with_counters`
+  made `published_total` orders of magnitude low (#1079).
+- **One key, one class, reported on both tiers.** The advanced registry records
+  the class each key was declared with, and a put or tombstone under another
+  class is a `warn!` in release and a `debug_assert!` in debug — the rule the
+  baseline registry already had.
+- **One observer seam.** `threshold::install`'s `extra` takes any
+  `&dyn Publish`, so a sensor whose telemetry goes through its own registry
+  hands it to `adopt` (netflow, logs, sysinfo, netlink) instead of installing
+  the evaluator a second time by hand. snmp, gnmi, modbus and netring still
+  install it themselves: their registries are born per device or inside a task
+  after `adopt` runs.
 
 `RawMediaPublisher` (via `Publisher::raw_media_publisher`) is a deliberate
 exception: a **plain** publisher for the opaque, verbatim `@media` plane
@@ -392,12 +407,12 @@ was OOM-killed, and reported `Healthy` throughout:
 - **rss/vsz/cpu** — self-measured from `/proc/self/{status,stat}` on the 5 s
   tick, never per sample. CPU is a diff against the previous tick (`None` on
   the first — absent is *not measured*, never zero).
-- **publish accounting** — every baseline-tier put is counted (messages +
-  payload bytes) in the `PublishCounters` shared between the
-  `PublisherRegistry` and the health doc; a sensor feeds its own
+- **publish accounting** — every put on either tier is counted (messages +
+  payload bytes) after it succeeds, in the `PublishCounters` shared between
+  the registries and the health doc; a sensor feeds its own
   `dropped`/`evicted` totals into the same `Arc` (`publisher.counters()`).
-  Advanced-tier publications are not counted — understating is permitted,
-  the fields are optional.
+  The advanced tier counts by construction since #1155 — its constructor
+  takes the set — where before it had to be remembered per registry (#1079).
 - **table providers** — `health.register_table_stats(Box::new(|| ...))`
   registers a pull callback reporting `{name, entries, bytes?, capacity_*?}`
   per bounded structure; providers run only on the health tick and **must

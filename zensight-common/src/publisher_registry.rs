@@ -159,8 +159,9 @@ impl PublisherRegistry {
 
     /// Report a key published under a second QoS class (#1155).
     ///
-    /// Separated so the test can reason about the rule without a session.
-    fn check_class(key: &str, declared: QosClass, asked: QosClass) {
+    /// Separated so the test can reason about the rule without a session, and
+    /// public so the advanced tier applies the same rule rather than a copy.
+    pub fn check_class(key: &str, declared: QosClass, asked: QosClass) {
         if declared == asked {
             return;
         }
@@ -255,7 +256,11 @@ impl PublisherRegistry {
     }
 
     /// Delete (tombstone) `key` via its declared publisher.
+    ///
+    /// Guarded like a put (#1155): a tombstone on an unregistered or
+    /// ungrammatical key is the same registry lie as a value on one.
     pub async fn delete(&self, key: &str, qos: QosClass) -> Result<()> {
+        crate::metric_guard::check_telemetry_key(key);
         self.ensure(key, qos).await?;
         let publishers = self.publishers.read().await;
         publishers

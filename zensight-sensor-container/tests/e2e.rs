@@ -210,6 +210,7 @@ async fn the_container_contract_end_to_end() {
             zensight_sensor_core::v1::for_producer("container").telemetry_prefix(),
             format,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            Default::default(),
         )
         .with_qos(zensight_sensor_container::poller::STATE_QOS),
     );
@@ -226,7 +227,12 @@ async fn the_container_contract_end_to_end() {
         Some(reporter.clone()),
         health.clone(),
         None,
-        zensight_sensor_core::relation::RelationSet::new("container", session.clone(), format),
+        zensight_sensor_core::relation::RelationSet::new(
+            "container",
+            session.clone(),
+            format,
+            Default::default(),
+        ),
     );
 
     // ── Sweep 1 establishes the baseline; the delta rules cannot fire yet ───
@@ -527,6 +533,7 @@ async fn an_unreachable_runtime_is_an_error_not_an_empty_fleet() {
         zensight_sensor_core::v1::for_producer("container").telemetry_prefix(),
         zensight_common::Format::Json,
         zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+        Default::default(),
     ));
     let mut poller = Poller::new(
         vec![Arc::new(RuntimeClient::new(
@@ -546,6 +553,7 @@ async fn an_unreachable_runtime_is_an_error_not_an_empty_fleet() {
             "container",
             session.clone(),
             zensight_common::Format::Json,
+            Default::default(),
         ),
     );
     let err = poller.sweep().await.unwrap_err();

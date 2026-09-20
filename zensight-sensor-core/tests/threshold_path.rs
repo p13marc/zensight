@@ -173,6 +173,7 @@ async fn the_advanced_publisher_path_evaluates_too() {
         zensight_sensor_core::v1::for_producer("sysinfo").telemetry_prefix(),
         Format::Json,
         AdvancedPublisherConfig::cache_only(1),
+        Default::default(),
     ));
 
     let (evaluator, task) = ThresholdEvaluator::new(rules(), Protocol::Sysinfo, reporter.clone());
@@ -273,6 +274,92 @@ async fn a_rule_set_pushed_at_runtime_takes_effect_without_a_restart() {
     assert!(
         saw_resolved,
         "deleting a rule must retire its alerts, not orphan them"
+    );
+
+    handle.abort();
+}
+
+/// Both tiers are one `Publish` (#1155): the evaluator installed through the
+/// trait — which is what `threshold::install`'s `extra` does now — sees a
+/// point on either.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_observer_reaches_both_tiers_through_the_trait() {
+    use zensight_sensor_core::Publish;
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/state/sysinfo/alert/*")
+        .await
+        .expect("subscriber");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let publisher = Publisher::new(session.clone(), "sysinfo", Format::Json);
+    let reporter = Arc::new(AlertReporter::new(
+        publisher.clone(),
+        Protocol::Sysinfo,
+        Format::Json,
+    ));
+    let baseline = zensight_common::PublisherRegistry::new(session.clone());
+    // Its own set, not the reporter's publisher's: the alerts the evaluator
+    // raises are counted there too, asynchronously.
+    let advanced_counters: Arc<zensight_common::PublishCounters> = Arc::default();
+    let advanced = AdvancedPublisherRegistry::new(
+        session.clone(),
+        zensight_sensor_core::v1::for_producer("sysinfo").telemetry_prefix(),
+        Format::Json,
+        AdvancedPublisherConfig::cache_only(1),
+        advanced_counters.clone(),
+    );
+    let tiers: [&dyn Publish; 2] = [&baseline, &advanced];
+
+    let (evaluator, task) = ThresholdEvaluator::new(rules(), Protocol::Sysinfo, reporter.clone());
+    for tier in tiers {
+        tier.set_observer(evaluator.clone());
+    }
+    let handle = tokio::spawn(task);
+
+    // The rule's state is per rule, not per tier: fire it through the
+    // baseline tier, clear it through the advanced one. A resolve can only
+    // come from the second point being evaluated.
+    let key = format!(
+        "{}/cpu/usage",
+        zensight_sensor_core::v1::for_producer("sysinfo").telemetry_prefix()
+    );
+    let source = unique_source();
+    tiers[0]
+        .put_point(
+            &key,
+            &point(&source, 99.0),
+            zensight_common::QosClass::Telemetry,
+            Format::Json,
+        )
+        .await
+        .expect("put through the baseline tier");
+    let (kind, alert) = next_alert(&sub).await;
+    assert_eq!(kind, zenoh::sample::SampleKind::Put);
+    let alert = alert.unwrap();
+    assert_eq!(alert.rule, "threshold:cpu-hot");
+    assert_eq!(alert.state, zensight_common::AlertState::Firing);
+
+    tiers[1]
+        .put_point(
+            &key,
+            &point(&source, 10.0),
+            zensight_common::QosClass::Telemetry,
+            Format::Json,
+        )
+        .await
+        .expect("put through the advanced tier");
+    let (kind, alert) = next_alert(&sub).await;
+    assert_eq!(kind, zenoh::sample::SampleKind::Put);
+    assert_eq!(
+        alert.unwrap().state,
+        zensight_common::AlertState::Resolved,
+        "the advanced tier's point cleared the rule"
+    );
+    assert_eq!(
+        advanced_counters.published_total(),
+        1,
+        "the advanced tier counted into the set it was given"
     );
 
     handle.abort();

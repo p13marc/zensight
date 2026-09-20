@@ -151,6 +151,7 @@ async fn the_probe_contract_end_to_end() {
             zensight_sensor_core::v1::for_producer("probe").telemetry_prefix(),
             format,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            Default::default(),
         )
         .with_qos(zensight_sensor_probe::poller::STATE_QOS),
     );
@@ -164,7 +165,12 @@ async fn the_probe_contract_end_to_end() {
         states,
         Some(reporter.clone()),
         health.clone(),
-        zensight_sensor_core::relation::RelationSet::new("probe", session.clone(), format),
+        zensight_sensor_core::relation::RelationSet::new(
+            "probe",
+            session.clone(),
+            format,
+            Default::default(),
+        ),
     )
     .unwrap();
 
@@ -442,6 +448,7 @@ async fn a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost() 
             zensight_sensor_core::v1::for_producer("probe").telemetry_prefix(),
             zensight_common::Format::Json,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            Default::default(),
         )
         .with_qos(zensight_sensor_probe::poller::STATE_QOS),
     );
@@ -457,6 +464,7 @@ async fn a_burst_measures_jitter_and_publishes_no_rtt_when_everything_is_lost() 
             "probe",
             session.clone(),
             zensight_common::Format::Json,
+            Default::default(),
         ),
     )
     .unwrap();
@@ -539,6 +547,7 @@ async fn an_ntp_check_reads_a_servers_answer_and_believes_its_refusal() {
                 zensight_sensor_core::v1::for_producer("probe").telemetry_prefix(),
                 zensight_common::Format::Json,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+                Default::default(),
             )
             .with_qos(zensight_sensor_probe::poller::STATE_QOS),
         ),
@@ -548,6 +557,7 @@ async fn an_ntp_check_reads_a_servers_answer_and_believes_its_refusal() {
             "probe",
             session.clone(),
             zensight_common::Format::Json,
+            Default::default(),
         ),
     )
     .unwrap();

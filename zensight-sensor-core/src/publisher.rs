@@ -92,6 +92,12 @@ impl Publisher {
         &self.session
     }
 
+    /// The baseline-tier registry every put goes through — the
+    /// [`Publish`](crate::Publish) backend behind this publisher (#1155).
+    pub fn registry(&self) -> &zensight_common::PublisherRegistry {
+        &self.control
+    }
+
     /// Build a full key expression from a suffix.
     ///
     /// Debug-asserts that `suffix` doesn't contain double slashes; the real

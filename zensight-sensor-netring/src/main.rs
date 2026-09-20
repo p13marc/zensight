@@ -760,8 +760,8 @@ async fn main() -> Result<()> {
                 producer.clone(),
                 format,
                 AdvancedPublisherConfig::cache_only(1),
+                runner.publisher().counters(),
             )
-            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         );
         runner.spawn(zensight_sensor_netring::evidence::run_asset_evidence(
@@ -785,8 +785,8 @@ async fn main() -> Result<()> {
                 producer.clone(),
                 format,
                 AdvancedPublisherConfig::cache_only(1),
+                runner.publisher().counters(),
             )
-            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         );
         runner.spawn(zensight_sensor_netring::evidence::run_name_evidence(

@@ -132,8 +132,11 @@ async fn main() -> Result<()> {
     runner = runner.with_alert_reporter(reporter.clone());
 
     // `source` is a label in a `ThresholdRule`, so one rule can name one
-    // exporter or match every one that reports here.
-    let thresholds = zensight_sensor_core::threshold::adopt(
+    // exporter or match every one that reports here. The rollup registry is
+    // where this sensor's telemetry goes, so the evaluator is installed on it
+    // through `adopt` (#1155) — not on the runner's publisher alone, which
+    // carries none of it.
+    let _thresholds = zensight_sensor_core::threshold::adopt(
         &mut runner,
         zensight_common::Protocol::Netflow,
         reporter,
@@ -143,11 +146,10 @@ async fn main() -> Result<()> {
                 zensight_common::PROFILE.host_id(),
             ))
         },
-        &[],
+        &[&registry],
     )
     .await
     .map_err(|e| anyhow::anyhow!("{e}"))?;
-    registry.set_observer(thresholds);
 
     let loop_health = runner.health();
     runner.spawn(async move {

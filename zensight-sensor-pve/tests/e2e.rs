@@ -401,6 +401,7 @@ async fn the_hypervisor_contract_end_to_end() {
             zensight_sensor_core::v1::for_producer("pve").telemetry_prefix(),
             format,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            Default::default(),
         )
         .with_qos(zensight_sensor_pve::poller::STATE_QOS),
     );
@@ -415,7 +416,12 @@ async fn the_hypervisor_contract_end_to_end() {
         None,
         Some(reporter.clone()),
         health.clone(),
-        zensight_sensor_core::relation::RelationSet::new("pve", session.clone(), format),
+        zensight_sensor_core::relation::RelationSet::new(
+            "pve",
+            session.clone(),
+            format,
+            Default::default(),
+        ),
     );
 
     // ── Contract 1: the audit's findings arrive as alerts ───────────────────
@@ -753,13 +759,19 @@ async fn the_hypervisor_contract_end_to_end() {
                 zensight_sensor_core::v1::for_producer("pve").telemetry_prefix(),
                 format,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+                Default::default(),
             )
             .with_qos(zensight_sensor_pve::poller::STATE_QOS),
         ),
         None,
         Some(reporter.clone()),
         health.clone(),
-        zensight_sensor_core::relation::RelationSet::new("pve", session.clone(), format),
+        zensight_sensor_core::relation::RelationSet::new(
+            "pve",
+            session.clone(),
+            format,
+            Default::default(),
+        ),
     );
     let sweep2 = poller2.sweep().await.expect("second sweep");
     let g140 = sweep2.guests.iter().find(|g| g.vmid == 140).unwrap();

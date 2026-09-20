@@ -185,15 +185,19 @@ impl Collector {
         format: Format,
         counters: Arc<zensight_common::PublishCounters>,
     ) -> Self {
-        let relations =
-            zensight_sensor_core::relation::RelationSet::new("netlink", session.clone(), format);
+        let relations = zensight_sensor_core::relation::RelationSet::new(
+            "netlink",
+            session.clone(),
+            format,
+            counters.clone(),
+        );
         let registry = AdvancedPublisherRegistry::new(
             session,
             zensight_sensor_core::v1::for_producer("netlink").telemetry_prefix(),
             format,
             AdvancedPublisherConfig::default(),
-        )
-        .with_counters(counters);
+            counters,
+        );
         let collect = CollectHandle::new(config.collect.clone());
         let health = Arc::new(zensight_sensor_core::SensorHealth::new("netlink"));
         let event_state = EventState::new(config.events.ring_capacity);
@@ -266,12 +270,8 @@ impl Collector {
     /// netlink builds its `AdvancedPublisherRegistry` in `new`, not in
     /// `main.rs`, so an observer set on the runner's publisher would watch a
     /// path none of this sensor's 106 metric families takes.
-    pub fn with_thresholds(
-        self,
-        observer: Arc<dyn zensight_common::point_observer::PointObserver>,
-    ) -> Self {
-        self.registry.set_observer(observer);
-        self
+    pub fn registry(&self) -> &AdvancedPublisherRegistry {
+        &self.registry
     }
 
     /// Use the runner's shared health tracker (so updates reach the published

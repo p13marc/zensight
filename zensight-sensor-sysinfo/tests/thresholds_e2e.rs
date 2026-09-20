@@ -83,8 +83,10 @@ async fn a_rule_fires_through_sysinfos_own_registry() {
     // sysinfo's own alert evaluator — the rule under test is the operator's.
     cfg.alerts.enabled = false;
 
-    let collector = SystemCollector::new(source.clone(), cfg, session.clone(), Format::Json)
-        .with_thresholds(evaluator);
+    let collector = SystemCollector::new(source.clone(), cfg, session.clone(), Format::Json);
+    // What `threshold::adopt` does for the real sensor (#1155): the evaluator
+    // goes on the registry sysinfo's telemetry actually takes.
+    collector.registry().set_observer(evaluator);
     let handle = tokio::spawn(collector.run());
 
     let sample = tokio::time::timeout(Duration::from_secs(15), sub.recv_async())

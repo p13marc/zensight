@@ -121,8 +121,8 @@ async fn main() -> Result<()> {
             zensight_sensor_core::v1::for_producer("pve").telemetry_prefix(),
             format,
             zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+            runner.publisher().counters(),
         )
-        .with_counters(runner.publisher().counters())
         .with_qos(zensight_sensor_pve::poller::STATE_QOS),
     );
     let evidence = pve.evidence.then(|| {
@@ -132,8 +132,8 @@ async fn main() -> Result<()> {
                 zensight_sensor_core::v1::for_producer("pve").telemetry_prefix(),
                 format,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+                runner.publisher().counters(),
             )
-            .with_counters(runner.publisher().counters())
             .with_qos(zensight_common::QosClass::Evidence),
         )
     });
@@ -157,7 +157,12 @@ async fn main() -> Result<()> {
         evidence,
         pve.alerts.enabled.then(|| reporter.clone()),
         runner.health(),
-        zensight_sensor_core::relation::RelationSet::new("pve", runner.session().clone(), format),
+        zensight_sensor_core::relation::RelationSet::new(
+            "pve",
+            runner.session().clone(),
+            format,
+            runner.publisher().counters(),
+        ),
     );
     runner.spawn(poller.run());
     runner = runner.with_alert_reporter(reporter.clone());

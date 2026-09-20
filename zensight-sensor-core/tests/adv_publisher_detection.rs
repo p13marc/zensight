@@ -106,6 +106,7 @@ async fn late_publisher_detection_does_not_warn() {
         "v1/h-9706b31ddad3/telemetry/netring",
         Format::Cbor,
         AdvancedPublisherConfig::default(),
+        Default::default(),
     );
     assert!(
         registry.config().publisher_detection,

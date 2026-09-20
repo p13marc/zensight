@@ -96,8 +96,8 @@ async fn main() -> Result<()> {
                 zensight_sensor_core::v1::for_producer("container").telemetry_prefix(),
                 format,
                 zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+                runner.publisher().counters(),
             )
-            .with_counters(runner.publisher().counters())
             .with_qos(qos),
         )
     };
@@ -143,6 +143,7 @@ async fn main() -> Result<()> {
             "container",
             runner.session().clone(),
             format,
+            runner.publisher().counters(),
         ),
     );
     runner.spawn(poller.run());
