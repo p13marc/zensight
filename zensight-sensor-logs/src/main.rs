@@ -889,7 +889,7 @@ async fn emit_line(
         }
     }
 
-    if let Some(record) = zensight_common::LogRecord::from_point(&point) {
+    if let Some(record) = zensight_common::LogRecord::from_point("logs", &point) {
         // Durable store (#544): hand a copy to the writer task off the hot path.
         // A full writer queue drops + counts rather than back-pressuring intake.
         if let Some(tx) = store_tx

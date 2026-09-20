@@ -339,6 +339,10 @@ impl Unrefined {
 /// A metric's identity, derived from the key and the registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MetricIdentity {
+    /// The producer base name off the key (`keyexpr::producer_name`) — what
+    /// the `protocol` label carries, and since #1255 the only place a
+    /// consumer learns it: the point no longer says.
+    pub producer: String,
     /// Name chunks. Prometheus joins with `_` under its prefix; OTel with `.`.
     pub name: Vec<String>,
     /// True when the name came from the semconv table, in which case it is
@@ -557,6 +561,7 @@ where
     }
 
     Ok(MetricIdentity {
+        producer: producer.clone(),
         name,
         semconv: is_semconv,
         labels: merged.labels,
