@@ -78,13 +78,13 @@ STARTING POINT (reference-fleet sizing); measure yours"*.
 | `zensight-sensor-systemd` | 128M | 96 | one D-Bus connection and a unit watchlist |
 | `zensight-sensor-netflow` | 128M | 96 | a rollup map keyed by flow, plus the parser's LRU |
 | `zensight-sensor-snmp` | 128M | 96 | interface tables across every polled agent |
-| `zensight-correlator` | 128M | — | the fleet's entity set, and the union-find over it |
-| `zensight-exporter-prometheus` | 128M | — | one gauge family per series it forwards |
-| `zensight-exporter-otel` | 128M | — | a provider stack per origin |
+| `zensight-correlator` | 128M | 96 | the fleet's entity set, and the union-find over it |
+| `zensight-exporter-prometheus` | 128M | 96 | one gauge family per series it forwards |
+| `zensight-exporter-otel` | 128M | 96 | a provider stack per origin |
 | `zensight-sensor-bmc` | 96M | 72 | one HTTP client against one BMC |
 | `zensight-sensor-pve` | 96M | 72 | one HTTP client against one API |
 | `zensight-sensor-gnmi` | 96M | 72 | one streaming subscription per target |
-| `zensight-desired` | 96M | — | one policy file in, one document per host out |
+| `zensight-desired` | 96M | 72 | one policy file in, one document per host out |
 | `zensight-sensor-container` | 64M | 48 | a socket client with two GETs and cgroupfs reads |
 | `zensight-sensor-hostspec` | 64M | 48 | a closed vocabulary of assertions; executes nothing |
 | `zensight-sensor-probe` | 64M | 48 | a check client with a timeout |
@@ -95,9 +95,13 @@ every budget but netring's and the historian's is new in #1091 — set at three
 quarters of the backstop, deliberately the same fraction the runner derives
 from a cgroup when nothing is declared.
 
-The four service-tier rows have **no budget because they have no health
-document to carry one** (#1202), so `just fleet-sizing` has no row for them and
-their `MemoryMax` is the only thing holding them.
+The four service-tier rows carry a budget since #1202: the correlator, the
+policy compiler (`zensight-desired run`) and both exporters are host-origin
+producers through `SensorRunner` now — `correlator`, `policy-compiler`,
+`exporter-prometheus`, `exporter-otel` — so each publishes a health document
+with `self_stats`, arms the `sensor-budget` alert and the shed ladder, and has
+a row in `just fleet-sizing`. Their budgets are the same three-quarters
+starting point as everyone else's; measure them the same way.
 
 **Replace a row only from a measured window**, and keep the shipped column beside
 your own — the delta is the interesting part, and it is what a future default

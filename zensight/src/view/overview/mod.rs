@@ -332,6 +332,10 @@ fn producer_short_name(producer: &str) -> String {
         Ok(Protocol::Container) => "Containers",
         Ok(Protocol::Probe) => "Probes",
         Ok(Protocol::Historian) => "History",
+        Ok(Protocol::Correlator) => "Correlator",
+        Ok(Protocol::PolicyCompiler) => "Policy compiler",
+        Ok(Protocol::ExporterPrometheus) => "Prometheus exporter",
+        Ok(Protocol::ExporterOtel) => "OTel exporter",
         Err(()) => return producer.to_string(),
     }
     .to_string()
@@ -351,6 +355,12 @@ fn generic_label(producer: &str) -> &str {
         // #898: one device per running instance; the history it holds is
         // read through `@rpc/historian/range` from the charts that need it.
         Ok(Protocol::Historian) => "historians",
+        // #1202: one device per running process; what each has to say about
+        // itself is its health document.
+        Ok(Protocol::Correlator) => "correlators",
+        Ok(Protocol::PolicyCompiler) => "policy compilers",
+        Ok(Protocol::ExporterPrometheus) => "Prometheus exporters",
+        Ok(Protocol::ExporterOtel) => "OTel exporters",
         _ => producer,
     }
 }

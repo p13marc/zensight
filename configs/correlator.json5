@@ -117,6 +117,17 @@
   // without stopping the catalog.
   // incidents_enabled: true,
 
+  // Declared resource envelope (#811/#1202). RSS the governor holds this
+  // process to. Absent means no budget and no ladder — which reads as
+  // *undeclared*, never as fine. The fleet's entity set and the union-find over it grow with the fleet.
+  // 96 MiB sits at three quarters of the unit's `MemoryMax=128M`, so
+  // the ladder gets to shed before the kernel kills — a starting point from
+  // the reference-fleet sizing, not a measurement; `just fleet-sizing` reads
+  // this process's health document now, so yours can be measured.
+  resources: {
+    budget_rss_mb: 96,
+  },
+
   // Logging configuration
   logging: {
     // Log level: "trace", "debug", "info", "warn", "error"

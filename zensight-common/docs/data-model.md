@@ -39,10 +39,19 @@ instrument unit.
 token via `as_str()`:
 
 `Snmp`, `Logs` (token `logs`; unified syslog + journald), `Gnmi`, `Netflow`,
-`Opcua`, `Modbus`, `Sysinfo`, `Netlink`, `Netring`, `Systemd`, `Parallax`.
+`Opcua`, `Modbus`, `Sysinfo`, `Netlink`, `Netring`, `Systemd`, `Parallax`,
+`Hostspec`, `Bmc`, `Pve`, `Container`, `Probe`, `Historian` — and, since
+#1202, the service tier's four process identities: `Correlator`,
+`PolicyCompiler` (token `policy-compiler`), `ExporterPrometheus`
+(`exporter-prometheus`) and `ExporterOtel` (`exporter-otel`). The hyphenated
+tokens are `#[serde(rename)]`d, since `rename_all = "lowercase"` would have
+written `policycompiler`, which no key carries.
 
 `as_str()` is the keyspace token; `display_name()` is the title-cased UI label
-(they differ only for `Logs`). `FromStr` is case-insensitive.
+(they differ for `Logs`, `Pve` and `Bmc`). `FromStr` is case-insensitive. The
+enum is the framework's identity of a producer — `AlertReporter::new` takes
+one, the runner's `sensor-budget` rule parses its own name as one — which is
+why a process that is not a sensor is in it.
 
 ### TelemetryValue
 

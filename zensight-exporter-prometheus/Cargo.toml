@@ -11,6 +11,10 @@ description = "Prometheus metrics exporter for ZenSight telemetry"
 [dependencies]
 # Internal crates
 zensight-common = { path = "../zensight-common" }
+# The producer framework (#1202): the runner that opens the session, publishes
+# the five framework documents (health with self_stats, budget, shed ladder)
+# and serves introspect/describe on this process's host-origin keys.
+zensight-sensor-core.workspace = true
 
 # Zenoh
 zenoh.workspace = true

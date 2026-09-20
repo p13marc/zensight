@@ -128,6 +128,12 @@ pub fn declared_of(
         S::Snmp(s) => (s.qos(), s.payload_type()),
         S::Sysinfo(s) => (s.qos(), s.payload_type()),
         S::Systemd(s) => (s.qos(), s.payload_type()),
+        // #1202: the service tier's process identities — framework subjects
+        // only, so the QoS is the framework's.
+        S::Correlator(s) => (s.qos(), s.payload_type()),
+        S::PolicyCompiler(s) => (s.qos(), s.payload_type()),
+        S::ExporterPrometheus(s) => (s.qos(), s.payload_type()),
+        S::ExporterOtel(s) => (s.qos(), s.payload_type()),
     }
 }
 

@@ -46,6 +46,37 @@ pub struct ExporterConfig {
     /// Logging configuration.
     #[serde(default)]
     pub logging: LoggingConfig,
+
+    /// Declared resource envelope (#811/#1202): the RSS the governor holds
+    /// this process to. Absent means no budget and no shed ladder — which
+    /// the health document reports as *undeclared*, never as fine.
+    #[serde(default)]
+    pub resources: zensight_sensor_core::ResourcesConfig,
+}
+
+/// The runner's view of this config (#1202): where the bus is, how to log,
+/// which producer this process is, and what it may weigh.
+impl zensight_sensor_core::SensorConfig for ExporterConfig {
+    fn zenoh(&self) -> &ZenohConfig {
+        &self.zenoh
+    }
+
+    fn logging(&self) -> &LoggingConfig {
+        &self.logging
+    }
+
+    fn producer(&self) -> &'static str {
+        crate::PRODUCER
+    }
+
+    fn resources(&self) -> &zensight_sensor_core::ResourcesConfig {
+        &self.resources
+    }
+
+    fn validate(&self) -> zensight_sensor_core::Result<()> {
+        ExporterConfig::validate(self)
+            .map_err(|e| zensight_sensor_core::SensorError::config(e.to_string()))
+    }
 }
 
 /// Prometheus HTTP endpoint configuration.
@@ -234,38 +265,10 @@ pub struct FilterConfig {
 }
 
 /// Logging configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LoggingConfig {
-    /// Log level: "trace", "debug", "info", "warn", "error".
-    #[serde(default = "default_log_level")]
-    pub level: String,
-
-    /// Log output format: "text" or "json".
-    #[serde(default)]
-    pub format: LogFormat,
-}
-
-fn default_log_level() -> String {
-    "info".to_string()
-}
-
-impl Default for LoggingConfig {
-    fn default() -> Self {
-        Self {
-            level: default_log_level(),
-            format: LogFormat::default(),
-        }
-    }
-}
-
-/// Log output format.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LogFormat {
-    #[default]
-    Text,
-    Json,
-}
+/// The shared logging shape (#1202). This crate carried its own copy with the
+/// same two fields until the runner took over tracing init; the JSON is
+/// byte-for-byte the same, so a config file does not notice.
+pub use zensight_common::config::{LogFormat, LoggingConfig};
 
 impl ExporterConfig {
     /// Load configuration from a JSON5 file.
@@ -399,6 +402,36 @@ impl ExporterConfig {
 
 #[cfg(test)]
 mod tests {
+
+    /// #1202: this process is a producer. The shipped config declares a
+    /// budget the runner reads through `SensorConfig`, and the producer it
+    /// names is in the compiled registry — the guard the runner itself lacks:
+    /// `run_with_metadata` serves no `introspect` for an unregistered name
+    /// and says so only at `debug`.
+    #[test]
+    fn the_shipped_config_is_a_producer_with_a_budget() {
+        use zensight_sensor_core::SensorConfig;
+        let config = ExporterConfig::parse(include_str!("../../configs/prometheus-exporter.json5"))
+            .expect("the shipped config parses");
+        assert!(
+            config.budget_bytes().is_some(),
+            "configs/prometheus-exporter.json5 declares no resources.budget_rss_mb — the shed ladder \
+             never arms and docs/ops/SIZING.md's row is a lie"
+        );
+        assert_eq!(config.producer(), crate::PRODUCER);
+        assert!(
+            zensight_common::registry::registry_toml(crate::PRODUCER).is_some(),
+            "{} has no registry slice — the runner would serve no introspect",
+            crate::PRODUCER
+        );
+        assert_eq!(
+            crate::PRODUCER
+                .parse::<zensight_common::Protocol>()
+                .map(|p| p.as_str()),
+            Ok(crate::PRODUCER),
+            "the runner derives the sensor-budget rule by parsing its name as a Protocol"
+        );
+    }
     use super::*;
 
     #[test]

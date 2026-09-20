@@ -22,9 +22,15 @@ procedure	container	describe	read	-	SchemaSet
 procedure	container	introspect	read	-	RegistrySlice
 procedure	container	thresholds	read	-	ThresholdsConfig
 procedure	container	thresholds/set	write	ThresholdsConfig	Ack
+procedure	correlator	describe	read	-	SchemaSet
+procedure	correlator	introspect	read	-	RegistrySlice
 procedure	desired	describe	read	-	SchemaSet
 procedure	desired	introspect	read	-	RegistrySlice
 procedure	desired	override/set	write	DesiredOverride	Ack
+procedure	exporter-otel	describe	read	-	SchemaSet
+procedure	exporter-otel	introspect	read	-	RegistrySlice
+procedure	exporter-prometheus	describe	read	-	SchemaSet
+procedure	exporter-prometheus	introspect	read	-	RegistrySlice
 procedure	gnmi	artifact/cancel	write	-	Ack
 procedure	gnmi	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	gnmi	artifact/status	read	-	ArtifactStatus
@@ -137,6 +143,8 @@ procedure	parallax	stream/set	write	Command<StreamControl>	Ack
 procedure	parallax	streams	read	-	Vec<StreamDescriptor>
 procedure	parallax	thresholds	read	-	ThresholdsConfig
 procedure	parallax	thresholds/set	write	ThresholdsConfig	Ack
+procedure	policy-compiler	describe	read	-	SchemaSet
+procedure	policy-compiler	introspect	read	-	RegistrySlice
 procedure	probe	describe	read	-	SchemaSet
 procedure	probe	introspect	read	-	RegistrySlice
 procedure	probe	targets	read	-	ProbeTargets
@@ -251,6 +259,11 @@ subject	container	{name}/pids	telemetry	TelemetryPoint	gauge
 subject	container	{name}/restart_count	telemetry	TelemetryPoint	counter
 subject	container	{name}/running	telemetry	TelemetryPoint	gauge
 subject	container	{name}/uptime_secs	telemetry	TelemetryPoint	gauge
+subject	correlator	alert/{alert_key}	state	Alert
+subject	correlator	errors	state	ErrorReport
+subject	correlator	evidence/self	state	HostEvidence
+subject	correlator	health	state	HealthSnapshot
+subject	correlator	sensor	state	SensorInfo
 subject	desired	{host}/bmc/thresholds	state	ThresholdsConfig
 subject	desired	{host}/container/thresholds	state	ThresholdsConfig
 subject	desired	{host}/gnmi/thresholds	state	ThresholdsConfig
@@ -272,6 +285,16 @@ subject	desired	{host}/snmp/thresholds	state	ThresholdsConfig
 subject	desired	{host}/sysinfo/thresholds	state	ThresholdsConfig
 subject	desired	{host}/systemd/expectations	state	ExpectationsConfig
 subject	desired	{host}/systemd/thresholds	state	ThresholdsConfig
+subject	exporter-otel	alert/{alert_key}	state	Alert
+subject	exporter-otel	errors	state	ErrorReport
+subject	exporter-otel	evidence/self	state	HostEvidence
+subject	exporter-otel	health	state	HealthSnapshot
+subject	exporter-otel	sensor	state	SensorInfo
+subject	exporter-prometheus	alert/{alert_key}	state	Alert
+subject	exporter-prometheus	errors	state	ErrorReport
+subject	exporter-prometheus	evidence/self	state	HostEvidence
+subject	exporter-prometheus	health	state	HealthSnapshot
+subject	exporter-prometheus	sensor	state	SensorInfo
 subject	gnmi	alert/{alert_key}	state	Alert
 subject	gnmi	applied/{topic}	state	AppliedConfig
 subject	gnmi	artifact/{kind}	state	ArtifactStatus
@@ -559,6 +582,11 @@ subject	parallax	{stream}/stats/kbps	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/rc_drops	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/sink_queue	telemetry	TelemetryPoint
 subject	parallax	{stream}/stats/viewers	telemetry	TelemetryPoint
+subject	policy-compiler	alert/{alert_key}	state	Alert
+subject	policy-compiler	errors	state	ErrorReport
+subject	policy-compiler	evidence/self	state	HostEvidence
+subject	policy-compiler	health	state	HealthSnapshot
+subject	policy-compiler	sensor	state	SensorInfo
 subject	probe	alert/{alert_key}	state	Alert
 subject	probe	applied/{topic}	state	AppliedConfig
 subject	probe	errors	state	ErrorReport

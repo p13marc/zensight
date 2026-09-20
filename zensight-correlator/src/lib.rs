@@ -29,5 +29,11 @@ pub mod query;
 pub mod store;
 pub mod subscriber;
 
+/// The producer chunk this process's own framework documents ride under
+/// (#1202): `v1/<origin>/state/correlator/{health,errors,sensor,…}` — the
+/// host-origin identity beside the `@catalog` service origin, whose keys are
+/// the catalog's and not the process's.
+pub const PRODUCER: &str = "correlator";
+
 pub use config::CorrelatorConfig;
 pub use engine::{CorrelatorState, Engine, EntityOp, EvidenceMsg, SharedState};

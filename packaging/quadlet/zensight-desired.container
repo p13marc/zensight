@@ -11,7 +11,8 @@
 # read-only above — which is what you want: this container compiles the policy,
 # it does not author it.
 #
-# No health document yet — see #1202.
+# `run` is a host-origin producer (#1202): `state/policy-compiler/health`
+# carries its self_stats, so the budget below is measurable.
 [Unit]
 Description=ZenSight desired — the fleet policy compiler
 After=network-online.target

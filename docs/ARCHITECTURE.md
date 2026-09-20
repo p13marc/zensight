@@ -90,6 +90,14 @@ two of them (one per site) are ordinary RFC 05 §2.1 fan-in with no claim
 protocol. It publishes no telemetry of its own: a history service that re-emitted
 what it ingested would be a loop with a database in it (RFC 04 §1.1).
 
+Since #1202 the rest of the service tier is a producer the same way: the
+correlator, the policy compiler's `run` daemon and both exporters run through
+`SensorRunner` as the host-origin producers `correlator`, `policy-compiler`,
+`exporter-prometheus` and `exporter-otel`, so every process on the bus has a
+health document, a declared budget and the shed ladder. The `@catalog` and
+`@desired` service origins are unchanged; the process identity sits beside
+them.
+
 A series is named `(origin, producer, subject)` — the wire key minus the class
 chunk — which is derivable from a sample alone, so it survives a catalog merge
 and a correlator outage. The GUI's local store is now a **cache** of the same

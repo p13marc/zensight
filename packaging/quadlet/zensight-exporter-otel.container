@@ -6,7 +6,8 @@
 #
 # A CLIENT: it dials the OTLP collector its config names and binds nothing.
 #
-# No health document yet — see #1202.
+# A host-origin producer too (#1202): `state/exporter-otel/health` carries
+# this process's self_stats, so the budget below is measurable.
 [Unit]
 Description=ZenSight otel exporter
 After=network-online.target

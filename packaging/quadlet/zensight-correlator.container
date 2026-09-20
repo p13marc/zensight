@@ -8,8 +8,9 @@
 # `@catalog/state/entity/*`; a second one on the same bus fights the first for
 # every entity document.
 #
-# No health document yet, so `just fleet-sizing` has no row for this unit and
-# the MemoryMax below cannot be measured the way a sensor's can — see #1202.
+# A host-origin producer too (#1202): `state/correlator/health` carries this
+# process's self_stats, so the budget below is measurable with
+# `just fleet-sizing` like a sensor's.
 [Unit]
 Description=ZenSight correlator
 After=network-online.target
