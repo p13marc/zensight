@@ -2190,7 +2190,8 @@ impl ZenSight {
                         let mut msgs = Vec::with_capacity(records.len());
                         for rec in &records {
                             let point = rec.to_point();
-                            if let Some(log) = zensight_store::StoredLog::from_point(&point) {
+                            if let Some(log) = zensight_store::StoredLog::from_point("logs", &point)
+                            {
                                 self.store.record_log(log);
                             }
                             msgs.push(crate::view::specialized::syslog_message_from_point(
@@ -3239,7 +3240,8 @@ impl ZenSight {
                             let point = rec.to_point();
                             // Persist for search-back (#107): redb keys by uid,
                             // so overlap-window re-fetches are idempotent.
-                            if let Some(log) = zensight_store::StoredLog::from_point(&point) {
+                            if let Some(log) = zensight_store::StoredLog::from_point("logs", &point)
+                            {
                                 self.store.record_log(log);
                             }
                             msgs.push(crate::view::specialized::syslog_message_from_point(
@@ -9632,7 +9634,8 @@ impl ZenSight {
         } = reading;
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
-        self.store.record(&origin, &subject, &point);
+        self.store
+            .record(&origin, point.protocol.as_str(), &subject, &point);
 
         // Keep the bandwidth monitor's Services table live while it is open: a
         // systemd `ip_*_bps` point changes the derived rows (#319). Recomputed at
@@ -9688,7 +9691,9 @@ impl ZenSight {
             // Persist to the cold store (#107, C9) — template-aware sampling
             // decides what survives restart for search-back. Only per-line
             // events carry a uid; rollup/derived points (no uid) are skipped.
-            if let Some(log) = zensight_store::StoredLog::from_point(&point) {
+            if let Some(log) =
+                zensight_store::StoredLog::from_point(point.protocol.as_str(), &point)
+            {
                 self.store.record_log(log);
             }
         }

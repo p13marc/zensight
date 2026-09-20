@@ -40,7 +40,12 @@ fn a_sample_recorded_before_close_is_in_the_file() {
     let written = {
         let db = PersistentStore::open(&path).expect("open");
         let mut store = MetricStore::new(3_600, Some(db));
-        store.record(ORIGIN, "cpu/usage", &point(42.0, 1_700_000_000_000));
+        store.record(
+            ORIGIN,
+            "sysinfo",
+            "cpu/usage",
+            &point(42.0, 1_700_000_000_000),
+        );
         assert!(
             store.has_pending(),
             "the sample is buffered, not yet on disk — which is the whole problem"
@@ -79,7 +84,12 @@ fn closing_with_nothing_pending_writes_nothing_and_says_so() {
 #[test]
 fn closing_without_a_persistent_store_is_a_no_op() {
     let mut store = MetricStore::new(3_600, None);
-    store.record(ORIGIN, "cpu/usage", &point(42.0, 1_700_000_000_000));
+    store.record(
+        ORIGIN,
+        "sysinfo",
+        "cpu/usage",
+        &point(42.0, 1_700_000_000_000),
+    );
     assert_eq!(
         zensight::app::exit_flush(&mut store, BUDGET),
         0,

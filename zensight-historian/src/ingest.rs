@@ -197,7 +197,7 @@ pub fn record_point(
         return;
     }
 
-    let Some((origin, subject)) = series_of(key) else {
+    let Some((origin, producer, subject)) = series_of(key) else {
         // The class guard passed, so this is a v1 telemetry key whose origin
         // or subject we could not name — structurally impossible today, and
         // worth a counter rather than a panic if the grammar ever widens.
@@ -209,7 +209,7 @@ pub fn record_point(
     // in-memory structure with no invariant a panic can half-break, so
     // recovering beats losing every subsequent sample.
     let mut s = store.lock().unwrap_or_else(|e| e.into_inner());
-    match s.record(&origin, &subject, point) {
+    match s.record(&origin, &producer, &subject, point) {
         zensight_store::Pushed::Appended => {}
         zensight_store::Pushed::Reordered => {
             counters.reordered.fetch_add(1, Ordering::Relaxed);
@@ -244,18 +244,21 @@ pub struct BatchTrigger {
     pub notify: Arc<tokio::sync::Notify>,
 }
 
-/// `(origin, subject)` for a telemetry key, from the key alone.
+/// `(origin, producer, subject)` for a telemetry key, from the key alone.
 ///
-/// The producer is not returned: it is `point.protocol`, which the store takes
-/// from the payload, and the two agree by construction — the producer chunk is
-/// what the sensor's own `V1Context` built the key from.
-fn series_of(key: &str) -> Option<(String, String)> {
+/// The producer is the key's chunk 4 with its instance suffix stripped
+/// (`keyexpr::producer_name`) — since #1255 the payload does not repeat it.
+/// This used to return only `(origin, subject)` and let the store read the
+/// producer off `point.protocol`; the two agreed by construction, and now
+/// there is only one.
+fn series_of(key: &str) -> Option<(String, String, String)> {
     let parsed = zensight_common::keyexpr::parse_key(key)?;
     let origin = parsed.origin.chunk().to_string();
     if parsed.subject.is_empty() {
         return None;
     }
-    Some((origin, parsed.subject.join("/")))
+    let producer = zensight_common::keyexpr::producer_name(key)?;
+    Some((origin, producer, parsed.subject.join("/")))
 }
 
 /// Flush pending samples to disk on an interval — or early, when ingest says
@@ -633,7 +636,22 @@ mod tests {
     fn a_non_telemetry_key_is_refused_by_the_name_parse() {
         assert_eq!(
             series_of("v1/h-0123456789ab/telemetry/sysinfo/system/load"),
-            Some(("h-0123456789ab".to_string(), "system/load".to_string()))
+            Some((
+                "h-0123456789ab".to_string(),
+                "sysinfo".to_string(),
+                "system/load".to_string()
+            ))
+        );
+        // The producer comes from the key and drops the instance suffix
+        // (#1255) — exactly what `point.protocol.to_string()` gave, so the
+        // series path an existing historian file holds does not move.
+        assert_eq!(
+            series_of("v1/h-0123456789ab/telemetry/netring-2/flows/total"),
+            Some((
+                "h-0123456789ab".to_string(),
+                "netring".to_string(),
+                "flows/total".to_string()
+            ))
         );
         assert_eq!(series_of("not a key at all"), None);
         // A telemetry key with no subject names no series.

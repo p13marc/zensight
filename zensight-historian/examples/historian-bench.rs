@@ -105,7 +105,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 labels: Default::default(),
                 unit: Some("By".into()),
             };
-            store.record(&origin, &subject, &point);
+            store.record(&origin, "sysinfo", &subject, &point);
         }
         // Flush per simulated minute, as the historian's timer would.
         if let Some((handle, batch)) = store.take_flush_batch() {
