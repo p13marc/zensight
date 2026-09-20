@@ -55,6 +55,19 @@
     <keyword>modbus</keyword>
   </keywords>
   <releases>
+    <release version="0.14.0" date="2026-09-20">
+      <description>
+        <p>Four milestones of work in one release: the GUI reads the bus it
+        watches (BMC, PVE, container and probe views), the log search can say
+        when it was truncated, sensors slug foreign names reversibly so two
+        mounts can no longer share a key, and nine systemd units pick up the
+        full sandbox. Thirteen breaking changes — several move exported series
+        names, so read the CHANGELOG's "Changed — BREAKING" section before
+        upgrading dashboards.</p>
+        <p>See the CHANGELOG in the repository for the full list, including
+        breaking changes and migration notes.</p>
+      </description>
+    </release>
     <release version="0.13.0" date="2026-08-31">
       <description>
         <p>The fleet release: three new sensors for what this infrastructure
