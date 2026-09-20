@@ -13,6 +13,14 @@ use crate::config::ContainerAlertsConfig;
 pub const RULE_UNHEALTHY: &str = "container-unhealthy";
 pub const RULE_HEALTH_NEVER_RAN: &str = "container-healthcheck-never-ran";
 pub const RULE_RESTART_LOOP: &str = "container-restart-loop";
+/// **Not** an edge rule in the reporter's sense (#1154), deliberately. Its
+/// input is the *counter baseline* the poller holds still for
+/// `alerts.oom_hold_secs` (`next_oom_baseline`): the delta stays `> 0` for
+/// the hold, so the rule is a **level** the reporter's `for_secs` debounce can
+/// satisfy, and the summary counts the whole burst. `with_edge_rules` would
+/// fire on the first tick instead of after `for_secs`, report per-sweep
+/// deltas, and orphan a shipped config key — a different knob with different
+/// timing, so this one stays where it is.
 pub const RULE_OOM: &str = "container-oom-killed";
 pub const RULE_EXITED: &str = "container-exited-nonzero";
 pub const RULE_IMAGE_BEHIND: &str = "container-image-behind-upstream";

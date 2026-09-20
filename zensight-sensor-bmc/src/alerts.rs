@@ -56,6 +56,23 @@ pub const ALL_RULES: &[&str] = &[
     RULE_REDUNDANCY_LOST,
 ];
 
+/// The rules scoped to one **chassis** — [`ALL_RULES`] minus
+/// [`RULE_UNREACHABLE`], which lives in the *endpoint's* namespace: reconciling
+/// it once per chassis, against a list no chassis pass ever puts it in, would
+/// resolve it the moment any chassis answered. The poller sweeps this table
+/// per chassis and the unreachable rule per endpoint (#1154).
+pub const CHASSIS_RULES: &[&str] = &[
+    RULE_PSU_FAILED,
+    RULE_PSU_ABSENT,
+    RULE_PSU_REDUNDANCY,
+    RULE_FAN_FAILED,
+    RULE_THERMAL_CRITICAL,
+    RULE_CHASSIS_HEALTH,
+    RULE_DRIVE_FAILED,
+    RULE_MEMORY_FAILED,
+    RULE_REDUNDANCY_LOST,
+];
+
 /// One chassis's sweep, as the rules see it.
 pub struct Observation<'a> {
     /// The **reporting host** — the `source` of every series and alert this
@@ -165,8 +182,10 @@ pub fn grade(cfg: &AlertsConfig, obs: &Observation<'_>) -> Vec<Alert> {
     // A BMC that did not answer produced no components this cycle. Grading the
     // component rules now would resolve every one of them as "recovered" —
     // announcing that a failed power supply is fine because we cannot see it.
-    // The rules keep their previous state until the BMC answers again. (The
-    // lesson SNMP's `device_answered` guard already paid for.)
+    // The rules keep their previous state until the BMC answers again: the
+    // poller sweeps only `RULE_UNREACHABLE` for a silent endpoint and never
+    // reaches the chassis table, which is `Answered::No` spelled as "do not
+    // sweep" — there is no chassis scope to name when the BMC returned none.
     if obs.chassis.is_none() {
         return out;
     }
@@ -903,5 +922,20 @@ mod tests {
         }
         // Everything except `bmc-unreachable`, which needs the opposite input.
         assert_eq!(fired.len(), ALL_RULES.len() - 1, "fired: {fired:?}");
+    }
+
+    /// `CHASSIS_RULES` is `ALL_RULES` minus the endpoint-scoped rule, exactly
+    /// (#1154): a rule added to one table and not the other would either be
+    /// swept per chassis against a list it is never in (resolving it the moment
+    /// any chassis answered) or never swept at all.
+    #[test]
+    fn the_chassis_table_is_all_rules_minus_unreachable() {
+        let mut chassis: Vec<&str> = CHASSIS_RULES.to_vec();
+        chassis.push(RULE_UNREACHABLE);
+        chassis.sort_unstable();
+        let mut all: Vec<&str> = ALL_RULES.to_vec();
+        all.sort_unstable();
+        assert_eq!(chassis, all);
+        assert!(!CHASSIS_RULES.contains(&RULE_UNREACHABLE));
     }
 }

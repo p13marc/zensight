@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use zensight_common::v1::V1ContextExt;
 use zensight_common::{Alert, AlertKind, AlertSeverity, AlertState, Format, Protocol, decode_auto};
-use zensight_sensor_core::{AlertReporter, Publisher};
+use zensight_sensor_core::{AlertReporter, Answered, Publisher, SweepOpts};
 
 /// A standalone Zenoh config: scouting disabled so concurrent test peers don't
 /// discover each other and cross-contaminate the shared alert state space.
@@ -1048,4 +1048,123 @@ async fn the_seed_serves_exactly_what_is_on_the_bus() {
         served[0].summary, first.summary,
         "the seed offered a summary that was never put on the bus"
     );
+}
+
+/// `sweep` with a scope resolves only that scope's alerts — the whole
+/// `grade → observe → reconcile_labeled` block of a proxy poller in one call
+/// (#1154).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_scoped_by_label_resolves_only_that_scope() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+    let alert_a = sample_alert(&source).with_label("device", "dev-a");
+    let alert_b = sample_alert(&source).with_label("device", "dev-b");
+    let rules = ["ssh-listening"];
+
+    for (alert, dev) in [(alert_a.clone(), "dev-a"), (alert_b, "dev-b")] {
+        reporter
+            .sweep(
+                &rules,
+                vec![alert],
+                SweepOpts {
+                    scope: Some(("device", dev)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("sweep");
+    }
+    assert_eq!(reporter.active_count(), 2);
+
+    // dev-b's clean sweep: only dev-b's alert resolves.
+    reporter
+        .sweep(
+            &rules,
+            vec![],
+            SweepOpts {
+                scope: Some(("device", "dev-b")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("sweep b clear");
+    let firing = reporter.firing_alerts();
+    assert_eq!(firing.len(), 1);
+    assert_eq!(firing[0].labels["device"], "dev-a");
+
+    // dev-a still firing keeps it; then clears.
+    reporter
+        .sweep(
+            &rules,
+            vec![alert_a],
+            SweepOpts {
+                scope: Some(("device", "dev-a")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("sweep a keep");
+    assert_eq!(reporter.active_count(), 1);
+    reporter
+        .sweep(
+            &rules,
+            vec![],
+            SweepOpts {
+                scope: Some(("device", "dev-a")),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("sweep a clear");
+    assert_eq!(reporter.active_count(), 0);
+}
+
+/// A target that did not answer this sweep resolves nothing: `Answered::No`
+/// is the hold three sensors each spelled their own way (#1154).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn sweep_with_answered_no_keeps_the_firing_set() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let publisher = Publisher::new(session.clone(), "netlink", Format::Json);
+    let reporter = AlertReporter::new(publisher, Protocol::Netlink, Format::Json);
+
+    let source = unique_source();
+    let alert = sample_alert(&source).with_label("device", "dev-a");
+    let rules = ["ssh-listening"];
+    let scope = SweepOpts {
+        scope: Some(("device", "dev-a")),
+        ..Default::default()
+    };
+    reporter
+        .sweep(&rules, vec![alert.clone()], scope)
+        .await
+        .expect("sweep fire");
+    assert_eq!(reporter.active_count(), 1);
+
+    // Silence: an empty grading, but the device did not answer.
+    reporter
+        .sweep(
+            &rules,
+            vec![],
+            SweepOpts {
+                answered: Answered::No,
+                ..scope
+            },
+        )
+        .await
+        .expect("sweep silent");
+    assert_eq!(
+        reporter.active_count(),
+        1,
+        "silence is not recovery: the alert must still be firing"
+    );
+
+    // The device answers and the condition is gone: now it resolves.
+    reporter
+        .sweep(&rules, vec![], scope)
+        .await
+        .expect("sweep clear");
+    assert_eq!(reporter.active_count(), 0);
 }

@@ -7,13 +7,18 @@
 //! `<base>/v1/<origin>/state/<producer>/alert/<alert_key>` (a `Put` to raise/update, a `Put`
 //! with state `Resolved` followed by a `Delete` tombstone to clear).
 //!
-//! Usage from an evaluator sweep:
+//! Usage from an evaluator sweep (#1154):
 //! ```ignore
-//! // Each violation this tick:
-//! reporter.observe(alert, exp.for_duration()).await?;
-//! // After evaluating a rule, resolve anything that's no longer violated:
-//! reporter.reconcile(rule, &still_firing_keys).await?;
+//! // Grade, then hand the reporter the whole pass: it observes every alert
+//! // and reconciles every rule in `ALL_RULES`, so a rule that fired nothing
+//! // still resolves and a graded rule outside the table is refused, not
+//! // stranded.
+//! let firing = alerts::grade(&cfg, &observation);
+//! reporter.sweep(alerts::ALL_RULES, firing, SweepOpts::default()).await?;
 //! ```
+//! The lower-level pair — `observe(alert, for_duration)` per violation, then
+//! `reconcile(rule, &still_firing_keys)` per rule — is what `sweep` is made
+//! of, and stays for the event-driven callers (sentinels, traps).
 //!
 //! # Alerts outlive the process; the firing set must too (#882)
 //!
@@ -89,6 +94,12 @@ struct ActiveAlert {
     /// re-fire restores, because an alert that flickers clear and back was
     /// never really clear.
     clear_since: Option<Instant>,
+    /// The hold this entry resolves after, when its rule is **edge**-triggered
+    /// (#1154): set once at insert from [`AlertReporter::hysteresis`], so the
+    /// hold travels with the entry and no reconcile call has to remember to
+    /// pass it. `None` — a level rule — defers to the reconcile's recovery
+    /// window.
+    hold: Option<Duration>,
 }
 
 /// Whether two payloads differ in anything a consumer renders — everything
@@ -152,6 +163,9 @@ pub struct AlertReporter {
     /// Minimum gap between content refreshes of one firing alert (#1081).
     /// `ZERO` means no limit — every content change republishes.
     content_refresh: Duration,
+    /// The rules whose `for:` is a hold, not a debounce (#1154). See
+    /// [`AlertReporter::with_edge_rules`].
+    edge_rules: Vec<String>,
     active: Mutex<HashMap<String, ActiveAlert>>,
 }
 
@@ -232,6 +246,65 @@ impl Hysteresis {
     }
 }
 
+/// Did the thing being graded answer this sweep? (#1154)
+///
+/// Silence is not recovery. A proxy sensor whose target did not answer has
+/// **no evidence** about the conditions it graded last time — an SNMP device
+/// that timed out, a BMC that returned no chassis, a Proxmox node on the far
+/// side of a partition — and a sweep that reconciles against an empty grading
+/// would announce every one of its alerts as recovered. Three sensors had each
+/// spelled this hold their own way (`device_answered`, `chassis.is_none()`,
+/// `guest_is_observable`); this is the one spelling, and it is a **value**
+/// the poller passes rather than a `continue` it has to remember.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Answered {
+    /// The target answered: absence from the grading *is* evidence of absence.
+    #[default]
+    Yes,
+    /// The target did not answer: observe what was graded (an `unreachable`
+    /// rule must keep firing), resolve nothing.
+    No,
+}
+
+impl From<bool> for Answered {
+    fn from(answered: bool) -> Self {
+        if answered {
+            Answered::Yes
+        } else {
+            Answered::No
+        }
+    }
+}
+
+/// Per-sweep options for [`AlertReporter::sweep`] (#1154). `Default` is the
+/// flat, answered, reporter-debounce case every host sensor wants.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SweepOpts<'a> {
+    /// `Some((label_key, label_value))` scopes the reconcile to alerts carrying
+    /// that label — the proxy case, where several observed devices share one
+    /// reporter and each device's sweep must not resolve the others' alerts
+    /// (snmp `device`, bmc `chassis`, pve `node`).
+    pub scope: Option<(&'a str, &'a str)>,
+    /// Whether the graded target answered — see [`Answered`].
+    pub answered: Answered,
+    /// The `for:` window for this sweep's observations; `None` is the
+    /// reporter's `with_debounce` default. Edge rules ignore it as a debounce
+    /// and spend it as a hold, whichever way it arrives.
+    pub for_duration: Option<Duration>,
+}
+
+/// What one grading pass owes the bus, decided before anything is awaited.
+struct Plan<'a> {
+    /// Every graded alert whose rule the sweep owns, in grading order.
+    observe: Vec<Alert>,
+    /// Per owned rule, the keys still firing — every rule present, so a rule
+    /// that fired nothing reconciles to empty and resolves.
+    still: HashMap<&'a str, Vec<String>>,
+    /// Graded under a rule the sweep does **not** own. Not observed: an alert
+    /// nobody will ever reconcile is a `Firing` only a restart can retire.
+    refused: Vec<Alert>,
+}
+
 impl AlertReporter {
     /// Create a reporter. `publisher`'s v1 context keys the alert state
     /// (`state/<producer>/alert/<key>`); the telemetry prefix is ignored for
@@ -246,7 +319,39 @@ impl AlertReporter {
             known_rules: Vec::new(),
             recovery: Duration::ZERO,
             content_refresh: DEFAULT_CONTENT_REFRESH,
+            edge_rules: Vec::new(),
             active: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Declare the rules whose condition is a **per-tick delta** (#1084,
+    /// #1154): `oom_kill_delta > 0`, `media_errors_delta > 0`. For those,
+    /// `observe` and `sweep` spend the `for:` window as a *hold* rather than a
+    /// debounce — see [`Hysteresis`] — automatically, from the rule's name.
+    /// Before this the pairing was made by hand at one call site per sensor,
+    /// which is how `for_secs: 60` turned OOM alerting off.
+    pub fn with_edge_rules<S: Into<String>>(mut self, rules: impl IntoIterator<Item = S>) -> Self {
+        self.edge_rules = rules.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// How `rule` spends `for_duration` (or, when `None`, the reporter's
+    /// debounce): a hold when the rule was declared edge-triggered with
+    /// [`Self::with_edge_rules`], a debounce otherwise. `observe` calls this;
+    /// it is public so a producer can ask the same question.
+    pub fn hysteresis(&self, rule: &str, for_duration: Option<Duration>) -> Hysteresis {
+        Self::hysteresis_for(
+            &self.edge_rules,
+            rule,
+            for_duration.unwrap_or(self.debounce),
+        )
+    }
+
+    fn hysteresis_for(edge_rules: &[String], rule: &str, d: Duration) -> Hysteresis {
+        if edge_rules.iter().any(|r| r == rule) {
+            Hysteresis::Edge(d)
+        } else {
+            Hysteresis::Level(d)
         }
     }
 
@@ -363,12 +468,19 @@ impl AlertReporter {
             alert.labels.insert("host.id".to_string(), host_id);
         }
         let key = alert.alert_key();
-        let dur = for_duration.unwrap_or(self.debounce);
+        // One decision, both halves (#1084): an edge rule publishes on its only
+        // observation and carries its hold on the entry.
+        let hys = self.hysteresis(&alert.rule, for_duration);
+        let dur = hys.for_duration().unwrap_or(self.debounce);
+        let hold = match hys {
+            Hysteresis::Edge(h) => Some(h),
+            Hysteresis::Level(_) => None,
+        };
         let action = {
             let mut active = self.active.lock().unwrap();
             let now = Instant::now();
             let now_ms = zensight_common::current_timestamp_millis();
-            let entry = active.entry(key.clone()).or_insert_with(|| ActiveAlert {
+            let entry = active.entry(key).or_insert_with(|| ActiveAlert {
                 rule: alert.rule.clone(),
                 severity: alert.severity,
                 first_seen: now,
@@ -376,10 +488,124 @@ impl AlertReporter {
                 published: false,
                 last_published: now,
                 clear_since: None,
+                hold,
             });
             Self::decide(entry, alert, now, now_ms, dur, self.content_refresh)
         };
-        self.apply(&key, action).await
+        self.apply(action).await
+    }
+
+    /// One grading pass, whole (#1154): observe every alert in `graded`, then
+    /// reconcile every rule in `rules` — flat, or within `opts.scope` — so a
+    /// rule that fired nothing resolves and nothing is left for a restart to
+    /// retire. This is the `grade → by_rule → observe → reconcile` block four
+    /// pollers each carried, with the bug two of them had closed: a graded
+    /// alert whose rule is not in `rules` used to fall into a `""` bucket,
+    /// get published, and never be reconciled. Here it is **refused** —
+    /// logged, `debug_assert!`ed, not observed — because a `Firing` nobody
+    /// will retire is worse than a missing one.
+    ///
+    /// With [`Answered::No`] the observations still happen (an `unreachable`
+    /// rule must keep firing, escalating and refreshing) but **no resolve is
+    /// published and no recovery clock starts** for `(rules, scope)`: silence
+    /// is not "clear". Only *unpublished* entries under that scope that were
+    /// not graded again are forgotten — a debounce is "observed continuously
+    /// for N", and the silence broke continuity.
+    ///
+    /// Finishes the whole pass before returning the first error: an observe
+    /// that failed must never skip a resolve.
+    pub async fn sweep(
+        &self,
+        rules: &[&str],
+        graded: Vec<Alert>,
+        opts: SweepOpts<'_>,
+    ) -> Result<()> {
+        let Plan {
+            observe,
+            still,
+            refused,
+        } = Self::plan(rules, graded);
+        for a in &refused {
+            tracing::warn!(
+                rule = %a.rule,
+                key = %a.alert_key(),
+                "alert graded under a rule this sweep does not own — refused, not published"
+            );
+        }
+        debug_assert!(
+            refused.is_empty(),
+            "graded rules outside the sweep's table: {:?}",
+            refused.iter().map(|a| a.rule.as_str()).collect::<Vec<_>>()
+        );
+
+        let mut first_err = None;
+        for a in observe {
+            if let Err(e) = self.observe(a, opts.for_duration).await {
+                first_err.get_or_insert(e);
+            }
+        }
+
+        match opts.answered {
+            Answered::Yes => {
+                for rule in rules {
+                    let keys = still.get(rule).map(Vec::as_slice).unwrap_or(&[]);
+                    let result = match opts.scope {
+                        None => self.reconcile(rule, keys).await,
+                        Some((k, v)) => self.reconcile_labeled(rule, k, v, keys).await,
+                    };
+                    if let Err(e) = result {
+                        first_err.get_or_insert(e);
+                    }
+                }
+            }
+            Answered::No => {
+                let mut active = self.active.lock().unwrap();
+                Self::forget_unpublished(&mut active, |k, a| {
+                    rules.contains(&a.rule.as_str())
+                        && opts.scope.is_none_or(|(lk, lv)| {
+                            a.last.labels.get(lk).map(String::as_str) == Some(lv)
+                        })
+                        && !still
+                            .get(a.rule.as_str())
+                            .is_some_and(|v| v.iter().any(|s| s == k))
+                });
+            }
+        }
+
+        first_err.map_or(Ok(()), Err)
+    }
+
+    /// The synchronous half of [`Self::sweep`]: which alerts to observe, what
+    /// each owned rule still has firing, and what was graded outside the table.
+    fn plan<'r>(rules: &[&'r str], graded: Vec<Alert>) -> Plan<'r> {
+        let mut still: HashMap<&'r str, Vec<String>> =
+            rules.iter().map(|r| (*r, Vec::new())).collect();
+        let mut observe = Vec::with_capacity(graded.len());
+        let mut refused = Vec::new();
+        for a in graded {
+            match rules.iter().find(|r| **r == a.rule) {
+                Some(rule) => {
+                    still.entry(rule).or_default().push(a.alert_key());
+                    observe.push(a);
+                }
+                None => refused.push(a),
+            }
+        }
+        Plan {
+            observe,
+            still,
+            refused,
+        }
+    }
+
+    /// Drop the **unpublished** entries `select` picks — the [`Answered::No`]
+    /// half of a sweep. A published entry is left exactly as it is: no resolve,
+    /// no `clear_since`, because nothing was learned about it.
+    fn forget_unpublished(
+        active: &mut HashMap<String, ActiveAlert>,
+        select: impl Fn(&str, &ActiveAlert) -> bool,
+    ) {
+        active.retain(|k, a| a.published || !select(k, a));
     }
 
     /// The synchronous decision for one observation: pure over the entry and
@@ -483,8 +709,7 @@ impl AlertReporter {
                 a.rule == rule && !still_firing.iter().any(|s| s == k)
             })
         };
-        // `apply` keys off the alert itself for Resolve; key arg unused there.
-        self.apply("", action).await
+        self.apply(action).await
     }
 
     /// Drop every entry `no_longer_violated` selects. A **published** entry
@@ -508,7 +733,8 @@ impl AlertReporter {
     ///
     /// With `recovery == ZERO`, the default and what every caller had before
     /// this existed, the marking step is skipped and the behaviour is exactly
-    /// what it was.
+    /// what it was. An entry whose rule is edge-triggered carries its own
+    /// `hold` (#1154), which replaces `recovery` for that entry alone.
     fn retire(
         active: &mut HashMap<String, ActiveAlert>,
         now: Instant,
@@ -531,7 +757,12 @@ impl AlertReporter {
                 active.remove(&k);
                 continue;
             }
-            if recovery.is_zero() {
+            // An edge entry carries its own hold (#1154), and it outranks the
+            // call's window — even an `immediate()` override: the override
+            // says how fast a *cleared* condition may resolve, and an edge
+            // condition never "clears", it was true for one tick.
+            let window = entry.hold.unwrap_or(recovery);
+            if window.is_zero() {
                 if let Some(a) = active.remove(&k) {
                     payloads.push(a.last.resolved());
                 }
@@ -542,7 +773,7 @@ impl AlertReporter {
                 // alert stays Firing on the bus, and truthfully so — the
                 // condition has been gone for one sweep, not for the window.
                 None => entry.clear_since = Some(now),
-                Some(since) if now.duration_since(since) >= recovery => {
+                Some(since) if now.duration_since(since) >= window => {
                     if let Some(a) = active.remove(&k) {
                         payloads.push(a.last.resolved());
                     }
@@ -599,7 +830,7 @@ impl AlertReporter {
                     && !still_firing.iter().any(|s| s == k)
             })
         };
-        self.apply("", action).await
+        self.apply(action).await
     }
 
     /// Resolve every published alert under `rule` whose labels contain ALL
@@ -654,7 +885,7 @@ impl AlertReporter {
                 Action::Resolve(payloads)
             }
         };
-        self.apply("", action).await?;
+        self.apply(action).await?;
         Ok(resolved)
     }
 
@@ -762,6 +993,7 @@ impl AlertReporter {
                         last_published: now,
                         // Adopted because it is firing NOW, per the seed.
                         clear_since: None,
+                        hold: None,
                     },
                 );
                 adopted += 1;
@@ -867,7 +1099,7 @@ impl AlertReporter {
         &self.publisher
     }
 
-    async fn apply(&self, _key: &str, action: Action) -> Result<()> {
+    async fn apply(&self, action: Action) -> Result<()> {
         match action {
             Action::None => Ok(()),
             Action::PublishFiring(alert) => self.publish_state(&alert).await,
@@ -983,6 +1215,7 @@ mod recovery_tests {
                 published: true,
                 last_published: now,
                 clear_since: None,
+                hold: None,
             },
         )
     }
@@ -1146,6 +1379,7 @@ mod recovery_tests {
                         published: true,
                         last_published: t0,
                         clear_since: None,
+                        hold: None,
                     },
                 )
             })
@@ -1216,6 +1450,7 @@ mod refresh_tests {
             published: false,
             last_published: t0,
             clear_since: None,
+            hold: None,
         };
         let action = AlertReporter::decide(
             &mut entry,
@@ -1469,6 +1704,7 @@ mod refresh_tests {
             published: false,
             last_published: t0,
             clear_since: None,
+            hold: None,
         };
         let held = AlertReporter::decide(
             &mut entry,
@@ -1596,5 +1832,180 @@ mod hysteresis_tests {
             Some(Duration::ZERO),
             "an explicit immediate resolve, which is what ZERO recovery means"
         );
+    }
+}
+
+/// The whole-pass sweep (#1154), tested against its synchronous halves with an
+/// injected clock — the same reason `recovery_tests` tests `retire` that way.
+#[cfg(test)]
+mod sweep_tests {
+    use super::*;
+    use zensight_common::{AlertKind, AlertSeverity, Protocol};
+
+    fn alert(rule: &str) -> Alert {
+        Alert::new(
+            "host1",
+            Protocol::Sysinfo,
+            AlertKind::Expectation,
+            rule,
+            AlertSeverity::Warning,
+            "over".to_string(),
+        )
+    }
+
+    fn entry(
+        now: Instant,
+        rule: &str,
+        published: bool,
+        hold: Option<Duration>,
+    ) -> (String, ActiveAlert) {
+        let a = alert(rule);
+        (
+            a.alert_key(),
+            ActiveAlert {
+                rule: rule.to_string(),
+                severity: a.severity,
+                first_seen: now,
+                last: a,
+                published,
+                last_published: now,
+                clear_since: None,
+                hold,
+            },
+        )
+    }
+
+    fn resolved_count(action: &Action) -> usize {
+        match action {
+            Action::Resolve(v) => v.len(),
+            _ => 0,
+        }
+    }
+
+    /// The bug the consolidation closes: two pollers bucketed a graded rule
+    /// that was not in their table under `""`/`"?"`, published it, and never
+    /// reconciled it — a `Firing` only a restart could retire. The plan
+    /// refuses it instead: not observed, reported.
+    #[test]
+    fn a_graded_rule_outside_the_table_is_refused_not_stranded() {
+        let plan = AlertReporter::plan(&["a"], vec![alert("a"), alert("zzz")]);
+        assert_eq!(plan.observe.len(), 1);
+        assert_eq!(plan.observe[0].rule, "a");
+        assert_eq!(plan.refused.len(), 1);
+        assert_eq!(plan.refused[0].rule, "zzz");
+        assert!(
+            !plan.still.contains_key("zzz"),
+            "a refused rule is not reconciled either — it was never published"
+        );
+    }
+
+    /// Every rule in the table reconciles, including the ones that fired
+    /// nothing: that is what makes a cleared condition resolve.
+    #[test]
+    fn every_rule_in_the_table_reconciles_even_when_nothing_graded() {
+        let plan = AlertReporter::plan(&["a", "b", "c"], vec![alert("b")]);
+        let mut rules: Vec<&str> = plan.still.keys().copied().collect();
+        rules.sort_unstable();
+        assert_eq!(rules, ["a", "b", "c"]);
+        assert!(plan.still["a"].is_empty());
+        assert_eq!(plan.still["b"], vec![alert("b").alert_key()]);
+        assert!(plan.still["c"].is_empty());
+    }
+
+    /// An edge entry carries its own hold, and `retire` spends *that*, not the
+    /// call's window — so no reconcile has to remember which rules are edge.
+    #[test]
+    fn an_edge_entry_is_held_for_its_own_hold_not_the_call_window() {
+        let t0 = Instant::now();
+        let mut active = HashMap::from([entry(t0, "oom", true, Some(Duration::from_secs(60)))]);
+        // The reporter default is ZERO — every sysinfo caller's case.
+        let first = AlertReporter::retire(&mut active, t0, Duration::ZERO, |_, _| true);
+        assert_eq!(resolved_count(&first), 0, "the hold is not yet spent");
+        assert_eq!(active.len(), 1);
+        let later = AlertReporter::retire(
+            &mut active,
+            t0 + Duration::from_secs(60),
+            Duration::ZERO,
+            |_, _| true,
+        );
+        assert_eq!(resolved_count(&later), 1);
+        assert!(active.is_empty());
+    }
+
+    /// `ReconcileOpts::immediate()` is `recovery = ZERO`, and the hold
+    /// outranks it: the override says how fast a *cleared* condition may
+    /// resolve, and an edge condition never clears — it was true for one tick.
+    #[test]
+    fn an_edge_hold_outranks_an_immediate_override() {
+        let t0 = Instant::now();
+        let mut active = HashMap::from([entry(t0, "oom", true, Some(Duration::from_secs(60)))]);
+        let recovery = ReconcileOpts::immediate().recover_after.unwrap();
+        assert!(recovery.is_zero());
+        let action = AlertReporter::retire(&mut active, t0, recovery, |_, _| true);
+        assert_eq!(resolved_count(&action), 0);
+        assert!(
+            active.values().all(|a| a.clear_since.is_some()),
+            "held, clock started"
+        );
+    }
+
+    /// A level entry (`hold: None`) is byte-for-byte what it was: the call's
+    /// window decides.
+    #[test]
+    fn a_level_entry_still_spends_the_call_window() {
+        let t0 = Instant::now();
+        let mut active = HashMap::from([entry(t0, "rss", true, None)]);
+        let action = AlertReporter::retire(&mut active, t0, Duration::ZERO, |_, _| true);
+        assert_eq!(resolved_count(&action), 1);
+    }
+
+    /// The classification is by name, declared once on the reporter.
+    #[test]
+    fn hysteresis_picks_edge_for_a_declared_rule() {
+        let edge = vec!["oom".to_string()];
+        let d = Duration::from_secs(60);
+        assert_eq!(
+            AlertReporter::hysteresis_for(&edge, "oom", d),
+            Hysteresis::Edge(d)
+        );
+        assert_eq!(
+            AlertReporter::hysteresis_for(&edge, "rss", d),
+            Hysteresis::Level(d)
+        );
+        assert_eq!(
+            AlertReporter::hysteresis_for(&[], "oom", d),
+            Hysteresis::Level(d),
+            "an undeclared rule is a level rule — the behaviour every caller had"
+        );
+    }
+
+    /// `Answered::No`: nothing published is touched — no resolve, no recovery
+    /// clock — and only the unpublished entries in scope are forgotten.
+    #[test]
+    fn answered_no_forgets_unpublished_and_keeps_published() {
+        let t0 = Instant::now();
+        let (pk, published) = entry(t0, "if-down", true, None);
+        let (uk, unpublished) = entry(t0, "if-flap", false, None);
+        let mut active = HashMap::from([(pk.clone(), published), (uk.clone(), unpublished)]);
+        AlertReporter::forget_unpublished(&mut active, |_, _| true);
+        assert!(
+            active.contains_key(&pk),
+            "a published alert is kept as it was"
+        );
+        assert!(
+            active[&pk].clear_since.is_none(),
+            "…with no recovery clock started"
+        );
+        assert!(
+            !active.contains_key(&uk),
+            "an unpublished debounce is forgotten"
+        );
+    }
+
+    #[test]
+    fn answered_is_a_bool_at_the_call_site() {
+        assert_eq!(Answered::from(true), Answered::Yes);
+        assert_eq!(Answered::from(false), Answered::No);
+        assert_eq!(Answered::default(), Answered::Yes);
     }
 }

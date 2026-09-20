@@ -110,8 +110,11 @@ async fn main() -> Result<()> {
         use std::sync::Arc;
         use std::time::Duration;
         use zensight_sensor_core::AlertReporter;
+        // One `for_secs`, two ways to spend it (#1084): a debounce for a level
+        // rule, a hold for the delta rules declared here (#1154).
         let mut reporter = AlertReporter::new(runner.publisher(), Protocol::Sysinfo, Format::Json)
-            .with_debounce(Duration::from_secs(sysinfo_config.alerts.for_secs));
+            .with_debounce(Duration::from_secs(sysinfo_config.alerts.for_secs))
+            .with_edge_rules(zensight_sensor_sysinfo::alerts::EDGE_RULES.iter().copied());
         if let Some(id) = runner.identity() {
             reporter = reporter.with_identity(id);
         }

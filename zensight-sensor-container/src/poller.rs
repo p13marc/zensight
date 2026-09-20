@@ -13,7 +13,9 @@ use std::time::{Duration, Instant};
 use zensight_common::container::{ContainerInfo, HealthState, SignatureState};
 use zensight_common::relation::{EndpointClaim, RelationKind, RelationshipEvidence};
 use zensight_common::{HostEvidence, QosClass, TelemetryValue};
-use zensight_sensor_core::{AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth};
+use zensight_sensor_core::{
+    AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth, SweepOpts,
+};
 
 use crate::alerts::{self, Observation};
 use crate::config::ContainerConfig;
@@ -413,23 +415,11 @@ impl Poller {
                     baseline_age_secs: age,
                 },
             );
-            let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
-            for a in &firing {
-                by_rule
-                    .entry(a.rule.clone())
-                    .or_default()
-                    .push(a.alert_key());
-            }
-            for a in firing {
-                if let Err(e) = reporter.observe(a, None).await {
-                    tracing::warn!(error = %e, "container: alert publish failed");
-                }
-            }
-            for rule in alerts::ALL_RULES {
-                let still = by_rule.remove(*rule).unwrap_or_default();
-                if let Err(e) = reporter.reconcile(rule, &still).await {
-                    tracing::warn!(rule = %rule, error = %e, "container: reconcile failed");
-                }
+            if let Err(e) = reporter
+                .sweep(alerts::ALL_RULES, firing, SweepOpts::default())
+                .await
+            {
+                tracing::warn!(error = %e, "container: alert sweep failed");
             }
         }
 

@@ -438,17 +438,41 @@ async fn the_hypervisor_contract_end_to_end() {
     assert_eq!(sweep.guests.len(), 3, "two guests and a template");
     poller.publish(&sweep).await;
 
-    // Five assertions fire from this fixture: VM 140's onboot and its NIC, the
-    // over-committed pool, the backup that succeeded while halving, and the
-    // whole-job vzdump that failed. NOT firing is half the point — see the
-    // #880 block below.
+    // Nine assertions fire from this fixture: VM 140's onboot and its NIC, the
+    // over-committed pool, the backup that succeeded while halving, the
+    // whole-job vzdump that failed, and — since #1141 — the node's full `/`,
+    // its load, its swapping, and Ceph's own verdict. NOT firing is half the
+    // point — see the #880 block below.
+    //
+    // (This read five until #1154 and asserted on the first five in grade
+    // order; the four #1141 alerts were published after them and sat unread.
+    // The sweep now runs the fleet table before the per-node guest tables,
+    // which is what made the count honest.)
     let mut fired: std::collections::HashMap<String, Alert> = Default::default();
-    for _ in 0..5 {
+    for _ in 0..9 {
         let (_, kind, alert) = recv::<Alert>(&alerts_sub, "alert").await;
         assert_eq!(kind, zenoh::sample::SampleKind::Put);
         let a = alert.unwrap();
+        assert_eq!(a.state, AlertState::Firing, "{}", a.rule);
         fired.insert(a.rule.clone(), a);
     }
+    let mut rules: Vec<&str> = fired.keys().map(String::as_str).collect();
+    rules.sort_unstable();
+    assert_eq!(
+        rules,
+        [
+            "backup-job-failed",
+            "backup-shrunk",
+            "ceph-health",
+            "guest-nic-firewall-off",
+            "guest-onboot-off",
+            "node-load-high",
+            "node-rootfs-full",
+            "node-swapping",
+            "pool-overcommitted",
+        ],
+        "one alert per firing rule"
+    );
     let onboot = fired
         .get("guest-onboot-off")
         .expect("VM 140's onboot=0 must fire");

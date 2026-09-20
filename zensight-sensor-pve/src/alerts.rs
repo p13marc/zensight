@@ -52,6 +52,26 @@ pub const RULE_CEPH_HEALTH: &str = "ceph-health";
 /// `base` in `grade` puts it there — which is what makes the scoping possible.
 pub const GUEST_RULES: &[&str] = &[RULE_ONBOOT, RULE_NOT_RUNNING, RULE_NIC_FIREWALL];
 
+/// The rules that are **not** per-guest — [`ALL_RULES`] minus
+/// [`GUEST_RULES`]. The poller sweeps this table once per sweep, flat, and the
+/// guest table once per node with that node's [`guest_is_observable`] verdict
+/// as the sweep's `Answered` (#1154).
+pub const FLEET_RULES: &[&str] = &[
+    RULE_POOL_USED,
+    RULE_POOL_OVERCOMMIT,
+    RULE_BACKUP_FAILED,
+    RULE_BACKUP_JOB_FAILED,
+    RULE_BACKUP_STALE,
+    RULE_BACKUP_SHRUNK,
+    RULE_QUORUM,
+    RULE_REPLICATION,
+    RULE_NODE_ROOTFS,
+    RULE_NODE_LOAD,
+    RULE_NODE_SWAP,
+    RULE_BACKUP_OVERDUE,
+    RULE_CEPH_HEALTH,
+];
+
 /// Every rule this sensor can raise. The poller reconciles each one every
 /// sweep, so a rule that stops firing resolves — including one whose whole
 /// input disappeared (a guest that was deleted).
@@ -146,7 +166,9 @@ fn alert(
 /// A standalone node (`cluster: None`, or `quorate: None`) is always
 /// observable: there is no quorum to have or lose. This is SNMP's
 /// `device_answered` and BMC's `chassis.is_none()` guard, one API over — and
-/// the lesson both of those already paid for.
+/// the lesson both of those already paid for. The poller hands the verdict to
+/// the reporter as [`zensight_sensor_core::Answered`] (#1154), so the hold is
+/// a value rather than a `continue`.
 pub fn guest_is_observable(cluster: Option<&PveClusterHealth>, node: &str) -> bool {
     let Some(c) = cluster else {
         return true;
@@ -1251,5 +1273,18 @@ mod tests {
         for r in &fired {
             assert!(ALL_RULES.contains(&r.as_str()), "{r} is not reconciled");
         }
+    }
+
+    /// `FLEET_RULES` and `GUEST_RULES` partition `ALL_RULES` (#1154): a rule
+    /// in neither would never be swept, and one in both would be reconciled
+    /// flat *and* per node — the second sweep resolving what the first kept.
+    #[test]
+    fn fleet_and_guest_rules_partition_all_rules() {
+        let mut union: Vec<&str> = FLEET_RULES.iter().chain(GUEST_RULES).copied().collect();
+        union.sort_unstable();
+        let mut all: Vec<&str> = ALL_RULES.to_vec();
+        all.sort_unstable();
+        assert_eq!(union, all);
+        assert!(FLEET_RULES.iter().all(|r| !GUEST_RULES.contains(r)));
     }
 }

@@ -18,7 +18,9 @@ use zensight_common::pve::{
     PveCephStatus, PveClusterHealth, PveGuest, PveNode, PveStoragePool,
 };
 use zensight_common::{HostEvidence, QosClass, TelemetryValue};
-use zensight_sensor_core::{AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth};
+use zensight_sensor_core::{
+    AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth, SweepOpts,
+};
 
 use crate::alerts::{self, Observation};
 use crate::api::{PveClient, build_guest, build_pool};
@@ -899,52 +901,52 @@ impl Poller {
                 now_ms: zensight_common::current_timestamp_millis(),
             };
             let firing = alerts::grade(&self.cfg.alerts, &obs);
-            let mut by_rule: HashMap<&str, Vec<String>> = HashMap::new();
-            for a in &firing {
-                by_rule
-                    .entry(
-                        alerts::ALL_RULES
-                            .iter()
-                            .find(|r| **r == a.rule)
-                            .copied()
-                            .unwrap_or("?"),
+            let (guest, fleet): (Vec<zensight_common::Alert>, Vec<zensight_common::Alert>) = firing
+                .into_iter()
+                .partition(|a| alerts::GUEST_RULES.contains(&a.rule.as_str()));
+
+            // Every fleet rule reconciles every sweep, including the ones that
+            // fired nothing — otherwise a condition that cleared keeps firing
+            // until the sensor restarts.
+            if let Err(e) = reporter
+                .sweep(alerts::FLEET_RULES, fleet, SweepOpts::default())
+                .await
+            {
+                tracing::warn!(error = %e, "pve: alert sweep failed");
+            }
+
+            // The guest rules sweep **per node** (#1132), and a node this sweep
+            // cannot speak for — no quorum, or listed offline — is swept with
+            // `Answered::No`: `grade` held its guests, and a reconcile that read
+            // that hold as "recovered" would resolve a real alert on the far
+            // side of a corosync partition. Absence of evidence is the one thing
+            // a reconcile must never treat as evidence of absence.
+            let mut by_node: HashMap<String, Vec<zensight_common::Alert>> = HashMap::new();
+            for a in guest {
+                // `base` in `grade` labels every guest alert with its node; an
+                // alert without one has no scope and is swept under the empty
+                // node name, where a real node can never resolve it by mistake.
+                let node = a.labels.get("node").cloned().unwrap_or_default();
+                by_node.entry(node).or_default().push(a);
+            }
+            let mut nodes: BTreeSet<String> = sweep.guests.iter().map(|g| g.node.clone()).collect();
+            nodes.extend(by_node.keys().cloned());
+            for node in &nodes {
+                let for_node = by_node.remove(node).unwrap_or_default();
+                let answered = alerts::guest_is_observable(sweep.cluster.as_ref(), node).into();
+                if let Err(e) = reporter
+                    .sweep(
+                        alerts::GUEST_RULES,
+                        for_node,
+                        SweepOpts {
+                            scope: Some(("node", node)),
+                            answered,
+                            ..Default::default()
+                        },
                     )
-                    .or_default()
-                    .push(a.alert_key());
-            }
-            for a in firing {
-                if let Err(e) = reporter.observe(a, None).await {
-                    tracing::warn!(error = %e, "pve: alert publish failed");
-                }
-            }
-            // Every rule reconciles every sweep, including the ones that fired
-            // nothing — otherwise a condition that cleared (someone set
-            // onboot=1) keeps firing until the sensor restarts.
-            //
-            // EXCEPT the guest rules on a node we cannot see (#1132). Those
-            // reconcile **per node**, and only for the nodes this sweep could
-            // speak for: `grade` held the others, and a fleet-wide reconcile
-            // would read that hold as "recovered" and resolve a real alert on
-            // the far side of a corosync partition. Absence of evidence is the
-            // one thing a reconcile must never treat as evidence of absence.
-            let nodes: BTreeSet<&str> = sweep.guests.iter().map(|g| g.node.as_str()).collect();
-            for rule in alerts::ALL_RULES {
-                let still = by_rule.remove(*rule).unwrap_or_default();
-                if alerts::GUEST_RULES.contains(rule) {
-                    for node in &nodes {
-                        if !alerts::guest_is_observable(sweep.cluster.as_ref(), node) {
-                            continue;
-                        }
-                        if let Err(e) = reporter.reconcile_labeled(rule, "node", node, &still).await
-                        {
-                            tracing::warn!(rule = %rule, node = %node, error = %e,
-                                "pve: alert reconcile failed");
-                        }
-                    }
-                    continue;
-                }
-                if let Err(e) = reporter.reconcile(rule, &still).await {
-                    tracing::warn!(rule = %rule, error = %e, "pve: alert reconcile failed");
+                    .await
+                {
+                    tracing::warn!(node = %node, error = %e, "pve: alert sweep failed");
                 }
             }
         }
