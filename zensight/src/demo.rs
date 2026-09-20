@@ -29,10 +29,10 @@ const DEMO_POLLER: &str = "demo-poller";
 ///
 /// The id is the mock entity id, because RFC 06 §6 says the two are the same
 /// value: a host's `host_id` *is* its origin.
-pub fn demo_origin(point: &TelemetryPoint) -> String {
-    let host = match point.protocol {
+pub fn demo_origin(producer: Protocol, source: &str) -> String {
+    let host = match producer {
         Protocol::Snmp | Protocol::Modbus | Protocol::Gnmi | Protocol::Netflow => DEMO_POLLER,
-        _ => point.source.as_str(),
+        _ => source,
     };
     crate::mock::entity_id_for(host)
 }
@@ -485,7 +485,10 @@ impl DemoSimulator {
     }
 
     /// Generate a tick of telemetry data.
-    pub fn tick(&mut self, timestamp: i64) -> Vec<TelemetryPoint> {
+    /// Every point rides with the producer it is published under (#1255):
+    /// on the wire that is the key's chunk 4, which the point itself does not
+    /// carry, and the demo has no wire key.
+    pub fn tick(&mut self, timestamp: i64) -> Vec<(Protocol, TelemetryPoint)> {
         self.tick += 1;
         self.process_events();
 
@@ -502,7 +505,7 @@ impl DemoSimulator {
         points.extend(self.generate_gnmi(timestamp));
         points.extend(self.generate_bandwidth(timestamp));
 
-        points
+        points.into_iter().map(|p| (p.protocol, p)).collect()
     }
 
     /// Per-service bandwidth demo (#319, epic #320): a few systemd units publish
@@ -2536,7 +2539,7 @@ mod tests {
         assert!(!points.is_empty());
 
         // Check we have multiple protocols, including the network sensors.
-        let protocols: std::collections::HashSet<_> = points.iter().map(|p| p.protocol).collect();
+        let protocols: std::collections::HashSet<_> = points.iter().map(|(p, _)| *p).collect();
         assert!(protocols.contains(&Protocol::Sysinfo));
         assert!(protocols.contains(&Protocol::Snmp));
         assert!(protocols.contains(&Protocol::Modbus));
@@ -2627,8 +2630,8 @@ mod tests {
         // Log lines are probabilistic per tick; sample enough ticks.
         let mut saw_syslog = false;
         for i in 0..200 {
-            for p in sim.tick(1700000000000 + i * 600) {
-                if p.protocol == Protocol::Logs {
+            for (producer, p) in sim.tick(1700000000000 + i * 600) {
+                if producer == Protocol::Logs {
                     saw_syslog = true;
                     // Per-line event key (#104): `events/<uid>`, value is text.
                     assert!(
@@ -2676,8 +2679,8 @@ mod tests {
         // Counter values should increase
         let counter1: u64 = points1
             .iter()
-            .find(|p| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
-            .and_then(|p| match &p.value {
+            .find(|(_, p)| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
+            .and_then(|(_, p)| match &p.value {
                 TelemetryValue::Counter(v) => Some(*v),
                 _ => None,
             })
@@ -2685,8 +2688,8 @@ mod tests {
 
         let counter2: u64 = points2
             .iter()
-            .find(|p| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
-            .and_then(|p| match &p.value {
+            .find(|(_, p)| p.metric == "network/eth0/rx_bytes" && p.source == "server01")
+            .and_then(|(_, p)| match &p.value {
                 TelemetryValue::Counter(v) => Some(*v),
                 _ => None,
             })

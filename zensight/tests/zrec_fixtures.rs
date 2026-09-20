@@ -119,7 +119,9 @@ fn telemetry_capture_decodes_to_readings() {
                     "a reading without a host origin: {:?}",
                     reading.origin
                 );
-                assert_eq!(reading.point.protocol, zensight_common::Protocol::Sysinfo);
+                // The producer is the key's chunk 4 (#1255); the captured payload still
+                // carries a `protocol` member and must keep decoding.
+                assert_eq!(reading.producer, "sysinfo");
             }
             other => panic!("non-telemetry message in a telemetry capture: {other:?}"),
         }

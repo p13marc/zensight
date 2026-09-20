@@ -6469,7 +6469,8 @@ fn demo_sysinfo_keys_are_registered_subjects() {
 
     let sysinfo: Vec<_> = points
         .iter()
-        .filter(|p| p.protocol == Protocol::Sysinfo)
+        .filter(|(p, _)| *p == Protocol::Sysinfo)
+        .map(|(_, p)| p)
         .collect();
     assert!(
         !sysinfo.is_empty(),
@@ -6496,8 +6497,8 @@ fn demo_emits_the_fans_power_families() {
     let points = simulator.tick(0);
     let metrics: Vec<&str> = points
         .iter()
-        .filter(|p| p.protocol == Protocol::Sysinfo)
-        .map(|p| p.metric.as_str())
+        .filter(|(p, _)| *p == Protocol::Sysinfo)
+        .map(|(_, p)| p.metric.as_str())
         .collect();
 
     // Suffix-matched, not `contains`: a "/rpm" substring probe is satisfied by a
@@ -6533,9 +6534,9 @@ fn demo_points_render_the_fans_power_panel() {
     let points = simulator.tick(0);
 
     let mut state = DeviceDetailState::new(DeviceId::fixture(Protocol::Sysinfo, "server01"));
-    for point in points
+    for (_, point) in points
         .into_iter()
-        .filter(|p| p.protocol == Protocol::Sysinfo && p.source == "server01")
+        .filter(|(p, pt)| *p == Protocol::Sysinfo && pt.source == "server01")
     {
         state.update(point);
     }

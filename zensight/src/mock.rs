@@ -1032,7 +1032,9 @@ pub fn host_entities() -> Vec<HostEntity> {
     host_entities_at(now)
 }
 
-pub fn mock_environment() -> Vec<TelemetryPoint> {
+/// Every point rides with the producer it is published under (#1255) — on
+/// the wire that is the key's chunk 4, which the point itself does not carry.
+pub fn mock_environment() -> Vec<(Protocol, TelemetryPoint)> {
     let mut points = Vec::new();
 
     // Network devices
@@ -1062,7 +1064,7 @@ pub fn mock_environment() -> Vec<TelemetryPoint> {
     // demo (demo mirrors the wire contract).
     points.extend(parallax::host("camhost01"));
 
-    points
+    points.into_iter().map(|p| (p.protocol, p)).collect()
 }
 
 #[cfg(test)]
@@ -1075,7 +1077,7 @@ mod tests {
         assert!(!points.is_empty());
 
         // Check we have multiple protocols
-        let protocols: std::collections::HashSet<_> = points.iter().map(|p| p.protocol).collect();
+        let protocols: std::collections::HashSet<_> = points.iter().map(|(p, _)| *p).collect();
         assert!(protocols.contains(&Protocol::Snmp));
         assert!(protocols.contains(&Protocol::Sysinfo));
         assert!(protocols.contains(&Protocol::Logs));
@@ -1119,7 +1121,7 @@ mod tests {
         // device source so grouping actually merges (demo/mock contract, #306).
         let env = mock_environment();
         let device_sources: std::collections::HashSet<(Protocol, String)> =
-            env.iter().map(|p| (p.protocol, p.source.clone())).collect();
+            env.iter().map(|(p, pt)| (*p, pt.source.clone())).collect();
 
         for entity in host_entities_at(1_000) {
             // The wire-only host is intentionally NOT backed by a device.

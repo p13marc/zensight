@@ -575,7 +575,7 @@ impl DeviceDetailState {
             csv.push_str(&format!(
                 "{},{},{},{},{},{},{}\n",
                 point.timestamp,
-                point.protocol,
+                self.device_id.protocol,
                 escape_csv(&point.source),
                 escape_csv(&point.metric),
                 escape_csv(&value_str),
@@ -614,7 +614,7 @@ impl DeviceDetailState {
                 csv.push_str(&format!(
                     "{},{},{},{},{},{}\n",
                     point.timestamp,
-                    point.protocol,
+                    self.device_id.protocol,
                     escape_csv(&point.source),
                     escape_csv(&point.metric),
                     escape_csv(&value_str),

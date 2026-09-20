@@ -477,8 +477,12 @@ impl ZenSight {
         if demo_mode {
             dashboard.connected = true;
             dashboard.connection_state = crate::view::dashboard::ConnectionState::Connected;
-            for point in mock::mock_environment() {
-                let device_id = DeviceId::from_telemetry(&point, crate::demo::demo_origin(&point));
+            for (producer, point) in mock::mock_environment() {
+                let device_id = DeviceId::new(
+                    producer,
+                    crate::demo::demo_origin(producer, &point.source),
+                    &point.source,
+                );
                 let device_state = dashboard
                     .devices
                     .entry(device_id.clone())
@@ -9627,22 +9631,31 @@ impl ZenSight {
 
     /// Handle incoming telemetry.
     fn handle_telemetry(&mut self, reading: Reading) {
+        // The device needs a `Protocol` until #1256; a producer outside the
+        // closed enum is decoded (#1255) but not yet shown.
+        let Some(device_id) = reading.device_id() else {
+            tracing::debug!(
+                producer = %reading.producer,
+                "telemetry from a producer outside the closed enum — dropped until #1256"
+            );
+            return;
+        };
         let Reading {
             point,
             origin,
+            producer,
             subject,
         } = reading;
         // Write through to the local tiered store (O(1) hot-ring append; numeric
         // values only). Charts/trends read back from here so history survives restart.
-        self.store
-            .record(&origin, point.protocol.as_str(), &subject, &point);
+        self.store.record(&origin, &producer, &subject, &point);
 
         // Keep the bandwidth monitor's Services table live while it is open: a
         // systemd `ip_*_bps` point changes the derived rows (#319). Recomputed at
         // the tail, after this point has landed in the device-state map.
         let bw_services_relevant = self.current_view == CurrentView::Bandwidth
             && self.bandwidth.mode == crate::view::bandwidth::BandwidthMode::Services
-            && point.protocol == Protocol::Systemd
+            && producer == "systemd"
             && (point.metric.ends_with("/ip_ingress_bps")
                 || point.metric.ends_with("/ip_egress_bps"));
 
@@ -9679,7 +9692,7 @@ impl ZenSight {
         // cards but must not masquerade as log lines, or they render as
         // `Counter(N)` junk and evict real messages from the bounded buffer. This
         // mirrors the cold-store guard in `StoredLog::from_point` (Text-only).
-        if point_is_log_line(&point) {
+        if point_is_log_line(&producer, &point) {
             self.recent_logs
                 .push_back(crate::view::specialized::syslog_message_from_point(
                     &point,
@@ -9691,14 +9704,10 @@ impl ZenSight {
             // Persist to the cold store (#107, C9) — template-aware sampling
             // decides what survives restart for search-back. Only per-line
             // events carry a uid; rollup/derived points (no uid) are skipped.
-            if let Some(log) =
-                zensight_store::StoredLog::from_point(point.protocol.as_str(), &point)
-            {
+            if let Some(log) = zensight_store::StoredLog::from_point(&producer, &point) {
                 self.store.record_log(log);
             }
         }
-
-        let device_id = DeviceId::from_telemetry(&point, origin);
 
         // Update dashboard device state
         let device_state = self
@@ -9719,8 +9728,7 @@ impl ZenSight {
         // the latest point per metric would grow the device map without bound (one
         // entry per log line). They live in `recent_logs` instead; here we only
         // refresh liveness. All other telemetry keeps last-value-per-metric.
-        let is_log_event = point.protocol == zensight_common::Protocol::Logs
-            && point.metric.starts_with("events/");
+        let is_log_event = producer == "logs" && point.metric.starts_with("events/");
         if !is_log_event {
             device_state
                 .metrics
@@ -10244,9 +10252,8 @@ fn now_ms() -> i64 {
 /// `logs/ingest/*`, …) are counters/gauges. Pure, and the unit of testing for
 /// the Logs-buffer admission policy — keeping rollups out so they don't render
 /// as `Counter(N)` junk and evict real messages. Mirrors `StoredLog::from_point`.
-fn point_is_log_line(point: &TelemetryPoint) -> bool {
-    point.protocol == zensight_common::Protocol::Logs
-        && matches!(point.value, TelemetryValue::Text(_))
+fn point_is_log_line(producer: &str, point: &TelemetryPoint) -> bool {
+    producer == "logs" && matches!(point.value, TelemetryValue::Text(_))
 }
 
 /// The Fleet view's declared `introspect` queriers (#745).
@@ -10602,7 +10609,7 @@ mod prefetch_tests {
             "events/0000000000000000000000001",
             TelemetryValue::Text("INTRUDER ALERT from 10.0.0.9".to_string()),
         );
-        assert!(point_is_log_line(&line));
+        assert!(point_is_log_line("logs", &line));
 
         // Derived rollups (counters/gauges) are excluded.
         for (metric, value) in [
@@ -10612,7 +10619,7 @@ mod prefetch_tests {
         ] {
             let rollup = TelemetryPoint::new("host01", Protocol::Logs, metric, value);
             assert!(
-                !point_is_log_line(&rollup),
+                !point_is_log_line("logs", &rollup),
                 "{metric} must not be a log line"
             );
         }
@@ -10624,7 +10631,7 @@ mod prefetch_tests {
             "system/descr",
             TelemetryValue::Text("Cisco IOS".to_string()),
         );
-        assert!(!point_is_log_line(&snmp_text));
+        assert!(!point_is_log_line("snmp", &snmp_text));
     }
 }
 
@@ -11429,6 +11436,7 @@ mod origin_tests {
                 TelemetryValue::Counter(1),
             ),
             origin,
+            "netring",
             metric,
         )
     }
@@ -11679,6 +11687,7 @@ mod tier2_app_fold_tests {
                     unit: None,
                 },
                 "h-5e5e5e5e5e5e",
+                "sysinfo",
                 // sysinfo is a host producer: its subject is the metric name.
                 metric,
             )
@@ -11968,7 +11977,7 @@ mod zrec_replay_tests {
             .messages()
             .iter()
             .filter_map(|m| match m {
-                Message::TelemetryReceived(r) => Some(r.device_id()),
+                Message::TelemetryReceived(r) => r.device_id(),
                 _ => None,
             })
             .collect();
