@@ -30,8 +30,8 @@ ReadOnlyPaths=/etc/zensight
 # 0700 root:root, so every attach fails EACCES without it — even with CAP_BPF.
 # Note CAP_DAC_READ_SEARCH lets this unit read any file on the host; that is the
 # price of the panel. Uncomment ONLY for an eBPF build; leave commented for the
-# default unprivileged one. MemoryDenyWriteExecute would break the BPF JIT, so it
-# must stay off (it is, here).
+# default unprivileged one. MemoryDenyWriteExecute would break the BPF loader, so an
+# eBPF build sets it to `no` (see the sandbox block below).
 #
 # These three are necessary and NOT sufficient on Debian/Ubuntu: they ship
 # kernel.perf_event_paranoid=3, above upstream's maximum of 2, which denies the
@@ -59,6 +59,38 @@ ReadOnlyPaths=/etc/zensight
 # this unit at 8.1 EXPOSED while its siblings sat at 5.6-5.9.
 CapabilityBoundingSet=
 
+# ── The full sandbox block (#1204) ─────────────────────────────────────────
+# Every line the sibling units carry, or a `sandbox-exception:` comment naming
+# the one it cannot take and why. `scripts/packaging-check.sh` enforces that a
+# unit has one or the other for each directive, so a line cannot go quietly
+# missing again — which is how sixteen units shipped without this block for a
+# year: they were written before the four newest, and nothing back-filled them.
+# sandbox-exception: ProtectProc — the process table, per-process CPU/RSS and
+# the socket→process join all read other users' /proc/<pid>, which `invisible`
+# hides. The two opt-in tiers REPLACE lines below, as they replace the
+# capability lines above:
+#   eBPF (--features ebpf) → the BPF loader maps program memory
+#                            writable+executable, and bpf(2)/perf_event_open(2)
+#                            are outside @system-service:
+#                            MemoryDenyWriteExecute=no
+#                            SystemCallFilter=@system-service bpf perf_event_open
+#   SMART (collect.smart)  → /dev/nvme* and /dev/sd* are device nodes:
+#                            PrivateDevices=no + DeviceAllow=block-* r
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # The cgroup backstop (#812/#813/#1092). A STARTING POINT, not a measurement:
 # measure yours with `just fleet-sizing`, which reads the health doc's
 # self_stats. Keep it ABOVE this unit's `resources.budget_rss_mb` so the shed

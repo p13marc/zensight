@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# packaging-check.sh — the two unit forms say the same thing, or this fails (#1092).
+# packaging-check.sh — the two unit forms say the same thing, and every unit
+# carries the sandbox block or argues its exceptions, or this fails (#1092, #1204).
 #
 # ZenSight ships every producer twice: a native `.service` in packaging/systemd/
 # and a Quadlet `.container` in packaging/quadlet/. Nothing compared them, and
@@ -158,6 +159,30 @@ done
 for quad in "$QUAD_DIR"/*.container; do
     unit=$(basename "$quad" .container)
     [ -f "$SVC_DIR/$unit.service" ] || problem "$unit: a quadlet with no .service twin"
+done
+
+# 7. Every unit carries the full sandbox block, or names the line it cannot
+#    have and why — in the unit, as `# sandbox-exception: <Directive> — <why>`
+#    (#1204). Presence is a DIRECTIVE line (`^Directive=`), never a mention
+#    in a comment: a unit that only *talked* about MemoryDenyWriteExecute
+#    hid from the issue's grep for a week. An exception for a directive the
+#    unit also sets is stale and fails too.
+SANDBOX_BLOCK="PrivateTmp PrivateDevices ProtectKernelTunables ProtectKernelModules \
+ProtectControlGroups ProtectClock ProtectHostname ProtectProc RestrictNamespaces \
+RestrictRealtime RestrictSUIDSGID LockPersonality MemoryDenyWriteExecute \
+SystemCallFilter SystemCallArchitectures RestrictAddressFamilies"
+for svc in "$SVC_DIR"/*.service; do
+    unit=$(basename "$svc" .service)
+    for d in $SANDBOX_BLOCK; do
+        has=0; exc=0
+        grep -qE "^$d=" "$svc" && has=1
+        grep -qE "^# sandbox-exception: $d( |$)" "$svc" && exc=1
+        if [ "$has" = 0 ] && [ "$exc" = 0 ]; then
+            problem "$unit: neither \`$d=\` nor a \`# sandbox-exception: $d — <why>\` line (#1204)"
+        elif [ "$has" = 1 ] && [ "$exc" = 1 ]; then
+            problem "$unit: sets \`$d=\` AND carries a sandbox-exception for it — one of them is stale"
+        fi
+    done
 done
 
 if [ "${1:-}" = "--table" ]; then

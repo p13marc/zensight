@@ -27,6 +27,39 @@ ReadOnlyPaths=/etc/zensight
 AmbientCapabilities=CAP_NET_RAW CAP_IPC_LOCK
 CapabilityBoundingSet=CAP_NET_RAW CAP_IPC_LOCK
 
+# ── The full sandbox block (#1204) ─────────────────────────────────────────
+# Every line the sibling units carry, or a `sandbox-exception:` comment naming
+# the one it cannot take and why. `scripts/packaging-check.sh` enforces that a
+# unit has one or the other for each directive, so a line cannot go quietly
+# missing again — which is how sixteen units shipped without this block for a
+# year: they were written before the four newest, and nothing back-filled them.
+# AF_PACKET is the capture socket (TPACKET_V3); there is no AF_NETLINK use in
+# netring or in this crate — interface lookup is an ioctl.
+# Two opt-in features change lines below, and a deployment that enables them
+# REPLACES the line rather than adding to it:
+#   --features yara  → yara-x compiles rules to WebAssembly and runs them under
+#                      wasmtime's JIT, which needs writable+executable memory:
+#                      MemoryDenyWriteExecute=no
+#   AF_XDP capture   → needs bpf(2), outside @system-service:
+#                      SystemCallFilter=@system-service bpf
+# Network-namespace capture (netring 0.30's `capture_in_netns`, #330) is not
+# adopted; when it is, RestrictNamespaces must allow `net` (setns).
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_PACKET
 # The cgroup backstop (#812/#813/#1092). A STARTING POINT, not a measurement:
 # measure yours with `just fleet-sizing`, which reads the health doc's
 # self_stats. Keep it ABOVE this unit's `resources.budget_rss_mb` so the shed
