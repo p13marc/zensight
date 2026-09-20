@@ -3,6 +3,9 @@
 > including the wire shape of `TelemetryPoint` and how the GUI registers to data.
 > For the as-built GUI see [`zensight/docs/views.md`](../../zensight/docs/views.md);
 > for the keyspace contract see [`docs/KEYSPACE.md`](../KEYSPACE.md).
+>
+> **Tracked as [#1253](https://git.marcpardo.eu/marcpardo/zensight/issues/1253)** (epic, milestone 0.23.0). The only child being worked is the
+> system-view test, [#1254](https://git.marcpardo.eu/marcpardo/zensight/issues/1254); the phases (#1255–#1262) are blocked on it.
 
 # Dynamic views: the GUI renders what the bus describes — Analysis, Architecture & Proposal
 
@@ -66,7 +69,10 @@ plan (§8), then the zenkey dependencies (§11). Sources are in §12.
    refines the default the way a JSON-Forms UI schema refines a data schema;
    (d) keep hand-written views as bespoke renderers registered by producer name
    over the same model, and delete the 82 messages, 7 detail states and most of
-   the 97 typed reply structs. **Presentation logic** — a row label, a sort key,
+   the 97 typed reply structs; (e) derive the GUI's **subscription** from the
+   visible definition — each panel's `scope` × its fields, statically — so the
+   firehose `v1/*/telemetry/**` becomes the fallback, not the default (§5.7).
+   **Presentation logic** — a row label, a sort key,
    a visibility — is an embedded, sandboxed **Rhai** snippet beside the document,
    never an expression *in* the document, so the format stays a closed
    vocabulary and no DSL is invented. WASM is not planned. (§5–§8)
@@ -75,7 +81,11 @@ plan (§8), then the zenkey dependencies (§11). Sources are in §12.
    exists; the slice is already fetched; the Bus explorer already renders any
    payload as JSON. Phase 0 is: give `generic_device_view` the slice. That alone
    would have rendered bmc, pve, container and probe on the day their sensors
-   landed. (§8)
+   landed. Before any phase: one **system-view test** (#1254) states the
+   requirement in six gates — intake, model, default view, honesty, definition +
+   scripts, derived subscription — as a `#[should_panic(expected = "GATE
+   1/intake")]` ratchet whose expected string is the epic's status. It is red at
+   gate 1 today, by design, and it decides whether the rest is built. (§8)
 
 ---
 
@@ -588,6 +598,43 @@ which is Rust; the definition has no vocabulary for a pixel or an RGB triple.
   search. They keep their Rust and lose their private message plumbing.
 - **The design system.** It becomes *more* load-bearing, not less.
 
+### 5.7 Layer E — the subscription follows the definition
+
+Today the GUI subscribes to the whole telemetry class: `effective_scopes`
+(`zensight/src/subscription.rs`) yields `v1/*/telemetry/**` unless the operator
+configured a scope, or focus mode (#476) narrowed everything to one origin.
+Once a definition says which subjects each panel reads, the GUI knows its data
+needs *before* the first sample arrives — and a monitor that fetches everything
+to show a tenth of it scales with the fleet, not with the screen.
+
+**Derivation.** For every panel of the visible view: the panel's `scope` with
+vars replaced by `*`, joined to each of its `fields` and to each field its Rhai
+scripts name — the §6.4 lint already extracts those — with the class taken from
+the slice. A pure function `(definitions, slices, current view, focus) →
+Vec<String>` beside `effective_scopes`, unit-tested on a fixture producer; its
+result feeds `LinkConfig.scope`, whose `Hash` change already restarts the
+stream, so the first cut needs no new subscriber plumbing. **No script runs to
+decide a subscription**: the set is known at build, so a definition cannot
+starve its own view, and the lint can say so.
+
+**Rules.** Focus mode still wins (one origin, everything). An operator-configured
+scope still wins (an explicit decision). The derivation replaces only the
+empty-scope firehose default. Widening is by navigation: a device's detail
+subscribes to that origin's `<producer>/**`, so a subject the slice does not
+declare is seen there and rendered as the §5.2 finding; the overview subscribes
+to the union of every producer's overview needs. A producer with a slice and no
+definition gets `v1/*/telemetry/<producer>/**`; a producer with neither is
+discovered through the liveliness subscriber the GUI already holds and gets the
+same, with the "no slice" finding. The common families — alerts, entities,
+incidents — keep their wildcards; they are nobody's producer.
+
+**What narrowing costs, stated.** An undeclared subject from a *defined*
+producer is not fetched on the overview. The GUI's honesty rule is "never drop
+what arrives", not "fetch everything"; what a producer publishes beyond its
+slice is the Bus explorer's and `zenkey-fleet`'s judges' job (#744). If
+navigation churn shows up, the second cut changes the subscriber set without
+tearing the session down — the telemetry handles are already a `Vec`.
+
 ---
 
 ## 6. The view definition — `views.toml` v1 (draft)
@@ -770,7 +817,8 @@ silently empty.
 one-liners; a `.rhai` file beside `views.toml` for anything longer, inlined into
 the served `ViewSet`. At build, every script is `Engine::compile`d and its AST
 walked for variable names, which must be declared fields or vars of the panel's
-family — the same "must not lie" posture as the registry lint. At load, compiled
+family — the same "must not lie" posture as the registry lint; that same
+extraction is the derived subscription's input (§5.7). At load, compiled
 `AST`s are cached per view version. In tests, a script is evaluated against a
 fixture row in a plain Rust test, no window needed.
 
@@ -832,6 +880,7 @@ Each phase is shippable and leaves the tree no worse than before it.
 | **1 — intake** | `Message::Document`/`Event`; decode via `zenkey_fleet::SchemaStore`; `DeviceId.producer: String`; `TelemetryPoint` loses `protocol` (`!`); late-joiner ring for pre-slice samples; unregistered producer → rendered finding. | An unknown producer is *seen*. |
 | **2 — model + defaults** | The family derivation (§5.3) as a tested pure function over `RegistrySlice`; default renderers for table/facts/document; common families untouched. | The default view is good enough that a bespoke one is a choice, not a requirement. |
 | **3 — definitions + scripts** | `views.toml` v1 with Rhai slots (§6.4), the build lint (document references only declared subjects; every script compiles and names only declared fields), `@rpc/<producer>/views`, GUI precedence (producer → bundled → bespoke). **bmc, pve and probe rewritten declaratively** and their Rust views deleted — the acceptance test is that the simulator tests written for #1126/#1127/#1128 pass unchanged against the declarative renderer. | The format plus a sandboxed value-returning script is expressive enough for real views, and the honesty rules survive. |
+| **3b — subscription** | The derived subscription (§5.7): a pure function from the visible definitions to key expressions, feeding `LinkConfig.scope`; the firehose only as the no-definition fallback; focus mode and operator scope unchanged. | The GUI fetches what it shows — bandwidth follows the definition, not the fleet size. |
 | **4 — consolidation** | Every specialized view reads the family model; generic `Call`/`Reply` replaces the Fetch pairs; write forms from request schemas; delete the 82 messages and 7 detail states. | `app.rs` is a router again. |
 | **5 — not planned** | WASM view plugins. Retained as an option only if hostile third-party plugins ever become a requirement; the document + Rhai covers every in-tree case. | — |
 
