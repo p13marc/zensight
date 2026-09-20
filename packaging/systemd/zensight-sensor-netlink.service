@@ -47,8 +47,43 @@ CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 # attach regardless of capabilities — see #683.
 # AmbientCapabilities=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
 # CapabilityBoundingSet=CAP_NET_ADMIN CAP_BPF CAP_PERFMON CAP_DAC_READ_SEARCH
+# Explicitly `no`, not omitted (#1204): the demo posture above grants the eBPF
+# capabilities, and a tracing build writes to tracefs under /sys/kernel, which
+# ProtectKernelTunables=yes would make read-only. The unprivileged baseline
+# (drop the three capability lines) can take `yes`; every read this sensor
+# makes — /proc/sys/net/netfilter/nf_conntrack_max included — works under
+# either. Recorded here so the weaker value is a decision, not an accident.
 ProtectKernelTunables=no
 
+# ── The full sandbox block (#1204) ─────────────────────────────────────────
+# Every line the sibling units carry, or a `sandbox-exception:` comment naming
+# the one it cannot take and why. `scripts/packaging-check.sh` enforces that a
+# unit has one or the other for each directive, so a line cannot go quietly
+# missing again — which is how sixteen units shipped without this block for a
+# year: they were written before the four newest, and nothing back-filled them.
+# sandbox-exception: ProtectProc — the socket→process join reads other
+# processes' /proc/<pid>/fd (one walk per `@rpc/netlink/sockets` query), which
+# `invisible` hides. Without it every socket owner reads as "unknown".
+# The eBPF tier (see the capability alternatives above) additionally needs
+# bpf(2) and perf_event_open(2), which `@system-service` does not include, and
+# the BPF loader maps program memory writable+executable. An eBPF build
+# REPLACES the two lines marked below, as it replaces the capability lines:
+#   SystemCallFilter=@system-service bpf perf_event_open
+#   MemoryDenyWriteExecute=no
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 # The cgroup backstop (#812/#813/#1092). A STARTING POINT, not a measurement:
 # measure yours with `just fleet-sizing`, which reads the health doc's
 # self_stats. Keep it ABOVE this unit's `resources.budget_rss_mb` so the shed

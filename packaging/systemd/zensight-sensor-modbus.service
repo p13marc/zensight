@@ -33,6 +33,8 @@ CapabilityBoundingSet=
 # — the port would simply not be there, and an RTU deployment would start
 # cleanly and read nothing. A TCP-only deployment can add `PrivateDevices=yes`;
 # an RTU one wants `DeviceAllow=/dev/ttyUSB0 rw` instead.
+# sandbox-exception: PrivateDevices — the RTU serial port is a device node,
+# and the two deployments want opposite lines (above); the unit ships neither.
 #
 # If you build this binary with `--features zensight-common/linux-audit`
 # (#957), add AF_NETLINK to RestrictAddressFamilies: the audit writer sends one

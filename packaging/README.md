@@ -64,18 +64,18 @@ later. Capabilities are the `.service`'s `AmbientCapabilities` without the
 | `zensight-sensor-bmc` | 1.7 OK | — | 96M | 72 |
 | `zensight-sensor-container` | 2.2 OK | — | 64M | 48 |
 | `zensight-sensor-gnmi` | 1.7 OK | — | 96M | 72 |
-| `zensight-sensor-hostspec` | 5.7 MEDIUM | — | 64M | 48 |
-| `zensight-sensor-logs` | 5.8 MEDIUM | NET_BIND_SERVICE | 256M | 192 |
+| `zensight-sensor-hostspec` | 1.7 OK | — | 64M | 48 |
+| `zensight-sensor-logs` | 1.8 OK | NET_BIND_SERVICE | 256M | 192 |
 | `zensight-sensor-modbus` | 1.9 OK | — | 64M | 48 |
 | `zensight-sensor-netflow` | 1.7 OK | — | 128M | 96 |
-| `zensight-sensor-netlink` | 5.9 MEDIUM | BPF, NET_ADMIN, PERFMON | 128M | 96 |
-| `zensight-sensor-netring` | 5.8 MEDIUM | IPC_LOCK, NET_RAW | 512M | 448 |
-| `zensight-sensor-parallax` | 5.7 MEDIUM | — | 512M | 384 |
+| `zensight-sensor-netlink` | 2.3 OK | BPF, NET_ADMIN, PERFMON | 128M | 96 |
+| `zensight-sensor-netring` | 2.0 OK | IPC_LOCK, NET_RAW | 512M | 448 |
+| `zensight-sensor-parallax` | 2.0 OK | — | 512M | 384 |
 | `zensight-sensor-probe` | 1.7 OK | — | 64M | 48 |
 | `zensight-sensor-pve` | 1.7 OK | — | 96M | 72 |
 | `zensight-sensor-snmp` | 1.7 OK | — | 128M | 96 |
-| `zensight-sensor-sysinfo` | 5.6 MEDIUM | — | 256M | 192 |
-| `zensight-sensor-systemd` | 5.6 MEDIUM | — | 128M | 96 |
+| `zensight-sensor-sysinfo` | 1.8 OK | — | 256M | 192 |
+| `zensight-sensor-systemd` | 1.8 OK | — | 128M | 96 |
 
 The four service-tier rows have no budget because they have no health document
 to carry one — see #1202. Their `MemoryMax` is therefore the only number

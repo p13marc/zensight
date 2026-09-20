@@ -78,22 +78,38 @@ does not close. Each of those units now carries an explicit empty
 | `zensight-sensor-bmc` | 1.7 OK | — | 96M | 72 |
 | `zensight-sensor-container` | 2.2 OK | — | 64M | 48 |
 | `zensight-sensor-gnmi` | 1.7 OK | — | 96M | 72 |
-| `zensight-sensor-hostspec` | 5.7 MEDIUM | — | 64M | 48 |
-| `zensight-sensor-logs` | 5.8 MEDIUM | NET_BIND_SERVICE | 256M | 192 |
+| `zensight-sensor-hostspec` | 1.7 OK | — | 64M | 48 |
+| `zensight-sensor-logs` | 1.8 OK | NET_BIND_SERVICE | 256M | 192 |
 | `zensight-sensor-modbus` | 1.9 OK | — | 64M | 48 |
 | `zensight-sensor-netflow` | 1.7 OK | — | 128M | 96 |
-| `zensight-sensor-netlink` | 5.9 MEDIUM | BPF, NET_ADMIN, PERFMON | 128M | 96 |
-| `zensight-sensor-netring` | 5.8 MEDIUM | IPC_LOCK, NET_RAW | 512M | 448 |
-| `zensight-sensor-parallax` | 5.7 MEDIUM | — | 512M | 384 |
+| `zensight-sensor-netlink` | 2.3 OK | BPF, NET_ADMIN, PERFMON | 128M | 96 |
+| `zensight-sensor-netring` | 2.0 OK | IPC_LOCK, NET_RAW | 512M | 448 |
+| `zensight-sensor-parallax` | 2.0 OK | — | 512M | 384 |
 | `zensight-sensor-probe` | 1.7 OK | — | 64M | 48 |
 | `zensight-sensor-pve` | 1.7 OK | — | 96M | 72 |
 | `zensight-sensor-snmp` | 1.7 OK | — | 128M | 96 |
-| `zensight-sensor-sysinfo` | 5.6 MEDIUM | — | 256M | 192 |
-| `zensight-sensor-systemd` | 5.6 MEDIUM | — | 128M | 96 |
+| `zensight-sensor-sysinfo` | 1.8 OK | — | 256M | 192 |
+| `zensight-sensor-systemd` | 1.8 OK | — | 128M | 96 |
 
 <!-- /generated -->
 
-**Nine of the sixteen were closed in #1204.** `correlator`, `desired`, both
+**The remaining seven were closed on 2026-09-20 (#1204).** `hostspec`, `logs`,
+`netlink`, `netring`, `parallax`, `systemd` and `sysinfo` — the seventh was
+hidden from the issue's own `grep -L MemoryDenyWriteExecute` by a comment that
+merely *mentioned* the directive — each carry every line of the block they can
+take, and a `# sandbox-exception: <Directive> — <why>` line in the unit for
+each they cannot: `ProtectProc` where the sensor reads other processes'
+`/proc/<pid>` (netlink's socket→process join, sysinfo's process table, the
+systemd sensor's cgroup attribution), `PrivateDevices` where the sensor's
+subject *is* a device node (parallax's cameras, modbus's serial line), plus
+`AF_NETLINK` for udev hotplug and `AF_PACKET` for capture. The opt-in tiers
+(eBPF, YARA, AF_XDP, SMART) say in the unit which line they replace.
+`scripts/packaging-check.sh` now fails a unit that has neither the directive
+nor the exception — and one that has both, which is a stale exception. The
+spread between the best unit and the worst is a stated difference, not an
+accident of writing order.
+
+**Nine of the sixteen were closed first in #1248.** `correlator`, `desired`, both
 exporters, `historian`, `gnmi`, `netflow`, `snmp` and `modbus` now carry the
 same full sandbox block the four newest units had — `PrivateTmp`,
 `PrivateDevices`, `ProtectKernelTunables`, `ProtectKernelModules`,

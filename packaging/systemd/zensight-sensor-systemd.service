@@ -25,6 +25,32 @@ ReadOnlyPaths=/etc/zensight
 # authorisation, not through a capability held here.
 CapabilityBoundingSet=
 
+# ── The full sandbox block (#1204) ─────────────────────────────────────────
+# Every line the sibling units carry, or a `sandbox-exception:` comment naming
+# the one it cannot take and why. `scripts/packaging-check.sh` enforces that a
+# unit has one or the other for each directive, so a line cannot go quietly
+# missing again — which is how sixteen units shipped without this block for a
+# year: they were written before the four newest, and nothing back-filled them.
+# sandbox-exception: ProtectProc — the cgroup tree (`cgroup.rs`) attributes
+# members by reading other processes' /proc/<pid> entries, which `invisible`
+# hides; every unit would read as empty. /sys/fs/cgroup is read-only under
+# ProtectControlGroups=yes, which is all this sensor needs of it. D-Bus is
+# AF_UNIX.
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 # The cgroup backstop (#812/#813/#1092). A STARTING POINT, not a measurement:
 # measure yours with `just fleet-sizing`, which reads the health doc's
 # self_stats. Keep it ABOVE this unit's `resources.budget_rss_mb` so the shed

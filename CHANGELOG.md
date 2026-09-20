@@ -101,6 +101,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Seven more units carry the full sandbox block, and a unit must now argue
+  each line it cannot take** (#1204, closing it). `hostspec`, `logs`,
+  `netlink`, `netring`, `parallax`, `systemd` and `sysinfo` went from
+  5.6–5.9 MEDIUM to 1.7–2.3 OK on `systemd-analyze security`. The seventh,
+  sysinfo, was hidden from the issue's `grep -L MemoryDenyWriteExecute` by a
+  comment that mentioned the directive — so `scripts/packaging-check.sh`'s new
+  rule matches directive lines, never comments: every unit has `Directive=`
+  or `# sandbox-exception: Directive — <why>` for each of the sixteen, and a
+  unit with both is a stale exception. It found an eighth on its first run:
+  modbus omits `PrivateDevices` for its RTU serial port and said so only in
+  prose. The exceptions are the sensors' real reads (other processes'
+  `/proc/<pid>` for netlink, sysinfo and systemd; the camera and serial device
+  nodes for parallax and modbus) and the socket families they open
+  (`AF_NETLINK` for udev, `AF_PACKET` for capture); the opt-in tiers — eBPF,
+  YARA's wasmtime JIT, AF_XDP's `bpf(2)`, SMART's block devices — name in the
+  unit the line they replace. One finding the issue had wrong: netring has no
+  socket→process join, so it takes `ProtectProc=invisible` whole. Both README
+  tables are regenerated.
 - **A graded alert outside the poller's rule table was published and never
   reconciled** (#1154). bmc and pve looked each graded rule up in `ALL_RULES`
   and bucketed a miss under `""` / `"?"` — observed, so it went on the bus as
