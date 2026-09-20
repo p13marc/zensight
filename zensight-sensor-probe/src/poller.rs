@@ -11,7 +11,9 @@ use std::time::{Duration, Instant};
 
 use zensight_common::probe::{ProbeOutcome, ProbeResult};
 use zensight_common::{QosClass, TelemetryValue};
-use zensight_sensor_core::{AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth};
+use zensight_sensor_core::{
+    AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth, SweepOpts,
+};
 
 use crate::alerts;
 use crate::config::{ProbeConfig, Target};
@@ -478,23 +480,11 @@ impl Poller {
             // opts out takes effect on the next sweep (#1136).
             let exempt = alerts::Exemptions::from_targets(&self.targets.snapshot());
             let firing = alerts::grade(&self.cfg.alerts, &self.source, &all, &exempt);
-            let mut by_rule: HashMap<String, Vec<String>> = HashMap::new();
-            for a in &firing {
-                by_rule
-                    .entry(a.rule.clone())
-                    .or_default()
-                    .push(a.alert_key());
-            }
-            for a in firing {
-                if let Err(e) = reporter.observe(a, None).await {
-                    tracing::warn!(error = %e, "probe: alert publish failed");
-                }
-            }
-            for rule in alerts::ALL_RULES {
-                let still = by_rule.remove(*rule).unwrap_or_default();
-                if let Err(e) = reporter.reconcile(rule, &still).await {
-                    tracing::warn!(rule = %rule, error = %e, "probe: reconcile failed");
-                }
+            if let Err(e) = reporter
+                .sweep(alerts::ALL_RULES, firing, SweepOpts::default())
+                .await
+            {
+                tracing::warn!(error = %e, "probe: alert sweep failed");
             }
         }
     }

@@ -29,6 +29,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   direction is red. A green companion pins each of today's gates by name. See
   `zensight/docs/testing.md`, "The one system-view test".
 
+### Changed
+
+- **`AlertReporter::sweep` — one grading pass, whole; the edge rules and the
+  "target answered" hold are the framework's** (#1154, part of #1059). Four
+  pollers carried the same `grade → by_rule → observe → reconcile` block,
+  sysinfo paired `Hysteresis`'s two halves by hand, and three sensors each
+  spelled "the device did not answer, resolve nothing" their own way
+  (`device_answered`, `chassis.is_none()`, a per-node `continue`). Now:
+  `reporter.sweep(ALL_RULES, graded, SweepOpts { scope, answered, for_duration })`
+  observes every graded alert and reconciles every rule — flat, or within one
+  label's scope — with `Answered::No` observing and resolving nothing;
+  `with_edge_rules(...)` declares the per-tick-delta rules once, and the hold
+  travels on the entry so no reconcile call can pair it wrongly. probe,
+  container, bmc, pve, sysinfo and snmp are on it; the sentinels, the traps and
+  the budget rule keep `observe`/`reconcile`. `bmc::CHASSIS_RULES` and
+  `pve::FLEET_RULES` name the tables the pollers had been computing by
+  exclusion.
+
+### Fixed
+
+- **A graded alert outside the poller's rule table was published and never
+  reconciled** (#1154). bmc and pve looked each graded rule up in `ALL_RULES`
+  and bucketed a miss under `""` / `"?"` — observed, so it went on the bus as
+  `Firing`, and then reconciled under a name no rule has, so nothing ever
+  resolved it. No in-tree grader emits such a rule today, which is exactly why
+  it had to be a structural refusal rather than a test: `sweep` refuses the
+  alert (logged, `debug_assert!`ed, not published) instead of stranding it.
+
+  Found on the way: pve's end-to-end contract test read the first **five**
+  alerts in grade order and stopped, so the four #1141 node/Ceph alerts the
+  fixture fires had been published after them and never asserted. It reads
+  all nine now.
+
 ## [0.14.0] - 2026-09-20
 
 ### Changed — BREAKING

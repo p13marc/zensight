@@ -21,12 +21,11 @@
 //! new key every tick (no flapping).
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
-use zensight_sensor_core::{AlertReporter, Hysteresis};
+use zensight_sensor_core::{AlertReporter, SweepOpts};
 
 // Stable rule slugs (one logical rule per slug; reconcile clears recovered keys).
 const OOM_RULE: &str = "oom_kills";
@@ -49,7 +48,8 @@ const SMART_SATA_ATTRS_RULE: &str = "smart_sata_attrs";
 /// Each is true for exactly one tick, so a `for_secs` debounce it can never
 /// satisfy is a rule that never fires — `for_secs: 60`, set to stop pressure
 /// alerts flapping, silently turned OOM alerting off. For these the configured
-/// `for` is spent as a hold instead; see [`Hysteresis`].
+/// `for` is spent as a hold instead; the reporter is told which rules those
+/// are once, with `with_edge_rules`, and makes the decision itself (#1154).
 ///
 /// [`SMART_SATA_ATTRS_RULE`] is here even though it is not *purely* edge: its
 /// predicate is `reallocated_delta > 0 || pending_sectors > 0`, and pending
@@ -59,17 +59,7 @@ const SMART_SATA_ATTRS_RULE: &str = "smart_sata_attrs";
 /// its resolve — a delay that is harmless for a disk attribute that is not
 /// going to improve. Splitting it into two rules would be cleaner and would
 /// re-key, stranding a document per drive at upgrade.
-const EDGE_RULES: &[&str] = &[OOM_RULE, SMART_MEDIA_ERRORS_RULE, SMART_SATA_ATTRS_RULE];
-
-/// How `rule` spends the configured `for_secs` (#1084).
-fn hysteresis_for(rule: &str, for_secs: u64) -> Hysteresis {
-    let d = Duration::from_secs(for_secs);
-    if EDGE_RULES.contains(&rule) {
-        Hysteresis::Edge(d)
-    } else {
-        Hysteresis::Level(d)
-    }
-}
+pub const EDGE_RULES: &[&str] = &[OOM_RULE, SMART_MEDIA_ERRORS_RULE, SMART_SATA_ATTRS_RULE];
 
 // ===========================================================================
 // Configuration
@@ -1293,24 +1283,16 @@ impl AlertEvaluator {
         let mut inputs = derive_inputs(&mut self.prev, raw, interval_secs);
         inputs.disk_fill = disk_fill;
         for ra in evaluate(&self.host, &self.cfg, &inputs) {
-            // One `for_secs`, two ways to spend it (#1084). A level rule
-            // debounces on it; an edge rule — whose condition is a delta, true
-            // for exactly one tick — is held firing for it instead, because a
-            // debounce it can never satisfy is a rule that never fires.
-            let hys = hysteresis_for(&ra.rule, self.cfg.for_secs);
-            let mut firing_keys = Vec::with_capacity(ra.alerts.len());
-            for alert in ra.alerts {
-                firing_keys.push(alert.alert_key());
-                if let Err(e) = self.reporter.observe(alert, hys.for_duration()).await {
-                    warn!(error = %e, rule = %ra.rule, "sysinfo: failed to publish alert");
-                }
-            }
+            // One `for_secs`, two ways to spend it (#1084): the reporter's
+            // debounce is `for_secs` (`main.rs`), and the rules in `EDGE_RULES`
+            // were declared to it, so it spends the window as a hold for those
+            // and a debounce for the rest without this call site choosing.
             if let Err(e) = self
                 .reporter
-                .reconcile_opts(&ra.rule, &firing_keys, hys.reconcile_opts())
+                .sweep(&[ra.rule.as_str()], ra.alerts, SweepOpts::default())
                 .await
             {
-                warn!(error = %e, rule = %ra.rule, "sysinfo: failed to reconcile alerts");
+                warn!(error = %e, rule = %ra.rule, "sysinfo: alert sweep failed");
             }
         }
     }
@@ -1941,37 +1923,17 @@ mod edge_rule_tests {
     /// alerting off with no warning: `oom_kill_delta > 0` is true for exactly
     /// one tick, `observe` sets `first_seen` on the very call that evaluates
     /// `now - first_seen >= dur`, so the test was `0 >= 60` and the next
-    /// `reconcile` dropped the unpublished entry.
-    #[test]
-    fn an_oom_delta_survives_a_for_secs_an_operator_set() {
-        let h = hysteresis_for(OOM_RULE, 60);
-        assert_eq!(
-            h.for_duration(),
-            Some(Duration::ZERO),
-            "the OOM rule must publish on its only observation"
-        );
-        assert_eq!(
-            h.reconcile_opts().recover_after,
-            Some(Duration::from_secs(60)),
-            "…and be held firing for the window the operator configured"
-        );
-    }
-
-    /// The SMART delta rules are the same shape, and a level rule beside them
-    /// is untouched.
+    /// `reconcile` dropped the unpublished entry. The hold semantics now live
+    /// in `AlertReporter` (#1154, its `sweep_tests`); what this crate owns is
+    /// the classification, and `main.rs` declares it once.
     #[test]
     fn the_delta_rules_are_edge_and_the_others_are_not() {
-        for rule in [SMART_MEDIA_ERRORS_RULE, SMART_SATA_ATTRS_RULE] {
-            assert_eq!(
-                hysteresis_for(rule, 60).for_duration(),
-                Some(Duration::ZERO),
-                "{rule} is a per-tick delta"
-            );
+        for rule in [OOM_RULE, SMART_MEDIA_ERRORS_RULE, SMART_SATA_ATTRS_RULE] {
+            assert!(EDGE_RULES.contains(&rule), "{rule} is a per-tick delta");
         }
         for rule in [PRESSURE_CPU_RULE, DISK_USAGE_RULE, THERMAL_RULE, SWAP_RULE] {
-            assert_eq!(
-                hysteresis_for(rule, 60).for_duration(),
-                Some(Duration::from_secs(60)),
+            assert!(
+                !EDGE_RULES.contains(&rule),
                 "{rule} is a level: `for` is its debounce"
             );
         }
@@ -2002,9 +1964,7 @@ mod edge_rule_tests {
     #[test]
     fn the_default_configuration_is_unchanged() {
         assert_eq!(AlertsConfig::default().for_secs, 0);
-        assert_eq!(
-            hysteresis_for(OOM_RULE, 0).for_duration(),
-            hysteresis_for(PRESSURE_CPU_RULE, 0).for_duration()
-        );
+        // At ZERO an edge hold and a level debounce are the same decision —
+        // pinned in sensor-core's `hysteresis_tests::a_zero_for_is_the_same_decision_either_way`.
     }
 }

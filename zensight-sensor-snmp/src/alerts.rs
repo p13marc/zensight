@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
 use zensight_common::{Alert, AlertKind, AlertSeverity, Protocol};
-use zensight_sensor_core::AlertReporter;
+use zensight_sensor_core::{AlertReporter, SweepOpts};
 
 // Stable rule slugs.
 const UNREACHABLE_RULE: &str = "device_unreachable";
@@ -910,7 +910,11 @@ fn evaluate(
 
     // An unreachable device produced no rows this cycle; interface/storage
     // rules would reconcile-away as "recovered", which is wrong — skip them
-    // and keep their previous state until the device answers again.
+    // and keep their previous state until the device answers again. This is
+    // the framework's `Answered::No` (#1154) spelled at grading time: the held
+    // rules are *omitted* from the sweep rather than swept with `Answered::No`,
+    // because ~20 tests read `evaluate`'s output by rule presence. Flipping it
+    // is a contained follow-up, not a behaviour change.
     let device_answered = !obs.all_transport_failed;
 
     // --- device_rebooted ----------------------------------------------------
@@ -1441,19 +1445,20 @@ impl AlertEvaluator {
             Instant::now(),
         );
         for ra in sweeps {
-            let mut firing_keys = Vec::with_capacity(ra.alerts.len());
-            for alert in ra.alerts {
-                firing_keys.push(alert.alert_key());
-                if let Err(e) = self.reporter.observe(alert, for_duration).await {
-                    warn!(error = %e, rule = %ra.rule, device = %self.device, "snmp: failed to publish alert");
-                }
-            }
             if let Err(e) = self
                 .reporter
-                .reconcile_labeled(ra.rule, "device", &self.device, &firing_keys)
+                .sweep(
+                    &[ra.rule],
+                    ra.alerts,
+                    SweepOpts {
+                        scope: Some(("device", &self.device)),
+                        for_duration,
+                        ..Default::default()
+                    },
+                )
                 .await
             {
-                warn!(error = %e, rule = %ra.rule, device = %self.device, "snmp: failed to reconcile alerts");
+                warn!(error = %e, rule = %ra.rule, device = %self.device, "snmp: alert sweep failed");
             }
         }
     }

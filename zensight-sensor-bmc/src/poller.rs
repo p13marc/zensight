@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 use zensight_common::bmc::RedfishSurface;
 use zensight_common::{QosClass, TelemetryValue};
-use zensight_sensor_core::{AlertReporter, Publisher, SensorHealth};
+use zensight_sensor_core::{AlertReporter, Publisher, SensorHealth, SweepOpts};
 
 use crate::alerts::{self, Observation};
 use crate::config::{BmcConfig, Endpoint};
@@ -428,17 +428,18 @@ impl Poller {
             consecutive_failures: failures,
         };
         let firing = alerts::grade(&self.cfg.alerts, &obs);
-        let still: Vec<String> = firing.iter().map(|a| a.alert_key()).collect();
-        for a in firing {
-            if let Err(e) = reporter.observe(a, None).await {
-                tracing::warn!(error = %e, "bmc: alert publish failed");
-            }
-        }
         if let Err(e) = reporter
-            .reconcile_labeled(alerts::RULE_UNREACHABLE, "chassis", &endpoint_chunk, &still)
+            .sweep(
+                &[alerts::RULE_UNREACHABLE],
+                firing,
+                SweepOpts {
+                    scope: Some(("chassis", &endpoint_chunk)),
+                    ..Default::default()
+                },
+            )
             .await
         {
-            tracing::warn!(rule = %alerts::RULE_UNREACHABLE, error = %e, "bmc: reconcile failed");
+            tracing::warn!(rule = %alerts::RULE_UNREACHABLE, error = %e, "bmc: alert sweep failed");
         }
 
         // --- nothing else while the BMC is silent ---------------------------
@@ -474,23 +475,22 @@ impl Poller {
                 consecutive_failures: failures,
             };
             let firing = alerts::grade(&self.cfg.alerts, &obs);
-
-            let mut by_rule: HashMap<&str, Vec<String>> = HashMap::new();
-            for a in &firing {
-                let rule = alerts::ALL_RULES
-                    .iter()
-                    .find(|r| **r == a.rule)
-                    .copied()
-                    .unwrap_or("");
-                by_rule.entry(rule).or_default().push(a.alert_key());
+            // Every chassis-scoped rule reconciles within this chassis's
+            // namespace; a graded rule outside the table is refused by the
+            // reporter rather than published and stranded (#1154).
+            if let Err(e) = reporter
+                .sweep(
+                    alerts::CHASSIS_RULES,
+                    firing,
+                    SweepOpts {
+                        scope: Some(("chassis", &chunk)),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(chassis = %chunk, error = %e, "bmc: alert sweep failed");
             }
-            for a in firing {
-                if let Err(e) = reporter.observe(a, None).await {
-                    tracing::warn!(error = %e, "bmc: alert publish failed");
-                }
-            }
-            self.reconcile_chassis(&reporter, &chunk, &mut by_rule)
-                .await;
         }
 
         // --- a chassis that LEFT the collection ------------------------------
@@ -511,40 +511,25 @@ impl Poller {
                 "bmc: chassis left the Chassis collection; resolving its assertions"
             );
             let chunk = crate::chassis_chunk(&endpoint.name, id);
-            let mut empty: HashMap<&str, Vec<String>> = HashMap::new();
-            self.reconcile_chassis(&reporter, &chunk, &mut empty).await;
+            if let Err(e) = reporter
+                .sweep(
+                    alerts::CHASSIS_RULES,
+                    Vec::new(),
+                    SweepOpts {
+                        scope: Some(("chassis", &chunk)),
+                        ..Default::default()
+                    },
+                )
+                .await
+            {
+                tracing::warn!(chassis = %chunk, error = %e, "bmc: alert sweep failed");
+            }
         }
         if let Some(state) = self.state.get_mut(&endpoint.name) {
             for id in &gone {
                 state.known_present.remove(id);
             }
             state.known_chassis = now;
-        }
-    }
-
-    /// Reconcile every CHASSIS-scoped rule in one chassis's namespace.
-    ///
-    /// `bmc-unreachable` is excluded on purpose: it lives in the endpoint's
-    /// namespace, and reconciling it here — once per chassis, against a list
-    /// no chassis pass ever puts it in — would resolve it the moment any
-    /// chassis answered.
-    async fn reconcile_chassis(
-        &self,
-        reporter: &Arc<AlertReporter>,
-        chunk: &str,
-        by_rule: &mut HashMap<&str, Vec<String>>,
-    ) {
-        for rule in alerts::ALL_RULES {
-            if *rule == alerts::RULE_UNREACHABLE {
-                continue;
-            }
-            let still = by_rule.remove(*rule).unwrap_or_default();
-            if let Err(e) = reporter
-                .reconcile_labeled(rule, "chassis", chunk, &still)
-                .await
-            {
-                tracing::warn!(rule = %rule, error = %e, "bmc: reconcile failed");
-            }
         }
     }
 

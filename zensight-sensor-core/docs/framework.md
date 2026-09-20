@@ -497,16 +497,43 @@ and publishes firing/resolved transitions as LWW state to
 `zensight/v1/<origin>/state/<producer>/alert/<alert_key>` (a `Put(Firing)` to
 raise/update, then `Put(Resolved)` + a `Delete` tombstone to clear).
 
-- `observe(alert, for_duration)` — call for each violation this tick. A `for:`
-  **debounce** window (settable default via `with_debounce`, or per-observe) means
-  an alert must be violated continuously for N before a `Firing` is actually
-  published.
-- `reconcile(rule, &still_firing_keys)` — after evaluating a rule, resolves any
-  alert of that rule no longer in the firing set.
-- `Hysteresis::{Level, Edge}` — **how a rule spends its `for:`** (#1084), and
-  the two halves of that decision (`for_duration()` for `observe`,
-  `reconcile_opts()` for `reconcile_opts`) come from one value so they cannot
-  be paired wrongly.
+- **`sweep(rules, graded, SweepOpts)` — one grading pass, whole** (#1154).
+  Observes every alert in `graded`, then reconciles every rule in `rules`, so
+  a rule that fired nothing resolves. This is *the* call for a poller: the
+  `grade → by_rule → observe → reconcile` block four sensors each carried, with
+  the bug two of them had closed — a graded alert whose rule was not in the
+  poller's table fell into a `""`/`"?"` bucket, got published, and was never
+  reconciled; a `Firing` only a restart could retire. `sweep` **refuses** it
+  (logged, `debug_assert!`ed, not observed). Finishes the whole pass before
+  returning the first error, so an observe that failed never skips a resolve.
+  - `SweepOpts::scope: Some((label_key, label_value))` — reconcile within
+    that label only: the proxy case (snmp `device`, bmc `chassis`, pve `node`),
+    where several observed targets share one reporter.
+  - `SweepOpts::answered: Answered::{Yes, No}` — **whether the target
+    answered**. `No` observes what was graded (an `unreachable` rule must keep
+    firing) and resolves *nothing* in scope — no `Resolved`, no recovery clock
+    — because silence is not "clear"; only unpublished debounce entries not
+    graded again are forgotten. Three sensors had each spelled this hold their
+    own way (`device_answered`, `chassis.is_none()`, a per-node `continue`);
+    it is now a value the poller passes. snmp still spells it at grading time
+    (rules omitted from the sweep) — a contained follow-up.
+  - `SweepOpts::for_duration` — this sweep's `for:` window; `None` is the
+    reporter default.
+- `observe(alert, for_duration)` / `reconcile(rule, &still_firing_keys)` — the
+  pair `sweep` is made of, kept for event-driven callers (sentinels, traps,
+  the budget rule): a `for:` **debounce** window (settable default via
+  `with_debounce`, or per-observe) means an alert must be violated
+  continuously for N before a `Firing` is actually published; `reconcile`
+  resolves any alert of that rule no longer in the firing set.
+- `with_edge_rules(rules)` + `Hysteresis::{Level, Edge}` — **how a rule
+  spends its `for:`** (#1084, #1154). The rules whose condition is a per-tick
+  delta are declared **once**, on the reporter; `observe` then publishes them
+  on their only observation and stores the hold *on the entry*, and `retire`
+  spends that hold instead of the call's recovery window — even an
+  `immediate()` override, since an edge condition never "clears". Before this
+  the two halves (`for_duration()` for `observe`, `reconcile_opts()` for
+  `reconcile_opts`) were paired by hand at one call site per sensor.
+  `hysteresis(rule, for)` answers the question for a caller that wants it.
 
   A **level** rule's condition persists while it is true — RSS over a budget, a
   unit failed — so `for` debounces it. An **edge** rule's condition is a
