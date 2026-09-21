@@ -1364,66 +1364,9 @@ impl ZenSight {
     /// can fall through to the next handler.
     fn update_detail(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
         match message {
-            Message::FetchSystemdDetail(topic) => {
+            Message::ForgetCall { procedure } => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.loading(topic);
-                }
-                return ControlFlow::Break(self.query_systemd_detail(topic));
-            }
-            Message::SystemdDetailReceived(topic, result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.apply(topic, result);
-                }
-            }
-            Message::SystemdSetUnitFilter(filter) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.unit_state_filter = filter;
-                    device.systemd_detail.units_table.limit =
-                        crate::view::components::data_table::DEFAULT_LIMIT;
-                }
-            }
-            Message::SystemdSetUnitTypeFilter(filter) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.unit_type_filter = filter;
-                    device.systemd_detail.units_table.limit =
-                        crate::view::components::data_table::DEFAULT_LIMIT;
-                }
-            }
-            Message::SystemdUnitsTableSort(col) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.units_table.toggle_sort(col);
-                }
-            }
-            Message::SystemdUnitsTableFilter(f) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.units_table.set_filter(f);
-                }
-            }
-            Message::SystemdUnitsTableMore => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.units_table.load_more();
-                }
-            }
-            Message::SystemdFetchUnitFile(unit) => {
-                use crate::view::specialized::fetch::Fetch;
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.unit_file = Fetch::Loading;
-                }
-                return ControlFlow::Break(self.query_systemd_unit_file(unit));
-            }
-            Message::SystemdUnitFileReceived(result) => {
-                use crate::view::specialized::fetch::Fetch;
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.unit_file = match result {
-                        Ok(f) => Fetch::Ready(f),
-                        Err(e) => Fetch::Error(e),
-                    };
-                }
-            }
-            Message::SystemdHideUnitFile => {
-                use crate::view::specialized::fetch::Fetch;
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.unit_file = Fetch::Idle;
+                    device.calls.clear(&procedure);
                 }
             }
             // ── Gated PDU outlet control (#956) ──────────────────────────
@@ -1531,18 +1474,6 @@ impl ZenSight {
                 }
             }
 
-            Message::FetchSystemdActionCapability => {
-                return ControlFlow::Break(self.query_systemd_action_capability());
-            }
-            Message::SystemdActionCapabilityReceived(result) => {
-                use crate::view::specialized::fetch::Fetch;
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.capability = match result {
-                        Ok(cap) => Fetch::Ready(cap),
-                        Err(e) => Fetch::Error(e),
-                    };
-                }
-            }
             Message::SystemdUnitActionArm { verb, unit } => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.systemd_detail.pending_action = Some((verb, unit));
@@ -1575,11 +1506,15 @@ impl ZenSight {
                         }));
                     };
                     let key = crate::view::specialized::systemd_detail::action_set_key(&origin);
-                    let timeout = self
-                        .selected_device
-                        .as_ref()
-                        .map(|d| d.systemd_detail.action_timeout())
-                        .unwrap_or_else(|| std::time::Duration::from_secs(35));
+                    let timeout = crate::view::specialized::systemd_detail::action_timeout(
+                        self.selected_device.as_ref().and_then(|d| {
+                            d.calls
+                                .answer::<zensight_common::action::ActionCapability>(
+                                    "action/capability",
+                                )
+                                .ready()
+                        }),
+                    );
                     let command = zensight_common::action::ServiceAction {
                         verb,
                         unit: unit.clone(),
@@ -1593,25 +1528,23 @@ impl ZenSight {
 
             // ── Cross-view identity pivots (#313) ────────────────────────────
             Message::SystemdSelectUnit(unit) => {
-                use crate::view::specialized::fetch::Fetch;
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.selected_unit = unit.clone();
-                    device.systemd_detail.unit_detail = match &unit {
-                        Some(_) => Fetch::Loading,
-                        None => Fetch::Idle,
-                    };
+                    match &unit {
+                        Some(u) => {
+                            device
+                                .filters
+                                .insert("units/selected".to_string(), u.clone());
+                        }
+                        None => {
+                            device.filters.remove("units/selected");
+                        }
+                    }
                     // Collapse the file panel: it belongs to the unit that was
                     // selected, not the one now selected.
-                    device.systemd_detail.unit_file = Fetch::Idle;
+                    device.calls.clear("unit/file");
                 }
                 if let Some(unit) = unit {
-                    return ControlFlow::Break(self.query_systemd_unit_detail(unit));
-                }
-            }
-            Message::SystemdUnitDetailReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.unit_detail =
-                        crate::view::specialized::fetch::Fetch::from_result(result);
+                    return ControlFlow::Break(self.call_now("unit", format!("name={unit}")));
                 }
             }
             Message::PivotToUnit { host, unit } => {
@@ -1930,9 +1863,8 @@ impl ZenSight {
                 }
             }
             Message::Call { procedure, params } => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.calls.loading(&procedure, &params);
-                    return ControlFlow::Break(self.query_call(procedure, params));
+                if self.selected_device.is_some() {
+                    return ControlFlow::Break(self.call_now(&procedure, params));
                 }
             }
             Message::Reply {
@@ -6398,7 +6330,7 @@ impl ZenSight {
             crate::view::specialized::systemd_detail::ActionFailure,
         >,
     ) -> Task<Message> {
-        use crate::view::specialized::systemd_detail::{ActionFailure, SystemdDetailTopic};
+        use crate::view::specialized::systemd_detail::ActionFailure;
         use crate::view::toast::ToastSeverity;
         if let Some(device) = self.selected_device.as_mut() {
             device.systemd_detail.action_inflight = None;
@@ -6470,37 +6402,17 @@ impl ZenSight {
         }
         // Refresh immediately rather than sleeping first: a value one poll stale
         // resolves visibly, and a sleep here is the anti-pattern this replaced.
-        let mut tasks = vec![self.query_systemd_detail(SystemdDetailTopic::Units)];
+        let mut tasks = vec![self.call_now("units", String::new())];
         if let Some(unit) = self
             .selected_device
             .as_ref()
-            .and_then(|d| d.systemd_detail.selected_unit.clone())
+            .and_then(|d| d.filter_opt("units", "selected"))
+            .filter(|u| !u.is_empty())
+            .map(str::to_string)
         {
-            tasks.push(self.query_systemd_unit_detail(unit));
+            tasks.push(self.call_now("unit", format!("name={unit}")));
         }
         Task::batch(tasks)
-    }
-
-    /// Read one unit's on-disk definition. A host that has not opted in serves
-    /// no such procedure, so the absence of a reply is the honest answer.
-    fn query_systemd_unit_file(&self, unit: String) -> Task<Message> {
-        use crate::view::specialized::systemd_detail::{fetch_one, unit_file_key};
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::SystemdUnitFileReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        let key = unit_file_key(
-            self.selected_origin_for(zensight_common::Protocol::Systemd)
-                .as_ref(),
-            &unit,
-        );
-        Task::future(async move {
-            let file = fetch_one::<zensight_common::query_detail::UnitFile>(session, key).await;
-            Message::SystemdUnitFileReceived(file.ok_or_else(|| {
-                "this host does not serve unit files (actions.expose_unit_files is off)".to_string()
-            }))
-        })
     }
 
     /// Re-pull the Units table when the host reports that a unit job finished.
@@ -6515,8 +6427,6 @@ impl ZenSight {
     /// a fetch is already in flight.
     fn maybe_refresh_systemd_units(&mut self) -> Option<Task<Message>> {
         use crate::view::specialized::SpecializedTab;
-        use crate::view::specialized::fetch::Fetch;
-        use crate::view::specialized::systemd_detail::SystemdDetailTopic;
 
         let device = self.selected_device.as_mut()?;
         if !device.device_id.is(zensight_common::Protocol::Systemd)
@@ -6538,10 +6448,10 @@ impl ZenSight {
         // has restarted units at some point in its life is not news.
         let first_sight = device.systemd_detail.job_events_seen.is_none();
         device.systemd_detail.job_events_seen = Some(jobs);
-        if !moved || first_sight || matches!(device.systemd_detail.units, Fetch::Loading) {
+        if !moved || first_sight || device.calls.is_loading("units") {
             return None;
         }
-        Some(self.query_systemd_detail(SystemdDetailTopic::Units))
+        Some(self.call_now("units", String::new()))
     }
 
     /// Ask the drilled-in SNMP sensor what outlet control it permits (#956).
@@ -6617,29 +6527,6 @@ impl ZenSight {
             }
             .await;
             Message::SnmpOutletActionResult(result)
-        })
-    }
-
-    /// Ask the drilled-in host what service control it permits (#283). Every
-    /// 1.4+ sensor answers, enabled or not.
-    fn query_systemd_action_capability(&self) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
-            return Task::none();
-        };
-        let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Systemd) else {
-            return Task::done(Message::SystemdActionCapabilityReceived(Err(
-                "No systemd host selected".to_string(),
-            )));
-        };
-        let key = crate::view::specialized::systemd_detail::action_capability_key(&origin);
-        Task::future(async move {
-            let cap = crate::view::specialized::systemd_detail::fetch_one::<
-                zensight_common::action::ActionCapability,
-            >(session, key)
-            .await;
-            Message::SystemdActionCapabilityReceived(
-                cap.ok_or_else(|| "This host did not answer the service-control probe".to_string()),
-            )
         })
     }
 
@@ -6730,113 +6617,24 @@ impl ZenSight {
     }
 
     /// Fetch an on-demand netlink detail table from the sensor's query channel.
-    /// Prefetch the systemd detail channel(s) a newly-activated tab renders, so
-    /// the panel isn't empty until a manual refresh (#281).
+    /// Prefetch the systemd procedure(s) a newly-activated tab renders, so
+    /// the panel isn't empty until a manual refresh (#281); the Units tab
+    /// also asks what this host permits before it decides which controls to
+    /// offer. Each asked once (#1261).
     fn prefetch_systemd_tab(
-        &self,
+        &mut self,
         tab: crate::view::specialized::SpecializedTab,
     ) -> Option<Task<Message>> {
-        use crate::view::specialized::SpecializedTab;
-        use crate::view::specialized::fetch::Fetch;
-        use crate::view::specialized::systemd_detail::SystemdDetailTopic;
-        let device = self.selected_device.as_ref()?;
-        let topic = match tab {
-            SpecializedTab::Units => SystemdDetailTopic::Units,
-            SpecializedTab::Timers => SystemdDetailTopic::Timers,
-            SpecializedTab::Events => SystemdDetailTopic::Events,
-            SpecializedTab::Cgroups => SystemdDetailTopic::Cgroups,
-            SpecializedTab::Actions => SystemdDetailTopic::Actions,
-            _ => return None,
-        };
-        // Only prefetch when we haven't already loaded/started this channel.
-        let already = match topic {
-            SystemdDetailTopic::Units => !matches!(device.systemd_detail.units, Fetch::Idle),
-            SystemdDetailTopic::Timers => !matches!(device.systemd_detail.timers, Fetch::Idle),
-            SystemdDetailTopic::Events => !matches!(device.systemd_detail.events, Fetch::Idle),
-            SystemdDetailTopic::Cgroups => !matches!(device.systemd_detail.cgroups, Fetch::Idle),
-            SystemdDetailTopic::Actions => !matches!(device.systemd_detail.actions, Fetch::Idle),
-        };
-        // The Units tab also needs to know what this host permits before it can
-        // decide which controls to offer.
-        let probe = (tab == SpecializedTab::Units
-            && matches!(device.systemd_detail.capability, Fetch::Idle))
-        .then(|| self.query_systemd_action_capability());
-        if already {
-            return probe;
-        }
-        Some(match probe {
-            Some(probe) => Task::batch([self.query_systemd_detail(topic), probe]),
-            None => self.query_systemd_detail(topic),
-        })
-    }
-
-    /// Fetch a systemd on-demand detail channel and wrap the outcome (#281).
-    fn query_systemd_detail(
-        &self,
-        topic: crate::view::specialized::systemd_detail::SystemdDetailTopic,
-    ) -> Task<Message> {
-        use crate::view::specialized::netlink_detail::fetch_records;
-        use crate::view::specialized::systemd_detail::{
-            SystemdDetailData, SystemdDetailTopic, fetch_one,
-        };
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::SystemdDetailReceived(
-                topic,
-                Err("Not connected to Zenoh".to_string()),
-            ));
-        };
-        let key = topic.key(
-            self.selected_origin_for(zensight_common::Protocol::Systemd)
-                .as_ref(),
-        );
-        Task::future(async move {
-            let data = match topic {
-                SystemdDetailTopic::Units => fetch_records(session, key)
-                    .await
-                    .map(SystemdDetailData::Units),
-                SystemdDetailTopic::Timers => fetch_records(session, key)
-                    .await
-                    .map(SystemdDetailData::Timers),
-                SystemdDetailTopic::Events => fetch_records(session, key)
-                    .await
-                    .map(SystemdDetailData::Events),
-                // cgroups replies a single tree object (or null), not an array.
-                SystemdDetailTopic::Cgroups => {
-                    Some(SystemdDetailData::Cgroups(fetch_one(session, key).await))
-                }
-                SystemdDetailTopic::Actions => fetch_records(session, key)
-                    .await
-                    .map(SystemdDetailData::Actions),
-            };
-            let result =
-                data.ok_or_else(|| format!("No systemd sensor responded for {}", topic.label()));
-            Message::SystemdDetailReceived(topic, result)
-        })
-    }
-
-    /// Fetch one unit's identity detail (the `unit?name=` procedure) for the
-    /// systemd drill-down panel (#313), targeting the drilled-in host.
-    fn query_systemd_unit_detail(&self, unit: String) -> Task<Message> {
-        use crate::view::specialized::systemd_detail::fetch_unit_detail;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::SystemdUnitDetailReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        let origin = self.selected_origin_for(zensight_common::Protocol::Systemd);
-        Task::future(async move {
-            let result = fetch_unit_detail(session, origin, unit)
-                .await
-                .ok_or_else(|| "No systemd sensor responded".to_string());
-            Message::SystemdUnitDetailReceived(result)
-        })
+        let procedures = crate::view::specialized::systemd::tab_procedures(tab)
+            .iter()
+            .map(|p| (p.to_string(), String::new()));
+        self.prefetch_calls(procedures)
     }
 
     /// Cross-view pivot (#313): open the systemd device for `host` on the Units
     /// tab with `unit`'s drill-down loading. Toast fallback when the host runs
     /// no systemd sensor (missing data is the normal case, never a dead end).
     fn pivot_to_unit(&mut self, host: String, unit: String) -> Task<Message> {
-        use crate::view::specialized::fetch::Fetch;
         let Some(id) = self.dashboard.resolve_device("systemd", &host) else {
             self.toasts.push(
                 ToastSeverity::Info,
@@ -6847,19 +6645,13 @@ impl ZenSight {
         let select = self.select_device(id);
         if let Some(device) = self.selected_device.as_mut() {
             device.specialized_tab = crate::view::specialized::SpecializedTab::Units;
-            device.systemd_detail.selected_unit = Some(unit.clone());
-            device.systemd_detail.unit_detail = Fetch::Loading;
             device
-                .systemd_detail
-                .loading(crate::view::specialized::systemd_detail::SystemdDetailTopic::Units);
+                .filters
+                .insert("units/selected".to_string(), unit.clone());
         }
-        Task::batch([
-            select,
-            self.query_systemd_unit_detail(unit),
-            self.query_systemd_detail(
-                crate::view::specialized::systemd_detail::SystemdDetailTopic::Units,
-            ),
-        ])
+        let detail = self.call_now("unit", format!("name={unit}"));
+        let units = self.call_now("units", String::new());
+        Task::batch([select, detail, units])
     }
 
     /// Cross-view pivot (#313): open the sysinfo device for `host` with the
@@ -7967,6 +7759,16 @@ impl ZenSight {
                 result,
             }
         })
+    }
+
+    /// Mark a procedure in flight on the selected device and call it (#1261)
+    /// — for the app's own calls (a pivot, a refresh after an action), where
+    /// no `Call` message passes through `update` to do the marking.
+    fn call_now(&mut self, procedure: &str, params: String) -> Task<Message> {
+        if let Some(device) = self.selected_device.as_mut() {
+            device.calls.loading(procedure, &params);
+        }
+        self.query_call(procedure.to_string(), params)
     }
 
     /// Call a read procedure on the selected device (#1261): its origin's

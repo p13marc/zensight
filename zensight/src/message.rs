@@ -468,29 +468,11 @@ pub enum Message {
     /// A pump-side failure worth showing (watch refused, monitor failed).
     ExplorerError(String),
 
-    /// Fetch an on-demand systemd detail channel (units/timers/events/cgroups) (#281).
-    FetchSystemdDetail(crate::view::specialized::systemd_detail::SystemdDetailTopic),
-    /// A systemd detail reply for a topic: the decoded payload, or an error message.
-    SystemdDetailReceived(
-        crate::view::specialized::systemd_detail::SystemdDetailTopic,
-        Result<crate::view::specialized::systemd_detail::SystemdDetailData, String>,
-    ),
-    /// Units table (#281): set the active-state filter (`None` = all).
-    SystemdSetUnitFilter(Option<String>),
-    /// Units table: set the unit-type suffix filter (`None` = every type).
-    SystemdSetUnitTypeFilter(Option<String>),
-    /// Units table: sort on a column (toggles direction if already active).
-    SystemdUnitsTableSort(usize),
-    /// Units table: the filter-box text changed.
-    SystemdUnitsTableFilter(String),
-    /// Units table: reveal another page of rows.
-    SystemdUnitsTableMore,
-    /// Read the selected unit's on-disk definition (opt-in per host).
-    SystemdFetchUnitFile(String),
-    /// The unit-file reply, or why there wasn't one.
-    SystemdUnitFileReceived(Result<zensight_common::query_detail::UnitFile, String>),
-    /// Collapse the unit-file panel.
-    SystemdHideUnitFile,
+    /// Forget a procedure's answer on the selected device (#1261), so its
+    /// panel offers the call again — a unit file hidden, a table dismissed.
+    ForgetCall {
+        procedure: String,
+    },
     /// Fetch this host's advertised service-control gate (#283) so the Units tab
     /// can render what it will actually accept.
     // ── Gated PDU outlet control (#956) ─────────────────────────────────
@@ -507,9 +489,6 @@ pub enum Message {
     SnmpOutletConfirm,
     SnmpOutletActionResult(Result<zensight_common::outlet::OutletStatus, String>),
 
-    FetchSystemdActionCapability,
-    /// The service-control probe's reply, or why there wasn't one.
-    SystemdActionCapabilityReceived(Result<zensight_common::action::ActionCapability, String>),
     /// Arm a unit action (#283): the row's buttons swap to an inline
     /// confirm/cancel pair until resolved. `unit` is empty for `daemon-reload`.
     SystemdUnitActionArm {
@@ -916,8 +895,6 @@ pub enum Message {
     /// Open (`Some(unit)`) or close (`None`) the systemd unit drill-down: fetch
     /// `@rpc/systemd/unit?name=` and render the identity panel in the Units tab.
     SystemdSelectUnit(Option<String>),
-    /// The single-unit detail reply for the drill-down panel.
-    SystemdUnitDetailReceived(Result<zensight_common::UnitDetail, String>),
     /// Pivot to the systemd device for `host` with `unit`'s drill-down loading
     /// (process cgroup chip, journald unit-run chip). Toast fallback when no
     /// systemd device exists for the host.

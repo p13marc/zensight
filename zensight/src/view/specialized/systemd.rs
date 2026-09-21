@@ -6,10 +6,10 @@
 use iced::widget::{Column, button, column, row, scrollable, text};
 use iced::{Element, Length, Theme};
 use zensight_common::TelemetryValue;
-use zensight_common::query_detail::{CgroupNode, UnitRecord};
+use zensight_common::action::{ActionCapability, ActionStatus, Verb};
+use zensight_common::query_detail::{CgroupNode, TimerRecord, UnitDetail, UnitFile, UnitRecord};
 
-use zensight_common::action::Verb;
-
+use crate::call::Answer;
 use crate::message::Message;
 use crate::view::components::{
     Column as DataColumn, DataTable, SortKey, TabItem, badge, card, empty_state, section_header,
@@ -17,10 +17,45 @@ use crate::view::components::{
 };
 use crate::view::device::DeviceDetailState;
 use crate::view::specialized::SpecializedTab;
-use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::systemd_detail::{
-    ActionGate, SystemdDetailState, SystemdDetailTopic, SystemdEventRecord, UNIT_TYPES,
+    ActionGate, SystemdDetailTopic, SystemdEventRecord, UNIT_TYPES, UnitFilters, action_gate,
+    permits_daemon_reload,
 };
+
+/// The procedures a tab calls when it opens (#1261): what
+/// `prefetch_systemd_tab` asks for, each once. The Units tab also asks what
+/// this host permits before it decides which controls to offer.
+pub fn tab_procedures(tab: SpecializedTab) -> &'static [&'static str] {
+    match tab {
+        SpecializedTab::Units => &["units", "action/capability"],
+        SpecializedTab::Timers => &["timers"],
+        SpecializedTab::Events => &["events"],
+        SpecializedTab::Cgroups => &["cgroups"],
+        SpecializedTab::Actions => &["actions"],
+        _ => &[],
+    }
+}
+
+/// This host's advertised service-control gate, once the probe answered.
+fn capability(state: &DeviceDetailState) -> Option<&ActionCapability> {
+    state.calls.answer("action/capability").ready()
+}
+
+/// The unit whose identity drill-down panel is open (#313).
+fn selected_unit(state: &DeviceDetailState) -> Option<&str> {
+    state
+        .filter_opt("units", "selected")
+        .filter(|u| !u.is_empty())
+}
+
+/// The Units table's chip message (#1261): one control, one key.
+fn unit_filter(key: &str, value: Option<String>) -> Message {
+    Message::SetDetailFilter {
+        table: "units".to_string(),
+        key: key.to_string(),
+        value: value.unwrap_or_default(),
+    }
+}
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -62,13 +97,7 @@ fn systemd_tabs(state: &DeviceDetailState) -> Vec<TabItem<SpecializedTab>> {
         TabItem::new(Cgroups, "cgroups"),
         // Only on a host that actually offers service control — an audit
         // timeline that can never have entries is just a dead tab.
-        TabItem::new(Actions, "Actions").visible(
-            state
-                .systemd_detail
-                .capability
-                .ready()
-                .is_some_and(|c| c.enabled),
-        ),
+        TabItem::new(Actions, "Actions").visible(capability(state).is_some_and(|c| c.enabled)),
     ]
     .into_iter()
     .map(|t| {
@@ -198,33 +227,46 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     let d = &state.systemd_detail;
     let mut actions = row![refresh_button(SystemdDetailTopic::Units)].spacing(space::XS);
     // daemon-reload is manager-wide, so it belongs to the table, not a row.
-    if d.permits_daemon_reload() {
+    if permits_daemon_reload(capability(state)) {
         actions = actions.push(daemon_reload_control(d.pending_action.as_ref()));
     }
     let header = row![section_header("Units", None), actions]
         .spacing(space::SM)
         .align_y(iced::Alignment::Center);
 
-    let body = fetch_body(&d.units, SystemdDetailTopic::Units, |units| {
-        if units.is_empty() {
-            return empty_state("This host reported no units.", None);
-        }
-        let table = DataTable::new(unit_columns(state))
-            // Chips narrow what the table is about; the filter box searches
-            // within that.
-            .retain(move |u: &UnitRecord| d.chips_admit(u))
-            .searchable(|u: &UnitRecord| format!("{} {}", u.name, u.description))
-            .on_sort(Message::SystemdUnitsTableSort)
-            .on_filter(Message::SystemdUnitsTableFilter)
-            .on_more(Message::SystemdUnitsTableMore)
-            .noun("units")
-            .view(units, &d.units_table);
-        column![table].into()
-    });
+    let filters = UnitFilters::of(state);
+    let body = fetch_body(
+        state.calls.answer("units"),
+        SystemdDetailTopic::Units,
+        |units: &Vec<UnitRecord>| {
+            if units.is_empty() {
+                return empty_state("This host reported no units.", None);
+            }
+            let table = DataTable::new(unit_columns(state))
+                // Chips narrow what the table is about; the filter box searches
+                // within that.
+                .retain(move |u: &UnitRecord| filters.admit(u))
+                .searchable(|u: &UnitRecord| format!("{} {}", u.name, u.description))
+                .on_sort(|column| Message::DetailTableSort {
+                    table: "units".to_string(),
+                    column,
+                })
+                .on_filter(|query| Message::DetailTableFilter {
+                    table: "units".to_string(),
+                    query,
+                })
+                .on_more(Message::DetailTableMore {
+                    table: "units".to_string(),
+                })
+                .noun("units")
+                .view(units, state.table("units"));
+            column![table].into()
+        },
+    );
 
-    let mut panel = column![header, state_chips(d), type_chips(d)].spacing(space::SM);
+    let mut panel = column![header, state_chips(state), type_chips(state)].spacing(space::SM);
     // One explanation per table rather than one per row.
-    if let Some(note) = gate_note(d) {
+    if let Some(note) = gate_note(state) {
         panel = panel.push(note);
     }
     panel = panel.push(body);
@@ -232,7 +274,7 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     let mut col = column![].spacing(space::MD);
     // Identity drill-down panel (#313): the selected unit's join keys
     // (control group, MainPID, invocation id) rendered as pivot chips.
-    if let Some(unit) = &d.selected_unit {
+    if let Some(unit) = selected_unit(state) {
         col = col.push(card(render_unit_detail_panel(state, unit)));
     }
     col.push(card(panel))
@@ -242,7 +284,6 @@ fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
 /// that answered "service control is off" — a column of permanently dead buttons
 /// is worse than no column.
 fn unit_columns(state: &DeviceDetailState) -> Vec<DataColumn<'_, UnitRecord, Message>> {
-    let d = &state.systemd_detail;
     let mut cols = vec![
         // The unit name is the identity drill-down chip (#313): clicking fetches
         // `@rpc/systemd/unit?name=` and opens the panel above the table.
@@ -267,9 +308,9 @@ fn unit_columns(state: &DeviceDetailState) -> Vec<DataColumn<'_, UnitRecord, Mes
         DataColumn::fill("Description", 3, |u: &UnitRecord| plain(&u.description))
             .sortable(|u: &UnitRecord| SortKey::Text(u.description.clone())),
     ];
-    if !matches!(d.capability.ready(), Some(c) if !c.enabled) {
+    if !matches!(capability(state), Some(c) if !c.enabled) {
         cols.push(DataColumn::fill("Actions", 3, move |u: &UnitRecord| {
-            action_cell(d, u)
+            action_cell(state, u)
         }));
     }
     cols
@@ -278,18 +319,16 @@ fn unit_columns(state: &DeviceDetailState) -> Vec<DataColumn<'_, UnitRecord, Mes
 /// Active-state chips, derived from the states actually present rather than a
 /// fixed four — `activating`/`reloading` are already colour-coded in the table,
 /// so they should be selectable too.
-fn state_chips(d: &SystemdDetailState) -> Element<'_, Message> {
-    let mut present: Vec<&str> = d
-        .units
+fn state_chips(state: &DeviceDetailState) -> Element<'_, Message> {
+    let filters = UnitFilters::of(state);
+    let mut present: Vec<&str> = state
+        .calls
+        .answer::<Vec<UnitRecord>>("units")
         .ready()
         .map(|units| {
             units
                 .iter()
-                .filter(|u| {
-                    d.unit_type_filter
-                        .as_deref()
-                        .is_none_or(|s| u.name.ends_with(s))
-                })
+                .filter(|u| filters.unit_type.is_none_or(|s| u.name.ends_with(s)))
                 .map(|u| u.active_state.as_str())
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
@@ -298,28 +337,29 @@ fn state_chips(d: &SystemdDetailState) -> Element<'_, Message> {
         .unwrap_or_default();
     // Keep a selected state visible even once nothing is in it, or the chip that
     // produced an empty table would vanish and strand the operator.
-    if let Some(f) = d.unit_state_filter.as_deref()
+    if let Some(f) = filters.state
         && !present.contains(&f)
     {
         present.push(f);
     }
-    let mut r = row![filter_chip("all", d.unit_state_filter.is_none(), None)].spacing(space::XS);
+    let mut r = row![filter_chip("all", filters.state.is_none(), None)].spacing(space::XS);
     for s in present {
         r = r.push(filter_chip_owned(
             s.to_string(),
-            d.unit_state_filter.as_deref() == Some(s),
+            filters.state == Some(s),
             Some(s.to_string()),
         ));
     }
     r.into()
 }
 
-fn type_chips(d: &SystemdDetailState) -> Element<'_, Message> {
-    let mut r = row![type_chip("all types", d.unit_type_filter.is_none(), None)].spacing(space::XS);
+fn type_chips(state: &DeviceDetailState) -> Element<'_, Message> {
+    let filters = UnitFilters::of(state);
+    let mut r = row![type_chip("all types", filters.unit_type.is_none(), None)].spacing(space::XS);
     for t in UNIT_TYPES {
         r = r.push(type_chip(
             t,
-            d.unit_type_filter.as_deref() == Some(t),
+            filters.unit_type == Some(t),
             Some(t.to_string()),
         ));
     }
@@ -327,11 +367,12 @@ fn type_chips(d: &SystemdDetailState) -> Element<'_, Message> {
 }
 
 /// The one-line explanation of this host's gate, when there is something to say.
-fn gate_note(d: &SystemdDetailState) -> Option<Element<'_, Message>> {
+fn gate_note(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    let probe = state.calls.answer::<ActionCapability>("action/capability");
     // The host's own words win when it supplies them (#866): only the sensor
     // knows which switch is off and which file holds it. The sentences below
     // stay as the fallback for a sensor older than the `reason` field.
-    if let Fetch::Ready(ref c) = d.capability
+    if let Answer::Ready(c) = &probe
         && let Some(reason) = c.reason.as_deref()
     {
         return Some(
@@ -341,20 +382,20 @@ fn gate_note(d: &SystemdDetailState) -> Option<Element<'_, Message>> {
                 .into(),
         );
     }
-    let note = match d.capability {
-        Fetch::Ready(ref c) if !c.enabled => {
+    let note = match &probe {
+        Answer::Ready(c) if !c.enabled => {
             "Service control is disabled on this host — the sensor is read-only.".to_string()
         }
-        Fetch::Ready(ref c) if c.allow_units.is_empty() => {
+        Answer::Ready(c) if c.allow_units.is_empty() => {
             "Service control is enabled but its allowlist is empty, so every unit is refused."
                 .to_string()
         }
-        Fetch::Ready(ref c) => format!("Service control allows: {}", c.allow_units.join(", ")),
-        Fetch::Error(_) => {
+        Answer::Ready(c) => format!("Service control allows: {}", c.allow_units.join(", ")),
+        Answer::Error(_) => {
             "This host did not answer the service-control probe — actions may be unavailable."
                 .to_string()
         }
-        _ => return None,
+        Answer::Idle | Answer::Loading => return None,
     };
     Some(text(note).size(font::CAPTION).style(dim).into())
 }
@@ -368,7 +409,6 @@ fn render_unit_detail_panel<'a>(
     state: &'a DeviceDetailState,
     unit: &'a str,
 ) -> Element<'a, Message> {
-    let d = &state.systemd_detail;
     let host = &state.device_id.source;
     let close = button(text("Close").size(font::CAPTION))
         .padding([3, 9])
@@ -393,16 +433,16 @@ fn render_unit_detail_panel<'a>(
         .into()
     };
 
-    let body: Element<'a, Message> = match &d.unit_detail {
-        Fetch::Idle | Fetch::Loading => text("Fetching unit detail…")
+    let body: Element<'a, Message> = match state.calls.answer::<UnitDetail>("unit") {
+        Answer::Idle | Answer::Loading => text("Fetching unit detail…")
             .size(font::CAPTION)
             .style(dim)
             .into(),
-        Fetch::Error(e) => text(format!("unit detail unavailable: {e}"))
+        Answer::Error(e) => text(format!("unit detail unavailable: {e}"))
             .size(font::CAPTION)
             .style(dim)
             .into(),
-        Fetch::Ready(detail) => {
+        Answer::Ready(detail) => {
             let mut colm = column![
                 line("description", detail.description.clone()),
                 line(
@@ -475,7 +515,7 @@ fn render_unit_detail_panel<'a>(
         }
     };
 
-    column![header, body, unit_file_section(d, unit)]
+    column![header, body, unit_file_section(state, unit)]
         .spacing(space::SM)
         .into()
 }
@@ -484,29 +524,34 @@ fn render_unit_detail_panel<'a>(
 ///
 /// Opt-in per host (`actions.expose_unit_files`), so a sensor that does not
 /// serve it answers nothing and the panel says so rather than spinning.
-fn unit_file_section<'a>(d: &'a SystemdDetailState, unit: &'a str) -> Element<'a, Message> {
-    match &d.unit_file {
-        Fetch::Idle => button(text("View unit file").size(font::CAPTION))
+fn unit_file_section<'a>(state: &'a DeviceDetailState, unit: &'a str) -> Element<'a, Message> {
+    match state.calls.answer::<UnitFile>("unit/file") {
+        Answer::Idle => button(text("View unit file").size(font::CAPTION))
             .padding([2, 8])
             .style(iced::widget::button::secondary)
-            .on_press(Message::SystemdFetchUnitFile(unit.to_string()))
+            .on_press(Message::Call {
+                procedure: "unit/file".to_string(),
+                params: format!("name={unit}"),
+            })
             .into(),
-        Fetch::Loading => text("Reading unit file…")
+        Answer::Loading => text("Reading unit file…")
             .size(font::CAPTION)
             .style(dim)
             .into(),
-        Fetch::Error(e) => text(format!("Unit file unavailable: {e}"))
+        Answer::Error(e) => text(format!("Unit file unavailable: {e}"))
             .size(font::CAPTION)
             .style(dim)
             .into(),
-        Fetch::Ready(file) => {
+        Answer::Ready(file) => {
             let mut colm = column![
                 row![
                     section_header("Unit file", None),
                     button(text("Hide").size(font::CAPTION))
                         .padding([2, 8])
                         .style(iced::widget::button::text)
-                        .on_press(Message::SystemdHideUnitFile),
+                        .on_press(Message::ForgetCall {
+                            procedure: "unit/file".to_string(),
+                        }),
                 ]
                 .spacing(space::SM)
                 .align_y(iced::Alignment::Center)
@@ -555,7 +600,6 @@ fn unit_file_section<'a>(d: &'a SystemdDetailState, unit: &'a str) -> Element<'a
 // ── Timers ────────────────────────────────────────────────────────────────────
 
 fn render_timers_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.systemd_detail;
     let header = row![
         section_header("Timers", None),
         refresh_button(SystemdDetailTopic::Timers),
@@ -563,36 +607,41 @@ fn render_timers_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
 
-    let body = fetch_body(&d.timers, SystemdDetailTopic::Timers, |timers| {
-        if timers.is_empty() {
-            return empty_state("No timer units.", None);
-        }
-        let mut list = column![table_header(&["Timer", "State", "Last", "Next", ""])].spacing(2);
-        for t in timers.iter().take(300) {
-            let overdue: Element<'_, Message> = if t.overdue {
-                container_cell(badge(
-                    // reuse a warning tone for overdue
-                    warn_color(),
-                    "overdue",
-                ))
-            } else {
-                cell("", 1)
-            };
-            list = list.push(
-                row![
-                    cell(&t.name, 3),
-                    cell(&t.active_state, 1),
-                    cell(&fmt_usec(t.last_trigger_usec), 2),
-                    cell(&fmt_usec(t.next_elapse_usec), 2),
-                    overdue,
-                ]
-                .spacing(space::SM),
-            );
-        }
-        column![list, count_note(timers.len(), "timers")]
-            .spacing(space::SM)
-            .into()
-    });
+    let body = fetch_body(
+        state.calls.answer("timers"),
+        SystemdDetailTopic::Timers,
+        |timers: &Vec<TimerRecord>| {
+            if timers.is_empty() {
+                return empty_state("No timer units.", None);
+            }
+            let mut list =
+                column![table_header(&["Timer", "State", "Last", "Next", ""])].spacing(2);
+            for t in timers.iter().take(300) {
+                let overdue: Element<'_, Message> = if t.overdue {
+                    container_cell(badge(
+                        // reuse a warning tone for overdue
+                        warn_color(),
+                        "overdue",
+                    ))
+                } else {
+                    cell("", 1)
+                };
+                list = list.push(
+                    row![
+                        cell(&t.name, 3),
+                        cell(&t.active_state, 1),
+                        cell(&fmt_usec(t.last_trigger_usec), 2),
+                        cell(&fmt_usec(t.next_elapse_usec), 2),
+                        overdue,
+                    ]
+                    .spacing(space::SM),
+                );
+            }
+            column![list, count_note(timers.len(), "timers")]
+                .spacing(space::SM)
+                .into()
+        },
+    );
 
     column![card(column![header, body].spacing(space::SM))].spacing(space::MD)
 }
@@ -628,7 +677,6 @@ fn render_sentinel_tab(state: &DeviceDetailState) -> Column<'_, Message> {
 // ── Events ────────────────────────────────────────────────────────────────────
 
 fn render_events_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.systemd_detail;
     let header = row![
         section_header("Control-plane timeline", None),
         refresh_button(SystemdDetailTopic::Events),
@@ -636,16 +684,25 @@ fn render_events_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
 
-    let body = fetch_body(&d.events, SystemdDetailTopic::Events, |events| {
-        if events.is_empty() {
-            return empty_state("No recent unit/job events.", None);
-        }
-        let mut list = column![].spacing(2);
-        for e in events.iter().take(300) {
-            list = list.push(event_row(e));
-        }
-        list.into()
-    });
+    // Timelines render newest-first.
+    let body = fetch_body(
+        state
+            .calls
+            .answer_with("events", |v: &mut Vec<SystemdEventRecord>| {
+                v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix))
+            }),
+        SystemdDetailTopic::Events,
+        |events: &Vec<SystemdEventRecord>| {
+            if events.is_empty() {
+                return empty_state("No recent unit/job events.", None);
+            }
+            let mut list = column![].spacing(2);
+            for e in events.iter().take(300) {
+                list = list.push(event_row(e));
+            }
+            list.into()
+        },
+    );
 
     column![card(column![header, body].spacing(space::SM))].spacing(space::MD)
 }
@@ -670,7 +727,6 @@ fn event_row(e: &SystemdEventRecord) -> Element<'_, Message> {
 // ── Service-control audit timeline (#283) ─────────────────────────────────────
 
 fn render_actions_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.systemd_detail;
     let header = row![
         section_header("Service-control audit", None),
         refresh_button(SystemdDetailTopic::Actions),
@@ -678,16 +734,24 @@ fn render_actions_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
 
-    let body = fetch_body(&d.actions, SystemdDetailTopic::Actions, |actions| {
-        if actions.is_empty() {
-            return empty_state("No service actions have been attempted on this host.", None);
-        }
-        let mut list = column![table_header(&["When", "Verb", "Unit", "Outcome"])].spacing(2);
-        for a in actions.iter().take(200) {
-            list = list.push(action_row(a));
-        }
-        list.into()
-    });
+    let body = fetch_body(
+        state
+            .calls
+            .answer_with("actions", |v: &mut Vec<ActionStatus>| {
+                v.sort_by_key(|a| std::cmp::Reverse(a.ts_unix))
+            }),
+        SystemdDetailTopic::Actions,
+        |actions: &Vec<ActionStatus>| {
+            if actions.is_empty() {
+                return empty_state("No service actions have been attempted on this host.", None);
+            }
+            let mut list = column![table_header(&["When", "Verb", "Unit", "Outcome"])].spacing(2);
+            for a in actions.iter().take(200) {
+                list = list.push(action_row(a));
+            }
+            list.into()
+        },
+    );
 
     let note = text(
         "Every attempt is recorded, refused ones included; the sensor also writes each to its audit log.",
@@ -755,7 +819,6 @@ fn toned<'a>(value: String, tone: Tone, portion: u16) -> Element<'a, Message> {
 // ── cgroups tree ──────────────────────────────────────────────────────────────
 
 fn render_cgroups_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.systemd_detail;
     let header = row![
         section_header("cgroup tree", None),
         refresh_button(SystemdDetailTopic::Cgroups),
@@ -763,30 +826,35 @@ fn render_cgroups_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
 
-    let body = fetch_body(&d.cgroups, SystemdDetailTopic::Cgroups, |tree| match tree {
-        Some(root) => {
-            let mut rows: Vec<(usize, &CgroupNode)> = Vec::new();
-            flatten_cgroup(root, 0, &mut rows);
-            let mut list = column![table_header(&["Node", "Mem", "CPU", "Tasks"])].spacing(2);
-            for (depth, node) in rows.iter().take(400) {
-                let indent = "    ".repeat(*depth);
-                let name = format!("{indent}{}", node.name);
-                list = list.push(
-                    row![
-                        cell(&name, 4),
-                        cell(&opt_bytes(node.mem_bytes), 1),
-                        cell(&opt_usec(node.cpu_usec), 1),
-                        cell(&opt_num(node.tasks), 1),
-                    ]
-                    .spacing(space::SM),
-                );
+    // cgroups replies a single tree object (or null), not an array.
+    let body = fetch_body(
+        state.calls.answer("cgroups"),
+        SystemdDetailTopic::Cgroups,
+        |tree: &Option<CgroupNode>| match tree {
+            Some(root) => {
+                let mut rows: Vec<(usize, &CgroupNode)> = Vec::new();
+                flatten_cgroup(root, 0, &mut rows);
+                let mut list = column![table_header(&["Node", "Mem", "CPU", "Tasks"])].spacing(2);
+                for (depth, node) in rows.iter().take(400) {
+                    let indent = "    ".repeat(*depth);
+                    let name = format!("{indent}{}", node.name);
+                    list = list.push(
+                        row![
+                            cell(&name, 4),
+                            cell(&opt_bytes(node.mem_bytes), 1),
+                            cell(&opt_usec(node.cpu_usec), 1),
+                            cell(&opt_num(node.tasks), 1),
+                        ]
+                        .spacing(space::SM),
+                    );
+                }
+                column![list, count_note(rows.len(), "nodes")]
+                    .spacing(space::SM)
+                    .into()
             }
-            column![list, count_note(rows.len(), "nodes")]
-                .spacing(space::SM)
-                .into()
-        }
-        None => empty_state("No cgroup subtree returned.", None),
-    });
+            None => empty_state("No cgroup subtree returned.", None),
+        },
+    );
 
     column![card(column![header, body].spacing(space::SM))].spacing(space::MD)
 }
@@ -800,24 +868,24 @@ fn flatten_cgroup<'a>(node: &'a CgroupNode, depth: usize, out: &mut Vec<(usize, 
 
 // ── Shared fetch/table helpers ────────────────────────────────────────────────
 
-/// Render a `Fetch<T>` panel: idle → load button, loading → note, error →
-/// message + retry, ready → the caller's content.
+/// Render a procedure's [`Answer`] panel: idle → load button, loading →
+/// note, error → message + retry, ready → the caller's content.
 fn fetch_body<'a, T>(
-    fetch: &'a Fetch<T>,
+    answer: Answer<'a, T>,
     topic: SystemdDetailTopic,
     ready: impl FnOnce(&'a T) -> Element<'a, Message>,
 ) -> Element<'a, Message> {
-    match fetch {
-        Fetch::Idle => empty_state(
+    match answer {
+        Answer::Idle => empty_state(
             format!("{} are fetched on demand.", topic.label()),
             Some(load_button(topic, "Load")),
         ),
-        Fetch::Loading => text("Loading…").size(font::BODY).style(dim).into(),
-        Fetch::Error(e) => empty_state(
+        Answer::Loading => text("Loading…").size(font::BODY).style(dim).into(),
+        Answer::Error(e) => empty_state(
             format!("Query failed: {e}"),
             Some(load_button(topic, "Retry")),
         ),
-        Fetch::Ready(v) => ready(v),
+        Answer::Ready(v) => ready(v),
     }
 }
 
@@ -827,7 +895,7 @@ fn refresh_button<'a>(topic: SystemdDetailTopic) -> Element<'a, Message> {
 
 fn load_button<'a>(topic: SystemdDetailTopic, label: &'a str) -> Element<'a, Message> {
     button(text(label).size(font::CAPTION))
-        .on_press(Message::FetchSystemdDetail(topic))
+        .on_press(topic.call())
         .padding([space::XS as u16, space::SM as u16])
         .into()
 }
@@ -841,15 +909,11 @@ fn filter_chip_owned<'a>(
     active: bool,
     value: Option<String>,
 ) -> Element<'a, Message> {
-    chip(label, active, Message::SystemdSetUnitFilter(value))
+    chip(label, active, unit_filter("state", value))
 }
 
 fn type_chip<'a>(label: &str, active: bool, value: Option<String>) -> Element<'a, Message> {
-    chip(
-        label.to_string(),
-        active,
-        Message::SystemdSetUnitTypeFilter(value),
-    )
+    chip(label.to_string(), active, unit_filter("type", value))
 }
 
 fn chip<'a>(label: String, active: bool, on_press: Message) -> Element<'a, Message> {
@@ -934,7 +998,8 @@ fn tiny_button<'a>(label: String, on_press: Option<Message>) -> iced::widget::Bu
 /// default — every click failed, and the operator learned that from an error
 /// toast a second and a half later. Now the row says up front what this host
 /// will accept for this unit.
-fn action_cell<'a>(d: &'a SystemdDetailState, unit: &UnitRecord) -> Element<'a, Message> {
+fn action_cell<'a>(state: &'a DeviceDetailState, unit: &UnitRecord) -> Element<'a, Message> {
+    let d = &state.systemd_detail;
     // An armed action takes over the cell regardless of gate: it is mid-dialogue.
     if let Some((verb, armed)) = d.pending_action.as_ref()
         && armed == &unit.name
@@ -949,7 +1014,7 @@ fn action_cell<'a>(d: &'a SystemdDetailState, unit: &UnitRecord) -> Element<'a, 
         .into();
     }
 
-    match d.action_gate(&unit.name) {
+    match action_gate(capability(state), d.action_inflight.as_ref(), &unit.name) {
         // The whole column is dropped in this case; this arm only guards the
         // gap between the probe answering and the next render.
         ActionGate::Disabled => text("—").size(font::CAPTION).style(dim).into(),
@@ -1199,9 +1264,13 @@ mod tests {
     #[test]
     fn unit_detail_panel_pivots_carry_identity_keys() {
         let mut s = state_with(&[]);
-        s.systemd_detail.selected_unit = Some("redis.service".into());
-        s.systemd_detail.unit_detail =
-            Fetch::Ready(unit_detail(Some(42), Some("deadbeefcafe12345678")));
+        s.filters
+            .insert("units/selected".into(), "redis.service".into());
+        s.calls.set_ready(
+            "unit",
+            "name=redis.service",
+            serde_json::to_value(unit_detail(Some(42), Some("deadbeefcafe12345678"))).unwrap(),
+        );
 
         let mut ui = simulator(render_unit_detail_panel(&s, "redis.service"));
         let _ = ui.click("42 → process explorer");
@@ -1225,8 +1294,13 @@ mod tests {
     fn unit_detail_panel_unresolvable_pivots_render_inert_text() {
         // No MainPID / no invocation id → plain text, never a dead button.
         let mut s = state_with(&[]);
-        s.systemd_detail.selected_unit = Some("redis.service".into());
-        s.systemd_detail.unit_detail = Fetch::Ready(unit_detail(None, None));
+        s.filters
+            .insert("units/selected".into(), "redis.service".into());
+        s.calls.set_ready(
+            "unit",
+            "name=redis.service",
+            serde_json::to_value(unit_detail(None, None)).unwrap(),
+        );
 
         let mut ui = simulator(render_unit_detail_panel(&s, "redis.service"));
         assert!(ui.find("— (not running)").is_ok());
