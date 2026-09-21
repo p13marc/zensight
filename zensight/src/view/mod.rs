@@ -10,6 +10,7 @@ pub mod detection_tuning;
 pub mod device;
 pub mod expectations;
 pub mod explorer;
+pub mod family;
 pub mod fleet;
 pub mod formatting;
 pub mod freshness;

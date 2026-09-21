@@ -57,6 +57,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The family model: rows and columns derived from a producer's slice, not
+  written by hand** (#1257, gate 2 of #1253). `view::family::FamilyModel`
+  turns a `RegistrySlice` into families (the longest common prefix of paths
+  sharing the same variables, ending at the last one; var-less paths group
+  by their prefix as facts; a rest variable makes an open family), fields
+  (the literal tails, each with its declared `kind`, `unit`, `cardinality`,
+  `ttl_s`, `rate`, `description` — a counter presents as a rate in `<unit>/s`)
+  and, from a device's metric map, instances (one per variable binding, the
+  latest point per field). The binder is a private copy over zenkey's
+  `SubjectPattern` until zenkey #460's `RegistrySlice::bind` lands, and is
+  documented as such. The three hand-written folds — bmc's `fold`, pve's
+  `backup_rows`, probe's `target_rows` — are each pinned against the
+  derivation on their own fixture. The system-view ratchet advances to
+  `GATE 3/view`; nothing renders the model yet (#1258).
+
 - **Every process on the bus is a producer: the service tier gets a health
   document, a budget and the shed ladder** (#1202, closes it; #1059). The
   correlator, the policy compiler (`zensight-desired run`) and both exporters

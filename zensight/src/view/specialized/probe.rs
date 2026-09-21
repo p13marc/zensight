@@ -369,6 +369,69 @@ mod tests {
     /// reading that tests `up` first collapses the two states the sensor went
     /// to the trouble of separating, and prints "down" where "timed out after
     /// 20.0 s" was available.
+    /// #1257: the family model derives from the probe slice what
+    /// `target_rows` does by hand — one instance per `{target}` with every
+    /// check's result as a sibling column — so the two agree on the row set
+    /// and on every reading of this fixture. The outcome verdict (timed out,
+    /// refused, failed) is the view's; the numbers under it are the model's.
+    #[test]
+    fn the_family_model_reproduces_the_hand_written_rows() {
+        use crate::view::family::FamilyModel;
+        let state = vantage(
+            "probe01",
+            &[
+                ("api-example-com/up", 0.0),
+                ("api-example-com/timeout", 1.0),
+                ("api-example-com/duration_ms", 20_000.0),
+                ("db-example-com/up", 1.0),
+                ("db-example-com/rtt_p95_ms", 3.5),
+                ("db-example-com/loss_pct", 0.0),
+                ("ntp-example-com/ntp_offset_ms", 1.2),
+                ("ntp-example-com/ntp_stratum", 2.0),
+                ("targets/total", 3.0),
+                ("targets/failing", 1.0),
+            ],
+        );
+        let rows = target_rows(&state);
+        let model = FamilyModel::for_producer("probe").expect("probe is compiled in");
+        let derived = model.instances(state.metrics.iter());
+        let idx = model
+            .families
+            .iter()
+            .position(|f| f.path == "{target}")
+            .expect("the per-target family");
+        let targets = derived
+            .iter()
+            .find(|f| f.family == idx)
+            .expect("target instances");
+        let ids: Vec<&str> = targets.instances.iter().map(|i| i.id.as_str()).collect();
+        let mut row_ids: Vec<&str> = rows.iter().map(|r| r.target.as_str()).collect();
+        row_ids.sort_unstable();
+        assert_eq!(ids, row_ids, "one instance per target, the same set");
+        for row in &rows {
+            let inst = targets
+                .instances
+                .iter()
+                .find(|i| i.id == row.target)
+                .unwrap();
+            assert_eq!(row.duration_ms, inst.number("duration_ms"));
+            assert_eq!(row.rtt_p95_ms, inst.number("rtt_p95_ms"));
+            assert_eq!(row.loss_pct, inst.number("loss_pct"));
+            assert_eq!(row.ntp_offset_ms, inst.number("ntp_offset_ms"));
+            assert_eq!(row.ntp_stratum, inst.number("ntp_stratum"));
+        }
+        // The vantage's own totals are the var-less `targets` family, not a
+        // target — literals bind before variables.
+        let facts_idx = model
+            .families
+            .iter()
+            .position(|f| f.path == "targets")
+            .unwrap();
+        let facts = derived.iter().find(|f| f.family == facts_idx).unwrap();
+        assert_eq!(facts.instances[0].number("failing"), Some(1.0));
+        assert!(!targets.instances.iter().any(|i| i.id == "targets"));
+    }
+
     #[test]
     fn a_timeout_is_its_own_state_and_says_how_long_it_hung() {
         let state = vantage(
