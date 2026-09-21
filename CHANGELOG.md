@@ -57,6 +57,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The subscription follows the definition** (#1262, gate 6 of #1253 —
+  the last: the system-view ratchet wears no `should_panic` any more, and a
+  producer this GUI was never compiled with is seen, modelled, rendered,
+  judged, defined and subscribed to from its slice alone). `view::plan::
+  derived_scope` is a pure function — served definitions, the fleet's slices,
+  what is visible, who is alive → key expressions — and `link_for_stream`
+  feeds it into `LinkConfig.scope` in place of the empty-scope firehose;
+  focus mode and an operator scope still win. The overview subscribes to the
+  union of every producer's definition needs (each field's declared path,
+  variables as `*`; a document panel's subject on the state class) or, with
+  a slice and no definition, its `telemetry/<producer>/**`; the device detail
+  widens to that origin's tree so undeclared subjects wear their finding
+  there. No script runs to decide a subscription. `zensight
+  --print-subscription` prints this build's overview plan from its
+  registries and bundled definitions and exits; `scripts/demo-verify.sh`
+  phase 6 reads it and refuses a single-line firehose. Stated cost: an
+  undeclared subject from a defined producer is not fetched on the overview.
+
 - **`views.toml` — a producer says how its families are shown, and its
   scripts run under limits** (#1259, gate 5 of #1253). `zensight_common::views`
   is the §6.1 vocabulary: closed and structural, no expressions — `label`,

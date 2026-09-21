@@ -93,12 +93,16 @@ cargo build $relflag --locked -p zensight-common --example rpc_get >/dev/null
 # (#1202): a subscriber, because a health document has no late-joiner seed
 # and a GET on it answers nothing.
 cargo build $relflag --locked -p zensight-common --example state_watch >/dev/null
+# The GUI itself, for phase 6 (#1262): `--print-subscription` prints the key
+# expressions this build subscribes to on its overview and exits — no window,
+# no session. The one phase that asks the frontend anything.
+cargo build $relflag --locked -p zensight >/dev/null
 
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" \
     "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-sensor-netlink" "$BIN/zensight-historian" \
     "$BIN/zensight-desired" "$BIN/zensight-correlator" "$BIN/examples/historian-query" \
-    "$BIN/examples/rpc_get" "$BIN/examples/state_watch"
+    "$BIN/examples/rpc_get" "$BIN/examples/state_watch" "$BIN/zensight"
 
 tmp="$(mktemp -d)"
 echo "==> generating configs into $tmp"
@@ -704,3 +708,31 @@ resources block did not reach the runner"
     echo "    $producer: health document with a declared budget"
 done
 echo "OK — the correlator and both exporters publish health documents with self_stats"
+
+# ---------------------------------------------------------------------------
+# Phase 6 (#1262): the GUI does not subscribe to the firehose.
+#
+# `zensight --print-subscription` derives, from this build's registries and
+# bundled view definitions alone, the telemetry key expressions its overview
+# would subscribe to — one per line — and exits. Before #1262 that set was
+# one line, `v1/*/telemetry/**`, whatever the definitions said. The count is
+# what the definitions need (a producer with a slice and no definition still
+# gets its own `<producer>/**`), and the firehose must not be among them.
+# ---------------------------------------------------------------------------
+echo
+echo "==> phase 6: the GUI's subscription follows the definitions"
+plan=$("$BIN/zensight" --print-subscription 2>>"$tmp/zensight.log") \
+    || die "zensight --print-subscription failed$(logs_note "$tmp" "$tmp/zensight.log")"
+plan_lines=$(grep -c . <<<"$plan" || true)
+[[ "$plan_lines" -gt 1 ]] \
+    || die "the GUI's derived subscription is $plan_lines line(s) — the firehose default is back:
+$plan"
+! grep -qx 'v1/\*/telemetry/\*\*' <<<"$plan" \
+    || die "the GUI's derived subscription still contains the telemetry firehose:
+$plan"
+# A defined producer's needs are its fields, not its tree.
+grep -q '^v1/\*/telemetry/bmc/\*/thermal/\*/celsius$' <<<"$plan" \
+    || die "bmc's bundled definition did not narrow its subscription to its fields:
+$plan"
+echo "    $plan_lines key expressions, no firehose, bmc narrowed to its fields"
+echo "OK — the GUI subscribes to what its definitions need"
