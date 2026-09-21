@@ -277,6 +277,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `FetchSystemdActionCapability`, `SystemdActionCapabilityReceived`,
   `SystemdUnitDetailReceived`, `SystemdDetailData`, `query_systemd_*`.
   `Message` is 412 variants.
+- **netring retired onto `Call`/`Reply`** (#1261, the fifth producer — the
+  largest). Its thirteen `@rpc/netring/*` procedures are calls
+  (`NetringTopic::{procedure, params, call}`; the ranked channels carry
+  `top=50`), the twelve tables are keyed by procedure in
+  `DeviceDetailState::tables`, the tab prefetch is the view's own list
+  (`netring::tab_procedures`, JA4H by hand as before), and the matrix→flows
+  pivot is a filter on the `flows` table plus one `call_now`.
+  `NetringDetailState` keeps the anomalies projected onto the device and the
+  flow↔process join slot — neither is an answer to a call. Gone: the
+  thirteen `FetchNetring*` / `Netring*Received` pairs,
+  `NetringTable{Sort,Filter,More}`, `NetringTable`, the thirteen
+  `query_netring_*` wrappers and the `Fetch` fields. The `fetch_*` helpers
+  stay for the fleet-wide topology and Security joins. `Message` is 382
+  variants.
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in
