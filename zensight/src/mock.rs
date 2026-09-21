@@ -552,6 +552,16 @@ pub mod gnmi {
 }
 
 /// Mock parallax (live media) data.
+/// What demo mode answers a read procedure with (#1261): demo mirrors the
+/// wire contract and never serves queryables, so the app's generic call path
+/// asks here instead of a session. `None` is "demo serves no such procedure".
+pub fn demo_reply(producer: &str, procedure: &str) -> Option<serde_json::Value> {
+    match (producer, procedure) {
+        ("parallax", "streams") => serde_json::to_value(parallax::streams()).ok(),
+        _ => None,
+    }
+}
+
 pub mod parallax {
     use super::*;
     use zensight_common::StreamDescriptor;

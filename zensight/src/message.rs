@@ -476,9 +476,6 @@ pub enum Message {
     /// Fetch this host's advertised service-control gate (#283) so the Units tab
     /// can render what it will actually accept.
     // ── Gated PDU outlet control (#956) ─────────────────────────────────
-    /// Ask the drilled-in SNMP sensor what outlet control it permits.
-    FetchSnmpOutletCapability,
-    SnmpOutletCapabilityReceived(Result<zensight_common::outlet::OutletCapability, String>),
     /// Arm one outlet for confirmation. Arming shows a field; it sends nothing.
     SnmpOutletArm(String),
     /// The operator is typing the outlet's name. Nothing is live until it
@@ -653,11 +650,6 @@ pub enum Message {
     DetailTableMore {
         table: String,
     },
-    /// Fetch the parallax stream catalogue (`@rpc/parallax/streams`) for the
-    /// selected host (#408).
-    FetchParallaxStreams,
-    /// A parallax catalogue reply: the advertised streams, or an error.
-    ParallaxStreamsReceived(Result<Vec<zensight_common::StreamDescriptor>, String>),
     /// Open a live JPEG preview tile: sends `open_stream` (codec `mjpeg`) and
     /// spawns the abortable per-tile subscriber task (#408).
     ParallaxOpenTile {
@@ -787,10 +779,6 @@ pub enum Message {
     /// Copy a text snippet (e.g. a proposed `devices[]` entry) to the
     /// clipboard (#579).
     CopyText(String),
-    /// SNMP device view: interface-table sort/filter/paging (#530).
-    SnmpTableSort(usize),
-    SnmpTableFilter(String),
-    SnmpTableMore,
     /// Open a live H.264 video tile (#409) on a specific `tier`: sends
     /// `open_stream` (codec `h264`, that tier) and spawns the decoding
     /// subscriber on the exact tier key. Fired by the per-tier buttons — each

@@ -1177,9 +1177,9 @@ fn test_snmp_interface_table_sort_click() {
     ui.click("name").expect("click name header");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::SnmpTableSort(1))),
+        messages.iter().any(
+            |m| matches!(m, Message::DetailTableSort { table, column: 1 } if table == "interfaces")
+        ),
         "sort message for the name column, got {messages:?}"
     );
 }
@@ -5505,7 +5505,11 @@ fn test_parallax_catalogue_and_tiles() {
     // active badge. Per-tier Live buttons only render on `--features h264`
     // builds (this is a default build), so the tier-open click is asserted in
     // the h264 unit test `catalogue_row_opens_the_clicked_tier`.
-    state.parallax_detail.apply(Ok(mock::parallax::streams()));
+    state.calls.set_ready(
+        "streams",
+        "",
+        serde_json::to_value(mock::parallax::streams()).unwrap(),
+    );
     {
         let mut ui = simulator(parallax_view(&state));
         assert!(ui.find("video0").is_ok());
@@ -5749,26 +5753,32 @@ fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
 
     let device_id = DeviceId::fixture("parallax", "hostA".to_string());
     let mut state = DeviceDetailState::new(device_id);
-    state.parallax_detail.apply(Ok(vec![StreamDescriptor {
-        stream: "video0".into(),
-        codecs: vec!["h264".into(), "mjpeg".into()],
-        active: true,
-        width: Some(1920),
-        height: Some(1080),
-        fps: Some(30.0),
-        // Deliberately shuffled: the rung order is a property of the tiers, not
-        // of the order the catalogue happens to list them in.
-        tiers: vec![
-            tier("high", 1080, 30, 4000),
-            tier("low", 240, 10, 400),
-            tier("medium", 480, 20, 1200),
-        ],
-        description: None,
-    }]));
+    state.calls.set_ready(
+        "streams",
+        "",
+        serde_json::to_value(vec![StreamDescriptor {
+            stream: "video0".into(),
+            codecs: vec!["h264".into(), "mjpeg".into()],
+            active: true,
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            // Deliberately shuffled: the rung order is a property of the tiers, not
+            // of the order the catalogue happens to list them in.
+            tiers: vec![
+                tier("high", 1080, 30, 4000),
+                tier("low", 240, 10, 400),
+                tier("medium", 480, 20, 1200),
+            ],
+            description: None,
+        }])
+        .unwrap(),
+    );
     let generation = state.parallax_detail.allocate_generation();
     state
         .parallax_detail
         .open_tile("video0", generation, None, true, Some("high".into()));
+    let cat = zensight::view::specialized::parallax_detail::catalogue(&state).to_vec();
 
     let deadline = Some(Duration::from_millis(1500));
     let t0 = Instant::now();
@@ -5784,7 +5794,7 @@ fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
     assert_eq!(
         state
             .parallax_detail
-            .tier_decision("video0", deadline, t0 + Duration::from_secs(3)),
+            .tier_decision(&cat, "video0", deadline, t0 + Duration::from_secs(3)),
         None,
         "a tile must not move a rung within seconds of opening"
     );
@@ -5795,7 +5805,7 @@ fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
     assert_eq!(
         state
             .parallax_detail
-            .tier_decision("video0", deadline, after_dwell)
+            .tier_decision(&cat, "video0", deadline, after_dwell)
             .map(|(tier, dir)| (tier, format!("{dir:?}"))),
         Some(("medium".to_string(), "Down".to_string())),
         "a degraded link drops exactly one rung, by cost and not by array order"
@@ -5816,7 +5826,9 @@ fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
             report("zs-1-2", received, lost),
         );
         assert_eq!(
-            state.parallax_detail.tier_decision("video0", deadline, now),
+            state
+                .parallax_detail
+                .tier_decision(&cat, "video0", deadline, now),
             None,
             "an upgrade must not follow a downgrade within the cooldown+dwell"
         );
@@ -5829,7 +5841,7 @@ fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
     assert_eq!(
         state
             .parallax_detail
-            .tier_decision("video0", deadline, now)
+            .tier_decision(&cat, "video0", deadline, now)
             .map(|(tier, dir)| (tier, format!("{dir:?}"))),
         Some(("high".to_string(), "Up".to_string())),
         "sustained recovery climbs one rung back"
@@ -5850,7 +5862,9 @@ fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
         .parallax_detail
         .apply_receiver_report("video0", pinned_gen, report("zs-1-3", 60, 90));
     assert_eq!(
-        state.parallax_detail.tier_decision("video0", deadline, now),
+        state
+            .parallax_detail
+            .tier_decision(&cat, "video0", deadline, now),
         None,
         "a pinned stream is never moved, however bad the link"
     );
@@ -5858,7 +5872,9 @@ fn test_parallax_tier_controller_walks_the_ladder_and_yields_to_the_operator() {
     state.parallax_detail.controller("video0", now).unpin(now);
     assert!(!state.parallax_detail.is_pinned("video0"));
     assert_eq!(
-        state.parallax_detail.tier_decision("video0", deadline, now),
+        state
+            .parallax_detail
+            .tier_decision(&cat, "video0", deadline, now),
         None,
         "releasing a pin serves a fresh dwell before it decides anything"
     );

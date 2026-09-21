@@ -1370,18 +1370,6 @@ impl ZenSight {
                 }
             }
             // ── Gated PDU outlet control (#956) ──────────────────────────
-            Message::FetchSnmpOutletCapability => {
-                return ControlFlow::Break(self.query_snmp_outlet_capability());
-            }
-            Message::SnmpOutletCapabilityReceived(result) => {
-                use crate::view::specialized::fetch::Fetch;
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.outlet_capability = match result {
-                        Ok(cap) => Fetch::Ready(cap),
-                        Err(e) => Fetch::Error(e),
-                    };
-                }
-            }
             Message::SnmpOutletArm(outlet) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.snmp_detail.pending_outlet = Some(outlet);
@@ -1738,22 +1726,6 @@ impl ZenSight {
                     device.tables.entry(table).or_default().load_more();
                 }
             }
-            Message::FetchParallaxStreams => {
-                let host = self.selected_device.as_mut().and_then(|device| {
-                    (device.device_id.is(zensight_common::Protocol::Parallax)).then(|| {
-                        device.parallax_detail.loading();
-                        device.device_id.source.clone()
-                    })
-                });
-                if let Some(host) = host {
-                    return ControlFlow::Break(self.query_parallax_streams(host));
-                }
-            }
-            Message::ParallaxStreamsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.parallax_detail.apply(result);
-                }
-            }
             Message::ParallaxOpenTile { stream } => {
                 return ControlFlow::Break(self.open_parallax_tile(stream));
             }
@@ -1998,21 +1970,6 @@ impl ZenSight {
             }
             Message::CopyText(text) => {
                 return ControlFlow::Break(iced::clipboard::write(text));
-            }
-            Message::SnmpTableSort(col) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.table.toggle_sort(col);
-                }
-            }
-            Message::SnmpTableFilter(q) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.table.set_filter(q);
-                }
-            }
-            Message::SnmpTableMore => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.table.load_more();
-                }
             }
             Message::ParallaxOpenVideoTile { stream, tier } => {
                 // A deliberate click pins the stream (#720). The controller
@@ -6295,29 +6252,6 @@ impl ZenSight {
         Some(self.call_now("units", String::new()))
     }
 
-    /// Ask the drilled-in SNMP sensor what outlet control it permits (#956).
-    /// Answered whether control is on or off, so "off" is an answer.
-    fn query_snmp_outlet_capability(&self) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
-            return Task::none();
-        };
-        let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Snmp) else {
-            return Task::done(Message::SnmpOutletCapabilityReceived(Err(
-                "No SNMP host selected".to_string(),
-            )));
-        };
-        let key = crate::view::specialized::snmp::outlet_capability_key(&origin);
-        Task::future(async move {
-            let cap = crate::view::specialized::systemd_detail::fetch_one::<
-                zensight_common::outlet::OutletCapability,
-            >(session, key)
-            .await;
-            Message::SnmpOutletCapabilityReceived(
-                cap.ok_or_else(|| "This host did not answer the outlet-control probe".to_string()),
-            )
-        })
-    }
-
     /// Issue one gated outlet cycle (#956), origin-scoped.
     fn call_snmp_outlet_action(
         &self,
@@ -6677,9 +6611,13 @@ impl ZenSight {
         if !device.device_id.is(zensight_common::Protocol::Parallax) {
             return None;
         }
+        // The catalogue is the `streams` call's answer, borrowed from the
+        // device's calls; the controller needs the tiles mutably, so it gets
+        // its own copy of the (small) ladder.
+        let catalogue = crate::view::specialized::parallax_detail::catalogue(device).to_vec();
         device
             .parallax_detail
-            .tier_decision(stream, deadline, Instant::now())
+            .tier_decision(&catalogue, stream, deadline, Instant::now())
     }
 
     fn send_parallax_report(
@@ -7322,6 +7260,19 @@ impl ZenSight {
             return Task::none();
         };
         let id = device.device_id.clone();
+        if self.demo_mode {
+            // Demo mirrors the wire contract and serves no queryables: the
+            // mock answers what it has, and says so when it has nothing.
+            let result = crate::mock::demo_reply(&id.producer, &procedure)
+                .map(|value| crate::call::Reply::new(value, crate::call::now_ms()))
+                .ok_or_else(|| "demo mode serves no such procedure".to_string());
+            return Task::done(Message::Reply {
+                device: id,
+                procedure,
+                params,
+                result,
+            });
+        }
         let Some(session) = self.session.clone() else {
             return Task::done(Message::Reply {
                 device: id,
@@ -7345,29 +7296,6 @@ impl ZenSight {
                 params,
                 result,
             }
-        })
-    }
-
-    /// Fetch the parallax stream catalogue for `host` (#408). Demo mode
-    /// serves the mock catalogue (demo mirrors the wire contract; demo never
-    /// serves queryables).
-    fn query_parallax_streams(&self, host: String) -> Task<Message> {
-        if self.demo_mode {
-            return Task::done(Message::ParallaxStreamsReceived(Ok(
-                crate::mock::parallax::streams(),
-            )));
-        }
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::ParallaxStreamsReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        let origin = self.origin_for(zensight_common::Protocol::Parallax, &host);
-        Task::future(async move {
-            let result = crate::view::specialized::parallax_detail::fetch_streams(session, origin)
-                .await
-                .ok_or_else(|| "No parallax sensor responded".to_string());
-            Message::ParallaxStreamsReceived(result)
         })
     }
 
@@ -7705,21 +7633,14 @@ impl ZenSight {
         let Some(needs_video) = device.parallax_detail.expand(&stream) else {
             return Task::none();
         };
-        let advertises_h264 = device
-            .parallax_detail
-            .catalogue
-            .ready()
-            .is_some_and(|streams| {
-                streams
-                    .iter()
-                    .any(|s| s.stream == stream && s.codecs.iter().any(|c| c == "h264"))
-            });
+        use crate::view::specialized::parallax_detail::{ParallaxDetailState, catalogue};
+        let advertises_h264 = catalogue(device)
+            .iter()
+            .any(|s| s.stream == stream && s.codecs.iter().any(|c| c == "h264"));
         if needs_video && parallax_h264::AVAILABLE && advertises_h264 && !self.demo_mode {
             // Expand upgrades a preview to video on the stream's default tier
             // (the per-tier buttons carry an explicit tier; expand has none).
-            let tier = device
-                .parallax_detail
-                .resolve_tier(&stream)
+            let tier = ParallaxDetailState::resolve_tier(catalogue(device), &stream)
                 .unwrap_or_else(|| "medium".to_string());
             return self.open_parallax_video_tile(stream, tier, true);
         }
@@ -9943,12 +9864,18 @@ fn prefetch_channels(producer: &str) -> Vec<Message> {
         // gate (#956), so the probe has to have been asked before the first
         // render — otherwise a PDU's outlets appear controlless for a beat on
         // a deployment where control is on.
-        Protocol::Snmp => vec![Message::FetchSnmpOutletCapability],
+        Protocol::Snmp => vec![Message::Call {
+            procedure: "action/capability".to_string(),
+            params: String::new(),
+        }],
         Protocol::Sysinfo => vec![Message::Call {
             procedure: "processes".to_string(),
             params: crate::view::specialized::sysinfo::ProcessSort::default().params(),
         }],
-        Protocol::Parallax => vec![Message::FetchParallaxStreams],
+        Protocol::Parallax => vec![Message::Call {
+            procedure: "streams".to_string(),
+            params: String::new(),
+        }],
         _ => Vec::new(),
     }
 }
@@ -10151,7 +10078,7 @@ mod prefetch_tests {
         // Parallax prefetches the stream catalogue (#408).
         assert!(matches!(
             prefetch_channels("parallax").as_slice(),
-            [Message::FetchParallaxStreams]
+            [Message::Call { procedure, .. }] if procedure == "streams"
         ));
 
         // SNMP prefetches the outlet-control gate (#956) — not a detail
@@ -10160,7 +10087,7 @@ mod prefetch_tests {
         // controlless for a beat on a deployment where control is on.
         assert!(matches!(
             prefetch_channels("snmp").as_slice(),
-            [Message::FetchSnmpOutletCapability]
+            [Message::Call { procedure, .. }] if procedure == "action/capability"
         ));
 
         // Protocols without queryable detail channels prefetch nothing.

@@ -16,13 +16,11 @@ use zensight_common::{IfStatus, InterfaceEntry, InterfaceTable, TelemetryValue};
 
 use crate::message::Message;
 use crate::view::components::{
-    Column as DataColumn, DataTable, Gauge, SortKey, StatusLed, StatusLedState, TableState, card,
-    empty_state,
+    Column as DataColumn, DataTable, Gauge, SortKey, StatusLed, StatusLedState, card, empty_state,
 };
 use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_rate;
 use crate::view::icons::{self, IconSize};
-use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::metric_sparkline;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -36,8 +34,6 @@ pub struct SnmpDetailState {
     /// Rendered rows derived from the doc (rebuilt on every doc refresh, so
     /// the `DataTable` can borrow them for the view's lifetime).
     pub rows: Vec<IfaceRow>,
-    /// Sort/filter/paging state of the interface table.
-    pub table: TableState,
     /// This device's recent trap/event records (#536), newest first.
     pub events: std::collections::VecDeque<zensight_common::EventRecord>,
 
@@ -47,7 +43,6 @@ pub struct SnmpDetailState {
     /// deployment — which is every deployment until someone decides otherwise
     /// — there is nothing to click, and learning that from an error toast a
     /// second later is not an answer.
-    pub outlet_capability: Fetch<OutletCapability>,
     /// The outlet armed for confirmation, and what the operator has typed so
     /// far. Typing the outlet's own name is the confirmation: a `[confirm]`
     /// button one slip away from a live one is not a confirmation, and this
@@ -103,11 +98,16 @@ impl SnmpDetailState {
     /// Shares [`OutletCapability::permits`] — and therefore
     /// `zensight_common::action::allows` — with the sensor's own gate, so the
     /// button and the decision cannot disagree about what a glob means.
-    pub fn outlet_gate(&self, device: &str, outlet: &str) -> OutletGate {
+    pub fn outlet_gate(
+        &self,
+        capability: Option<&OutletCapability>,
+        device: &str,
+        outlet: &str,
+    ) -> OutletGate {
         if self.outlet_inflight.as_deref() == Some(outlet) {
             return OutletGate::Busy;
         }
-        let Some(cap) = self.outlet_capability.ready() else {
+        let Some(cap) = capability else {
             return OutletGate::Unknown;
         };
         if !cap.enabled {
@@ -291,8 +291,12 @@ fn render_outlets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
     }
     // "Off here" is an answer (#648) — but it is an answer that belongs in a
     // sentence, not in a row of dead buttons.
-    let disabled_reason = match &d.outlet_capability {
-        Fetch::Ready(cap) if !cap.enabled => Some(
+    let capability = state
+        .calls
+        .answer::<OutletCapability>("action/capability")
+        .ready();
+    let disabled_reason = match capability {
+        Some(cap) if !cap.enabled => Some(
             cap.reason
                 .clone()
                 .unwrap_or_else(|| "outlet control is disabled on this sensor".to_string()),
@@ -303,7 +307,7 @@ fn render_outlets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
     let device = state.device_id.source.as_str();
     let mut rows = WColumn::new().spacing(space::XS);
     for (outlet, on) in &outlets {
-        rows = rows.push(outlet_row(d, device, outlet.clone(), *on));
+        rows = rows.push(outlet_row(d, capability, device, outlet.clone(), *on));
     }
 
     let mut panel = column![
@@ -348,6 +352,7 @@ fn render_outlets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
 
 fn outlet_row<'a>(
     d: &'a SnmpDetailState,
+    capability: Option<&'a OutletCapability>,
     device: &str,
     // Owned: the outlet ids are derived from the metric map inside
     // `render_outlets`, so a borrow would not outlive that local.
@@ -389,7 +394,7 @@ fn outlet_row<'a>(
         .align_y(Alignment::Center)
         .into()
     } else {
-        match d.outlet_gate(device, &outlet) {
+        match d.outlet_gate(capability, device, &outlet) {
             OutletGate::Busy => text("cycling…").size(font::CAPTION).style(dim).into(),
             OutletGate::Allowed => {
                 tiny_button("cycle".into(), Some(Message::SnmpOutletArm(outlet.clone())))
@@ -595,11 +600,19 @@ fn render_interface_table(state: &DeviceDetailState) -> Element<'_, Message> {
 
     let table = DataTable::new(iface_columns(state))
         .searchable(|r: &IfaceRow| format!("{} {}", r.name, r.alias.as_deref().unwrap_or_default()))
-        .on_sort(Message::SnmpTableSort)
-        .on_filter(Message::SnmpTableFilter)
-        .on_more(Message::SnmpTableMore)
+        .on_sort(|column| Message::DetailTableSort {
+            table: "interfaces".to_string(),
+            column,
+        })
+        .on_filter(|query| Message::DetailTableFilter {
+            table: "interfaces".to_string(),
+            query,
+        })
+        .on_more(Message::DetailTableMore {
+            table: "interfaces".to_string(),
+        })
         .noun("interfaces")
-        .view(&state.snmp_detail.rows, &state.snmp_detail.table);
+        .view(&state.snmp_detail.rows, state.table("interfaces"));
 
     column![title, table].spacing(space::SM).into()
 }
@@ -1068,28 +1081,34 @@ mod outlet_tests {
     #[test]
     fn the_gate_mirrors_what_the_sensor_advertises() {
         let mut d = SnmpDetailState::default();
-        assert_eq!(d.outlet_gate("pdu-a", "3"), OutletGate::Unknown);
+        assert_eq!(d.outlet_gate(None, "pdu-a", "3"), OutletGate::Unknown);
 
-        d.outlet_capability = Fetch::Ready(cap(false, &[]));
-        assert_eq!(d.outlet_gate("pdu-a", "3"), OutletGate::Disabled);
-
-        d.outlet_capability = Fetch::Ready(cap(true, &[]));
+        let off = cap(false, &[]);
         assert_eq!(
-            d.outlet_gate("pdu-a", "3"),
+            d.outlet_gate(Some(&off), "pdu-a", "3"),
+            OutletGate::Disabled
+        );
+
+        let empty = cap(true, &[]);
+        assert_eq!(
+            d.outlet_gate(Some(&empty), "pdu-a", "3"),
             OutletGate::NotAllowed,
             "an empty allowlist permits nothing even with the switch on"
         );
 
-        d.outlet_capability = Fetch::Ready(cap(true, &["pdu-a/*"]));
-        assert_eq!(d.outlet_gate("pdu-a", "3"), OutletGate::Allowed);
+        let scoped = cap(true, &["pdu-a/*"]);
         assert_eq!(
-            d.outlet_gate("pdu-b", "3"),
+            d.outlet_gate(Some(&scoped), "pdu-a", "3"),
+            OutletGate::Allowed
+        );
+        assert_eq!(
+            d.outlet_gate(Some(&scoped), "pdu-b", "3"),
             OutletGate::NotAllowed,
             "a different PDU is not covered"
         );
 
         d.outlet_inflight = Some("3".to_string());
-        assert_eq!(d.outlet_gate("pdu-a", "3"), OutletGate::Busy);
+        assert_eq!(d.outlet_gate(Some(&scoped), "pdu-a", "3"), OutletGate::Busy);
     }
 
     /// **Typing the name is the confirmation.** A `[confirm]` button one slip
