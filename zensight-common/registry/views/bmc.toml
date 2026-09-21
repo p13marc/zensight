@@ -1,8 +1,9 @@
-# The bmc view (#1259, design §6.2): what `specialized/bmc.rs` says, as a
-# document. Every honesty rule the Rust view encodes (#1127) is here as
+# The bmc view (#1259, design §6.2; #1260 replaces `specialized/bmc.rs` with
+# it): what the Rust view said, as a document. Every honesty rule (#1127) is
 # structure: "no fan threshold" is the ABSENCE of a grade; "absent ≠ 0" is
-# `grade.absent` naming the presence field; "the limit is the publisher's"
-# because `warning`/`critical` name sibling fields and nothing else.
+# `grade.absent` naming the presence field; "not metered" is a graded reading
+# nobody published; "the limit is the publisher's" because `warning`/`critical`
+# name sibling fields and nothing else. One card per chassis (`group_by`).
 [view]
 version  = "1"
 producer = "bmc"
@@ -14,7 +15,7 @@ kind   = "facts"
 title  = "Chassis"
 scope  = "{chassis}"
 fields = ["reachable"]
-note   = { rhai = "if row.reachable == 0 { \"The BMC did not answer this cycle — readings below are the last it gave\" }" }
+note   = { rhai = "if row.reachable == 0.0 { \"The BMC did not answer this cycle — the readings below are the last it gave\" } else { \"The BMC answered this cycle\" }" }
 
 [[panel]]
 kind  = "table"

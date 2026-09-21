@@ -3,14 +3,11 @@
 //! These sections aggregate metrics across all devices of each protocol type,
 //! providing at-a-glance insights before diving into individual devices.
 
-pub mod containers;
 pub mod gnmi;
 pub mod modbus;
 pub mod netflow;
 pub mod netlink;
 pub mod netring;
-pub mod probe;
-pub mod pve;
 pub mod snmp;
 pub mod sysinfo;
 pub mod syslog;
@@ -154,13 +151,14 @@ pub fn overview_section<'a>(
             Some(Protocol::Gnmi) => gnmi::gnmi_overview(&protocol_devices),
             Some(Protocol::Netlink) => netlink::netlink_overview(&protocol_devices),
             Some(Protocol::Netring) => netring::netring_overview(&protocol_devices),
-            // #818: one device per guest, plus the hypervisor itself.
-            Some(Protocol::Pve) => pve::pve_overview(&protocol_devices),
-            // #819: one device per container.
-            Some(Protocol::Container) => containers::container_overview(&protocol_devices),
-            // #820: one device per configured target.
-            Some(Protocol::Probe) => probe::probe_overview(&protocol_devices),
-            _ => generic_overview(&protocol_devices, generic_label(producer)),
+            // A producer with a view definition (#1259) shows its document
+            // over the fleet's devices of that producer (#1260: pve and
+            // probe are documents, their Rust overviews are gone); the rest
+            // get the generic device table.
+            _ => match declarative_overview(&protocol_devices, producer) {
+                Some(view) => view,
+                None => generic_overview(&protocol_devices, generic_label(producer)),
+            },
         };
         column![alert_tile, body].spacing(8).into()
     } else {
@@ -302,6 +300,35 @@ fn muted(t: &Theme) -> text::Style {
     }
 }
 
+/// A producer's overview from its view definition (#1260): the bundled
+/// document rendered over every device of the producer at once
+/// (`definition::render_fleet`), so an instance is one row whichever host
+/// published it, and an `aggregate` panel sees the whole fleet's rows.
+/// `None` when the producer ships no document.
+fn declarative_overview<'a>(
+    devices: &HashMap<&DeviceId, &DeviceState>,
+    producer: &str,
+) -> Option<Element<'a, Message>> {
+    let def = crate::view::definition::Definition::bundled(producer)?;
+    let model = crate::view::family::FamilyModel::for_producer(producer)?;
+    let rendered = crate::view::definition::render_fleet(&model, devices.values().copied(), &def);
+    let mut col = column![].spacing(crate::view::tokens::space::SM);
+    match crate::view::device::render_panels(rendered.panels) {
+        Some(panels) => col = col.push(panels),
+        None => {
+            col = col.push(
+                text("No readings from this producer yet")
+                    .size(font::CAPTION)
+                    .style(muted),
+            )
+        }
+    }
+    for failure in rendered.failures {
+        col = col.push(text(failure).size(font::CAPTION).style(muted));
+    }
+    Some(col.into())
+}
+
 /// Count devices by producer.
 fn count_devices_by_producer(devices: &HashMap<DeviceId, DeviceState>) -> HashMap<String, usize> {
     let mut counts = HashMap::new();
@@ -314,6 +341,13 @@ fn count_devices_by_producer(devices: &HashMap<DeviceId, DeviceState>) -> HashMa
 /// The tab label for a producer: a curated short name for the enum members,
 /// the producer name itself for everyone else (#1256).
 fn producer_short_name(producer: &str) -> String {
+    // The producers without a `Protocol` arm in this file any more (#1260).
+    match producer {
+        "pve" => return "PVE".to_string(),
+        "bmc" => return "BMC".to_string(),
+        "probe" => return "Probes".to_string(),
+        _ => {}
+    }
     match producer.parse::<Protocol>() {
         Ok(Protocol::Snmp) => "SNMP",
         Ok(Protocol::Sysinfo) => "Sysinfo",
@@ -327,16 +361,13 @@ fn producer_short_name(producer: &str) -> String {
         Ok(Protocol::Systemd) => "systemd",
         Ok(Protocol::Parallax) => "Parallax",
         Ok(Protocol::Hostspec) => "hostspec",
-        Ok(Protocol::Pve) => "PVE",
-        Ok(Protocol::Bmc) => "BMC",
         Ok(Protocol::Container) => "Containers",
-        Ok(Protocol::Probe) => "Probes",
         Ok(Protocol::Historian) => "History",
         Ok(Protocol::Correlator) => "Correlator",
         Ok(Protocol::PolicyCompiler) => "Policy compiler",
         Ok(Protocol::ExporterPrometheus) => "Prometheus exporter",
         Ok(Protocol::ExporterOtel) => "OTel exporter",
-        Err(()) => return producer.to_string(),
+        _ => return producer.to_string(),
     }
     .to_string()
 }
@@ -345,13 +376,15 @@ fn producer_short_name(producer: &str) -> String {
 /// overview — the enum members' labels as they were, and the producer's own
 /// name for one outside the enum.
 fn generic_label(producer: &str) -> &str {
+    if producer == "bmc" {
+        // #953: one device per managed chassis.
+        return "chassis";
+    }
     match producer.parse::<Protocol>() {
         Ok(Protocol::Opcua) => "OPC-UA nodes",
         Ok(Protocol::Systemd) => "systemd units",
         Ok(Protocol::Parallax) => "video streams",
         Ok(Protocol::Hostspec) => "host assertions",
-        // #953: one device per managed chassis.
-        Ok(Protocol::Bmc) => "chassis",
         // #898: one device per running instance; the history it holds is
         // read through `@rpc/historian/range` from the charts that need it.
         Ok(Protocol::Historian) => "historians",
@@ -401,9 +434,9 @@ mod tests {
     }
     /// #1128: the tab list was a frozen array of nine, and
     /// `render_protocol_overview` had a match arm for every protocol — so
-    /// eight of those arms were **unreachable code**. `Protocol::Pve =>
-    /// generic_overview(…, "guests")` compiled, was never rendered, and nobody
-    /// noticed for the pve sensor's whole life.
+    /// eight of those arms were **unreachable code**. The pve arm —
+    /// `generic_overview(…, "guests")` — compiled, was never rendered, and
+    /// nobody noticed for the pve sensor's whole life.
     ///
     /// This is the property that makes that unrepeatable: a tab appears for
     /// any protocol with devices, whether or not anyone remembered to list it.

@@ -163,6 +163,12 @@ pub struct Panel {
     /// A string or `()`: a note beside the row.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub note: Option<Slot>,
+    /// A `facts` panel over *every* instance of the scope at once (#1260): a
+    /// script that sees `rows` — the array of row maps — and returns a map
+    /// of fact → value. The fleet aggregates the overview tabs show (nodes
+    /// online, "any node lost quorum") are this, not a per-row slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aggregate: Option<Slot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sort: Option<Sort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,7 +244,12 @@ impl ViewSet {
     pub fn scripts(&self) -> Vec<(String, &str)> {
         let mut out = Vec::new();
         for (i, p) in self.panel.iter().enumerate() {
-            for (name, slot) in [("label", &p.label), ("show", &p.show), ("note", &p.note)] {
+            for (name, slot) in [
+                ("label", &p.label),
+                ("show", &p.show),
+                ("note", &p.note),
+                ("aggregate", &p.aggregate),
+            ] {
                 if let Some(s) = slot.as_ref().and_then(Slot::script) {
                     out.push((format!("panel[{i}].{name}"), s));
                 }

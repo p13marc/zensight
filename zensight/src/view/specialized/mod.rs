@@ -4,7 +4,6 @@
 //! metrics and provides domain-appropriate visualizations.
 
 pub mod attribution;
-pub mod bmc;
 pub mod fetch;
 pub mod gnmi;
 pub mod modbus;
@@ -20,7 +19,6 @@ pub mod parallax_h264;
 pub mod parallax_health;
 pub mod parallax_receiver;
 pub mod parallax_tier;
-pub mod probe;
 pub mod snmp;
 pub mod sysinfo;
 pub mod sysinfo_detail;
@@ -164,47 +162,12 @@ pub fn specialized_view<'a>(
         Protocol::Netring => Some(netring::netring_sensor_view(state, artifact)),
         Protocol::Systemd => Some(systemd::systemd_host_view(state)),
         Protocol::Parallax => Some(parallax::parallax_view(state)),
-        // #821: the sentinel's surfaces are the Alerts view, the Sensors
-        // card and (form, #821 follow-through) the Expectations view; its
-        // device card carries one gauge and needs no specialized tab.
-        Protocol::Hostspec => None,
-        // #818: the pve sensor's surfaces are the per-guest device cards (the
-        // generic view renders its gauges), the Alerts view, and the state
-        // documents in the Bus explorer. A hypervisor-shaped tab — guests,
-        // pools, backup trend — is worth building and is a follow-up.
-        Protocol::Pve => None,
-        // #1127: one panel per chassis — temperatures, fans and supplies, each
-        // reading beside the limits the BMC itself declared for it. The gate is
-        // "did this device publish anything a chassis panel shows": an
-        // unreachable BMC publishes `reachable = 0` every cycle, so it passes
-        // the gate and gets a tab that says so, rather than vanishing.
-        Protocol::Bmc if bmc::has_bmc_readings(state) => Some(bmc::bmc_chassis_view(state)),
-        Protocol::Bmc => None,
-        // #819: surfaces are the per-container device cards, the Alerts view
-        // and the state documents in the Bus explorer, as for pve above.
-        Protocol::Container => None,
-        // #1126: one table per vantage point — outcome (with `timed out` as
-        // its own state, and its duration), burst latency, certificate expiry
-        // and the NTP set. The gate is "did this vantage publish any probe
-        // subject at all".
-        Protocol::Probe if probe::has_probe_results(state) => {
-            Some(probe::probe_vantage_view(state))
-        }
-        Protocol::Probe => None,
-        // #898: the historian's surface is every other view — the charts that
-        // read `@rpc/historian/range` (#909) and the timeline that scrubs it
-        // (#910). A tab of its own would show its health document, which the
-        // Sensors card already does.
-        Protocol::Historian => None,
-        // #1202: the service tier's process identities have one surface — the
-        // Sensors card their health document feeds — and no device tab.
-        Protocol::Correlator
-        | Protocol::PolicyCompiler
-        | Protocol::ExporterPrometheus
-        | Protocol::ExporterOtel => None,
-        // No `_` arm: every enum member decides here, explicitly, whether it
-        // has a tab. A new variant that forgets is a compile error, which is
-        // the point.
+        // Everything else renders through `generic_device_view` (#1256): the
+        // producer's `views.toml` when one exists (#1259 — bmc, pve and probe
+        // are documents since #1260, and their Rust views are gone), the
+        // default family renderer otherwise (#1258). A producer that earns a
+        // bespoke Rust view takes an arm above; the rest do not need one.
+        _ => None,
     }
 }
 

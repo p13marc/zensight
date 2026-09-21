@@ -281,31 +281,12 @@ pub fn protocol_icon<Message: 'static>(
         zensight_common::Protocol::Netring => protocol_netring(size),
         zensight_common::Protocol::Systemd => protocol_systemd(size),
         zensight_common::Protocol::Parallax => protocol_parallax(size),
-        // A gauge-and-alerts sentinel has no iconography of its own yet;
-        // the generic mark keeps the tab honest (#821).
-        zensight_common::Protocol::Hostspec => protocol_generic(size),
-        // #818: a hypervisor is not a protocol with an icon vocabulary of its
-        // own yet; the generic mark keeps the tab honest.
-        zensight_common::Protocol::Pve => protocol_generic(size),
-        // #953: the generic mark. A BMC's identity is the hardware it speaks
-        // for, not a protocol logo.
-        zensight_common::Protocol::Bmc => protocol_generic(size),
-        // #819: the generic mark until containers earn iconography of their own.
-        zensight_common::Protocol::Container => protocol_generic(size),
-        // #820: the generic mark; a probe's identity is its vantage point, not
-        // a protocol logo.
-        zensight_common::Protocol::Probe => protocol_generic(size),
-        // #898: the historian measures nothing, so it has no protocol to
-        // depict — the generic mark, deliberately, rather than borrowing a
-        // sensor's iconography for a service.
-        zensight_common::Protocol::Historian => protocol_generic(size),
-        // #1202: the service tier's process identities — a correlator, a
-        // policy compiler and two exporters — are not sensors and have no
-        // protocol to depict; the generic mark.
-        zensight_common::Protocol::Correlator
-        | zensight_common::Protocol::PolicyCompiler
-        | zensight_common::Protocol::ExporterPrometheus
-        | zensight_common::Protocol::ExporterOtel => protocol_generic(size),
+        // Everything else — the sentinel (#821), the hypervisor (#818), the
+        // BMC (#953), the container and probe sensors (#819, #820), the
+        // historian (#898) and the service tier (#1202) — wears the generic
+        // mark: none has a protocol to depict, and borrowing a sensor's
+        // iconography would be a claim.
+        _ => protocol_generic(size),
     }
 }
 

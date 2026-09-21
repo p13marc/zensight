@@ -205,6 +205,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **bmc, pve, probe and container render from their `views.toml`; their Rust
+  views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
+  and `overview/{pve,probe,containers}.rs` are deleted; the documents in
+  `registry/views/` render them through `view::definition`, and the simulator
+  tests written for the hand-built views run unchanged against the
+  declarative renderer (`zensight/tests/declarative_views.rs`, 25 cases).
+  The renderer grew what those tests needed, as the host's look: unit styles
+  (`Cel` → `58.5°C`), the limit line beside a graded reading, "not metered"
+  and "absent", `group_by` cards, `fmt_fixed`, a fleet render for the
+  overview tabs (`host/id` rows, `host` bound), and the `aggregate` slot — a
+  facts panel whose script sees `rows`, which is how pve's "one node
+  reporting quorum lost outweighs the rest" and the container fleet's
+  "unchecked is not current" survive as scripts. `container` gains a `views`
+  procedure and a document; `registry.lock` +1. Stated gap: the vocabulary's
+  limits are ceilings, so probe's certificate expiry carries no grade — the
+  finding is the note, never a false `ok`. `git grep 'Protocol::Bmc\|
+  Protocol::Pve\|Protocol::Probe' zensight/src/view` is empty.
+
 - **`AlertReporter::sweep` — one grading pass, whole; the edge rules and the
   "target answered" hold are the framework's** (#1154, part of #1059). Four
   pollers carried the same `grade → by_rule → observe → reconcile` block,

@@ -66,7 +66,7 @@ pub const FAILURE_MARKER: &str = "view script failed";
 
 /// The host functions a script may call — pure, and the whole list. `now_ms`
 /// is deliberately not here.
-pub const HOST_FUNCTIONS: [&str; 3] = ["fmt_age", "fmt_bytes", "fmt_unit"];
+pub const HOST_FUNCTIONS: [&str; 4] = ["fmt_age", "fmt_bytes", "fmt_unit", "fmt_fixed"];
 
 /// The engine under the §6.4 limits, with its wall-clock start handle: reset
 /// it before every evaluation.
@@ -87,6 +87,9 @@ fn engine(started: Arc<Mutex<Instant>>) -> Engine {
     });
     e.register_fn("fmt_unit", |v: f64, unit: &str| {
         format!("{} {unit}", fmt_num(v))
+    });
+    e.register_fn("fmt_fixed", |v: f64, decimals: i64| {
+        format!("{v:.*}", decimals.clamp(0, 6) as usize)
     });
     e
 }
@@ -364,7 +367,12 @@ pub fn lint(set: &ViewSet, model: &FamilyModel, file: &str) -> Vec<String> {
         // scope holds.
         let engine = Engine::new();
         let mut scripts: Vec<(String, &str)> = Vec::new();
-        for (name, slot) in [("label", &p.label), ("show", &p.show), ("note", &p.note)] {
+        for (name, slot) in [
+            ("label", &p.label),
+            ("show", &p.show),
+            ("note", &p.note),
+            ("aggregate", &p.aggregate),
+        ] {
             if let Some(s) = slot.as_ref().and_then(Slot::script) {
                 scripts.push((name.to_string(), s));
             }
@@ -382,7 +390,11 @@ pub fn lint(set: &ViewSet, model: &FamilyModel, file: &str) -> Vec<String> {
                 say(format!("{panel}: {slot} does not compile: {e}"));
                 continue;
             }
+            let locals = locals(script);
             for ident in identifiers(script) {
+                if locals.contains(&ident) {
+                    continue;
+                }
                 if ident.starts_with("row.") {
                     let field = ident.trim_start_matches("row.");
                     // `row.backup` alone is the partner's presence.
@@ -393,6 +405,7 @@ pub fn lint(set: &ViewSet, model: &FamilyModel, file: &str) -> Vec<String> {
                         ));
                     }
                 } else if ident == "row"
+                    || ident == "rows"
                     || ident == "decl"
                     || vars.contains(&ident)
                     || HOST_FUNCTIONS.contains(&ident.as_str())
@@ -413,6 +426,49 @@ const KEYWORDS: [&str; 22] = [
     "if", "else", "let", "const", "fn", "return", "true", "false", "loop", "while", "for", "in",
     "break", "continue", "switch", "throw", "try", "catch", "import", "export", "as", "private",
 ];
+
+/// The names a script declares itself — `let x`, `const x`, closure
+/// parameters `|a, b|` — which are not the scope's to provide.
+pub fn locals(script: &str) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for word in ["let ", "const "] {
+        let mut from = 0;
+        while let Some(i) = script[from..].find(word) {
+            let start = from + i + word.len();
+            let name: String = script[start..]
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            if !name.is_empty() {
+                out.insert(name);
+            }
+            from = start;
+        }
+    }
+    // Closure parameters: `|a, b|`.
+    let mut i = 0;
+    while let Some(j) = script[i..].find('|') {
+        let start = i + j + 1;
+        let Some(k) = script[start..].find('|') else {
+            break;
+        };
+        let inner = &script[start..start + k];
+        if !inner.is_empty()
+            && inner
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == ',' || c == ' ')
+        {
+            for p in inner.split(',') {
+                let p = p.trim();
+                if !p.is_empty() {
+                    out.insert(p.to_string());
+                }
+            }
+        }
+        i = start + k + 1;
+    }
+    out
+}
 
 /// The identifiers a script names, lexically: bare names, and `row.<path>`
 /// for property access on `row`. String literals are skipped except for the
@@ -472,6 +528,14 @@ pub fn identifiers(script: &str) -> BTreeSet<String> {
             continue;
         }
         if c.is_alphabetic() || c == '_' {
+            // A property on something else (`rows[0].guests_running`,
+            // `r.quorate`) is that value's, not a name the scope provides.
+            if i > 0 && chars[i - 1] == '.' {
+                while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
+                    i += 1;
+                }
+                continue;
+            }
             let start = i;
             while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
                 i += 1;
@@ -514,6 +578,38 @@ pub fn identifiers(script: &str) -> BTreeSet<String> {
 pub struct Rendered {
     pub panels: Vec<FamilyPanel>,
     pub failures: Vec<String>,
+}
+
+/// The host's look for a declared unit token (#1260): the suffix a reading
+/// wears and the precision it is shown with. Unknown tokens keep their text
+/// after a space and the default number formatting. This table is the
+/// renderer's, so a document names `Cel` and the screen says `°C`.
+pub fn unit_style(unit: &str) -> (&'static str, Option<usize>) {
+    match unit {
+        "Cel" => ("°C", Some(1)),
+        "%" => ("%", Some(1)),
+        "W" => (" W", Some(0)),
+        "ms" => (" ms", Some(1)),
+        "s" => (" s", Some(0)),
+        "By" => (" B", Some(0)),
+        "By/s" => (" B/s", Some(0)),
+        "rpm" | "RPM" => (" RPM", Some(0)),
+        "1" => ("", None),
+        _ => ("", None),
+    }
+}
+
+/// A reading with its unit, in the host's style.
+pub fn format_reading(v: f64, unit: Option<&str>) -> String {
+    match unit {
+        None => fmt_num(v),
+        Some(u) => match unit_style(u) {
+            (suffix, Some(p)) => format!("{v:.*}{suffix}", p),
+            ("", None) if u == "1" => fmt_num(v),
+            ("", None) => format!("{} {u}", fmt_num(v)),
+            (suffix, None) => format!("{}{suffix}", fmt_num(v)),
+        },
+    }
 }
 
 fn dyn_of(v: &zensight_common::TelemetryValue) -> Dynamic {
@@ -575,15 +671,87 @@ fn substitute_vars(literal: &str, bindings: &[(String, String)]) -> String {
     s
 }
 
+/// A numeric reading with its declared unit token, or nothing.
+type Reading = Option<(f64, Option<String>)>;
+
+/// A counter's rate for a metric, from whatever history the caller holds.
+pub type RateFn<'a> = dyn Fn(&str) -> Option<f64> + 'a;
+
 /// Render a device through its definition (#1259): the panels in the
 /// document's order, each over the family model's instances, with the
-/// slots evaluated per row and every script failure collected.
+/// slots evaluated per row and every script failure collected. Rates come
+/// from the view's live history or the store's seeded samples.
 pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
-    let mut out = Rendered::default();
     let Some(model) = state.family.as_ref() else {
-        return out;
+        return Rendered::default();
     };
     let folded = model.instances(state.metrics.iter());
+    let rate = |metric: &str| crate::view::device::counter_rate(state, metric);
+    render_over(model, &folded, &rate, def)
+}
+
+/// Render a fleet's devices of one producer through its definition (#1260):
+/// every device's latest points, folded together — an instance is the same
+/// row whichever host published it, which is what an overview tab shows.
+/// No history, so a counter says the rate comes after the next sample.
+pub fn render_fleet<'a>(
+    model: &FamilyModel,
+    devices: impl IntoIterator<Item = &'a crate::view::dashboard::DeviceState>,
+    def: &Definition,
+) -> Rendered {
+    // Fold per device, then merge: a family with variables is keyed by its
+    // bindings whichever host published it; a var-less family's one row is
+    // kept apart per host (`host` bound to the device's source), so an
+    // `aggregate` over `cluster/*` sees every node's own word.
+    let mut merged: Vec<crate::view::family::FamilyInstances> = Vec::new();
+    for d in devices {
+        for fi in model.instances(d.metrics.iter()) {
+            let family = &model.families[fi.family];
+            let slot = match merged.iter().position(|m| m.family == fi.family) {
+                Some(i) => i,
+                None => {
+                    merged.push(crate::view::family::FamilyInstances {
+                        family: fi.family,
+                        instances: Vec::new(),
+                    });
+                    merged.len() - 1
+                }
+            };
+            for mut inst in fi.instances {
+                // `host` is bound on every fleet row, and the id carries it:
+                // a container named `redis` on two hosts is two containers,
+                // and folding them on the bare name would report one host's
+                // OOM kills against the other's. A cluster-unique key (pve's
+                // vmid) is still joined by its own variable, not by the id.
+                inst.bindings
+                    .insert(0, ("host".to_string(), d.id.source.clone()));
+                inst.id = if family.is_table() {
+                    format!("{}/{}", d.id.source, inst.id)
+                } else {
+                    d.id.source.clone()
+                };
+                match merged[slot].instances.iter_mut().find(|i| i.id == inst.id) {
+                    Some(existing) => existing.values.extend(inst.values),
+                    None => merged[slot].instances.push(inst),
+                }
+            }
+        }
+    }
+    for m in merged.iter_mut() {
+        m.instances.sort_by(|a, b| a.id.cmp(&b.id));
+    }
+    let rate = |_: &str| None;
+    render_over(model, &merged, &rate, def)
+}
+
+/// The panels of a definition over already-folded instances.
+pub fn render_over(
+    model: &FamilyModel,
+    folded: &[crate::view::family::FamilyInstances],
+    rate: &RateFn<'_>,
+    def: &Definition,
+) -> Rendered {
+    let mut out = Rendered::default();
     let instances_of = |family: usize| -> &[Instance] {
         folded
             .iter()
@@ -597,6 +765,12 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
             out.failures.push(line);
         }
     };
+    let group_var = def
+        .set
+        .view
+        .group_by
+        .as_deref()
+        .map(|g| g.trim_start_matches('{').trim_end_matches('}').to_string());
     for (i, p) in def.set.panel.iter().enumerate() {
         let title = p.title.clone().unwrap_or_else(|| p.scope.clone());
         match p.kind.as_str() {
@@ -606,36 +780,20 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
             // than rendering nothing.
             "document" => continue,
             other => {
-                out.panels.push(FamilyPanel {
+                out.panels.push(placeholder(
                     title,
-                    is_table: false,
-                    rows: vec![FamilyRow {
-                        instance: String::new(),
-                        cells: vec![FamilyCell {
-                            field: "kind".into(),
-                            text: format!("panel kind `{other}` is declared and not rendered yet"),
-                        }],
-                        verdict: None,
-                        note: None,
-                    }],
-                });
+                    "kind",
+                    format!("panel kind `{other}` is declared and not rendered yet"),
+                ));
                 continue;
             }
         }
         let Some(resolved) = resolve_scope(model, &p.scope) else {
-            out.panels.push(FamilyPanel {
+            out.panels.push(placeholder(
                 title,
-                is_table: false,
-                rows: vec![FamilyRow {
-                    instance: String::new(),
-                    cells: vec![FamilyCell {
-                        field: "scope".into(),
-                        text: format!("scope `{}` is not a family this producer declares", p.scope),
-                    }],
-                    verdict: None,
-                    note: None,
-                }],
-            });
+                "scope",
+                format!("scope `{}` is not a family this producer declares", p.scope),
+            ));
             continue;
         };
         let family = &model.families[resolved.family];
@@ -659,8 +817,6 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
                 .collect();
             Some((partner, shared, head, by_value))
         });
-        // The columns: `fields` if given (join fields spelled `head.field`),
-        // else every scoped field, minus `hide`.
         let columns: Vec<String> = match &p.fields {
             Some(f) => f.clone(),
             None => all_fields.iter().map(|(s, _)| s.clone()).collect(),
@@ -669,10 +825,54 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
         .filter(|c| !p.hide.contains(c))
         .collect();
 
-        let mut rows: Vec<(Dynamic, FamilyRow)> = Vec::new();
+        // An aggregate panel (#1260): one script over every row at once.
+        if let Some(Slot::Rhai { .. }) = &p.aggregate {
+            let rows: rhai::Array = instances_of(resolved.family)
+                .iter()
+                .map(|inst| Dynamic::from(row_map(inst, &all_fields)))
+                .collect();
+            let mut scope = Scope::new();
+            scope.push("rows", rows);
+            scope.push("decl", decl_map(family, &all_fields));
+            let cells = match def.eval(&format!("panel[{i}].aggregate"), &mut scope) {
+                Ok(v) if v.is_map() => {
+                    let m = v.cast::<Map>();
+                    m.into_iter()
+                        .map(|(k, v)| FamilyCell {
+                            field: k.to_string(),
+                            text: dynamic_text(&v),
+                        })
+                        .collect()
+                }
+                Ok(v) => {
+                    fail(format!(
+                        "panel[{i}].aggregate: returned {} rather than a map",
+                        v.type_name()
+                    ));
+                    Vec::new()
+                }
+                Err(e) => {
+                    fail(e);
+                    Vec::new()
+                }
+            };
+            out.panels.push(FamilyPanel {
+                title,
+                group: None,
+                is_table: false,
+                rows: vec![FamilyRow {
+                    instance: String::new(),
+                    cells,
+                    verdict: None,
+                    note: None,
+                    limits: None,
+                }],
+            });
+            continue;
+        }
+
+        let mut rows: Vec<(Dynamic, Option<String>, FamilyRow)> = Vec::new();
         for instance in instances_of(resolved.family) {
-            // The script's `row`: the scoped fields, plus the join partner
-            // under its head (or `()`).
             let mut row = row_map(instance, &all_fields);
             let mut partner_inst: Option<&Instance> = None;
             if let Some((partner, shared, head, by_value)) = &join {
@@ -718,20 +918,21 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
             // label
             let label = match &p.label {
                 Some(Slot::Literal(l)) => substitute_vars(l, &instance.bindings),
-                Some(Slot::Rhai { .. }) => match def.eval(&format!("panel[{i}].label"), &mut scope)
-                {
-                    Ok(v) if v.is_unit() => instance.id.clone(),
-                    Ok(v) => v.to_string(),
-                    Err(e) => {
-                        fail(e);
-                        instance.id.clone()
+                Some(Slot::Rhai { .. }) => {
+                    match def.eval(&format!("panel[{i}].label"), &mut scope) {
+                        Ok(v) if v.is_unit() => instance.id.clone(),
+                        Ok(v) => v.to_string(),
+                        Err(e) => {
+                            fail(e);
+                            instance.id.clone()
+                        }
                     }
-                },
+                }
                 None => instance.id.clone(),
             };
-            // cells
-            let value_of = |name: &str| -> Option<(f64, Option<String>)> {
-                // `head.field` reaches the partner; a bare name the row.
+            // A field's numeric value and declared unit token: `head.field`
+            // reaches the partner, a bare name the row.
+            let value_of = |name: &str| -> Reading {
                 if let Some((partner, _, head, _)) = &join
                     && let Some(rest) = name.strip_prefix(&format!("{head}."))
                 {
@@ -743,36 +944,25 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
                 let unit = family.field(full).and_then(|f| f.display_unit());
                 instance.number(full).map(|v| (v, unit))
             };
-            let mut cells = Vec::new();
-            for col in &columns {
-                let text = match p.format.get(col).and_then(Slot::script) {
-                    Some(_) => match def.eval(&format!("panel[{i}].format.{col}"), &mut scope) {
-                        Ok(v) if v.is_unit() => {
-                            default_cell(state, family, &all_fields, instance, col, &value_of)
-                        }
-                        Ok(v) => v.to_string(),
-                        Err(e) => {
-                            fail(e);
-                            default_cell(state, family, &all_fields, instance, col, &value_of)
-                        }
-                    },
-                    None => default_cell(state, family, &all_fields, instance, col, &value_of),
-                };
-                cells.push(FamilyCell {
-                    field: col.clone(),
-                    text,
-                });
-            }
             // grade — field names, or a literal that says whose it is
             let mut verdict = None;
+            let mut limits = None;
             let mut note_parts: Vec<String> = Vec::new();
+            let mut not_metered: Option<String> = None;
             if let Some(g) = &p.grade {
                 let present = g
                     .absent
                     .as_ref()
                     .and_then(|a| value_of(a).map(|(v, _)| v != 0.0))
                     .unwrap_or(true);
-                let reading = value_of(&g.reading).map(|(v, _)| v);
+                let reading = value_of(&g.reading);
+                let unit = reading.as_ref().and_then(|(_, u)| u.clone()).or_else(|| {
+                    all_fields
+                        .iter()
+                        .find(|(s, _)| *s == g.reading)
+                        .and_then(|(_, full)| family.field(full))
+                        .and_then(|f| f.display_unit())
+                });
                 let limit = |l: &Option<Limit>| -> Option<f64> {
                     match l {
                         Some(Limit::Field(f)) => value_of(f).map(|(v, _)| v),
@@ -780,17 +970,99 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
                         None => None,
                     }
                 };
-                verdict = LimitRow::new("", reading, "")
+                let (warn, crit) = (limit(&g.warning), limit(&g.critical));
+                verdict = LimitRow::new("", reading.as_ref().map(|(v, _)| *v), "")
                     .with_present(present)
-                    .with_limits(limit(&g.warning), limit(&g.critical))
+                    .with_limits(warn, if present { crit } else { None })
                     .verdict();
-                if !present {
-                    for c in cells.iter_mut() {
-                        if c.field == g.reading {
-                            c.text = "absent".to_string();
+                if present {
+                    limits = match (warn, crit) {
+                        (Some(w), Some(c)) => Some(format!(
+                            "warn {} · crit {}",
+                            format_reading(w, unit.as_deref()),
+                            format_reading(c, unit.as_deref())
+                        )),
+                        (Some(w), None) => {
+                            Some(format!("warn {}", format_reading(w, unit.as_deref())))
                         }
+                        (None, Some(c)) => {
+                            Some(format!("crit {}", format_reading(c, unit.as_deref())))
+                        }
+                        (None, None) => None,
+                    };
+                    if reading.is_none() && (warn.is_some() || crit.is_some()) {
+                        // A limit for a reading nobody published: "not
+                        // metered", not `0` (#1127).
+                        not_metered = Some(g.reading.clone());
                     }
+                } else {
+                    not_metered = Some(g.reading.clone());
                 }
+            }
+            let absent = p
+                .grade
+                .as_ref()
+                .and_then(|g| g.absent.as_ref())
+                .and_then(|a| value_of(a).map(|(v, _)| v == 0.0))
+                .unwrap_or(false);
+            // cells
+            let mut cells = Vec::new();
+            for col in &columns {
+                // A `format` slot says what a missing reading is called
+                // ("never"); without one the grade's own words apply.
+                let graded = not_metered.as_deref() == Some(col.as_str())
+                    && p.format.get(col).and_then(Slot::script).is_none();
+                let text = if graded && absent {
+                    "absent".to_string()
+                } else if graded {
+                    "not metered".to_string()
+                } else {
+                    match p.format.get(col).and_then(Slot::script) {
+                        Some(_) => {
+                            match def.eval(&format!("panel[{i}].format.{col}"), &mut scope) {
+                                Ok(v) if v.is_unit() => default_cell(
+                                    family,
+                                    &all_fields,
+                                    instance,
+                                    col,
+                                    &value_of,
+                                    rate,
+                                ),
+                                Ok(v) => v.to_string(),
+                                Err(e) => {
+                                    fail(e);
+                                    default_cell(
+                                        family,
+                                        &all_fields,
+                                        instance,
+                                        col,
+                                        &value_of,
+                                        rate,
+                                    )
+                                }
+                            }
+                        }
+                        None => default_cell(family, &all_fields, instance, col, &value_of, rate),
+                    }
+                };
+                cells.push(FamilyCell {
+                    field: col.clone(),
+                    text,
+                });
+            }
+            // note
+            if let Some(slot) = &p.note {
+                match slot {
+                    Slot::Literal(l) => note_parts.push(substitute_vars(l, &instance.bindings)),
+                    Slot::Rhai { .. } => match def.eval(&format!("panel[{i}].note"), &mut scope) {
+                        Ok(v) if v.is_unit() => {}
+                        Ok(v) => note_parts.push(v.to_string()),
+                        Err(e) => fail(e),
+                    },
+                }
+            }
+            // A literal limit's provenance rides after the row's own note.
+            if let Some(g) = &p.grade {
                 for l in [&g.warning, &g.critical] {
                     if let Some(Limit::Const {
                         r#const,
@@ -803,17 +1075,6 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
                             fmt_num(*r#const)
                         ));
                     }
-                }
-            }
-            // note
-            if let Some(slot) = &p.note {
-                match slot {
-                    Slot::Literal(l) => note_parts.push(substitute_vars(l, &instance.bindings)),
-                    Slot::Rhai { .. } => match def.eval(&format!("panel[{i}].note"), &mut scope) {
-                        Ok(v) if v.is_unit() => {}
-                        Ok(v) => note_parts.push(v.to_string()),
-                        Err(e) => fail(e),
-                    },
                 }
             }
             // sort key
@@ -837,72 +1098,150 @@ pub fn render(state: &DeviceDetailState, def: &Definition) -> Rendered {
                 }
                 None => Dynamic::from(label.clone()),
             };
+            let group = group_var.as_ref().and_then(|g| {
+                instance
+                    .bindings
+                    .iter()
+                    .find(|(k, _)| k == g)
+                    .map(|(_, v)| v.clone())
+            });
             rows.push((
                 key,
+                group,
                 FamilyRow {
                     instance: label,
                     cells,
                     verdict,
                     note: (!note_parts.is_empty()).then(|| note_parts.join(" · ")),
+                    limits,
                 },
             ));
         }
-        rows.sort_by(|(a, _), (b, _)| cmp_dynamic(a, b));
+        rows.sort_by(|(a, _, _), (b, _, _)| cmp_dynamic(a, b));
         if let Some(n) = p.top_n {
             rows.truncate(n);
         }
         let is_table = p.kind == "table" && family.is_table();
-        out.panels.push(FamilyPanel {
-            title,
-            is_table,
-            rows: rows.into_iter().map(|(_, r)| r).collect(),
-        });
+        // A panel over no instance at all is nothing to show — a device the
+        // producer has published nothing for gets no panel, not an empty one.
+        if rows.is_empty() {
+            continue;
+        }
+        // `group_by` (#1260): one panel per binding of the grouping variable,
+        // in binding order, so a two-chassis enclosure reads as two cards.
+        if group_var.is_some() && rows.iter().any(|(_, g, _)| g.is_some()) {
+            let mut groups: BTreeMap<String, Vec<FamilyRow>> = BTreeMap::new();
+            for (_, g, r) in rows {
+                groups.entry(g.unwrap_or_default()).or_default().push(r);
+            }
+            for (g, rows) in groups {
+                out.panels.push(FamilyPanel {
+                    title: title.clone(),
+                    group: Some(g),
+                    is_table,
+                    rows,
+                });
+            }
+        } else {
+            out.panels.push(FamilyPanel {
+                title,
+                group: None,
+                is_table,
+                rows: rows.into_iter().map(|(_, _, r)| r).collect(),
+            });
+        }
     }
     out
 }
 
-/// A numeric reading with its display unit, or nothing.
-type Reading = Option<(f64, Option<String>)>;
+fn placeholder(title: String, field: &str, text: String) -> FamilyPanel {
+    FamilyPanel {
+        title,
+        group: None,
+        is_table: false,
+        rows: vec![FamilyRow {
+            instance: String::new(),
+            cells: vec![FamilyCell {
+                field: field.into(),
+                text,
+            }],
+            verdict: None,
+            note: None,
+            limits: None,
+        }],
+    }
+}
 
-/// The cell a field shows with no `format` slot: the default renderer's
-/// presentation (#1258).
+/// A script value as a cell: numbers in the reading format, bools as
+/// yes/no, everything else as Rhai prints it.
+fn dynamic_text(v: &Dynamic) -> String {
+    if let Ok(f) = v.as_float() {
+        fmt_num(f)
+    } else if let Ok(i) = v.as_int() {
+        i.to_string()
+    } else if let Ok(b) = v.as_bool() {
+        if b { "yes".into() } else { "no".into() }
+    } else if v.is_unit() {
+        "—".into()
+    } else {
+        v.to_string()
+    }
+}
+
+/// The cell a field shows with no `format` slot: the declared presentation
+/// in the host's unit style — a gauge as `58.5°C`, a counter as a rate or
+/// the honest "rate after the next sample", a bool as yes/no, text as
+/// itself.
 fn default_cell(
-    state: &DeviceDetailState,
     family: &Family,
     all_fields: &[(String, &str)],
     instance: &Instance,
     col: &str,
     value_of: &dyn Fn(&str) -> Reading,
+    rate: &RateFn<'_>,
 ) -> String {
+    use crate::view::family::Presentation;
     match all_fields.iter().find(|(s, _)| s == col) {
-        Some((_, full)) => match family.field(full) {
-            Some(field) => crate::view::device::cell_text(state, field, instance, full),
-            None => instance
-                .point(full)
-                .map(|p| format!("{:?}", p.value))
-                .unwrap_or_default(),
+        Some((_, full)) => match (family.field(full), instance.point(full)) {
+            (Some(field), Some(point)) => match field.presentation() {
+                Presentation::Rate => match rate(&point.metric) {
+                    Some(r) => format_reading(r, field.display_unit().as_deref()),
+                    None => format!(
+                        "{} total · rate after the next sample",
+                        format_reading(instance.number(full).unwrap_or(0.0), field.unit.as_deref())
+                    ),
+                },
+                Presentation::State => match instance.state(full) {
+                    Some(true) => "yes".into(),
+                    Some(false) => "no".into(),
+                    None => format!("{:?}", point.value),
+                },
+                Presentation::Absolute | Presentation::Unknown => match instance.number(full) {
+                    Some(v) => format_reading(v, field.unit.as_deref()),
+                    None => match &point.value {
+                        zensight_common::TelemetryValue::Text(t) => t.clone(),
+                        other => format!("{other:?}"),
+                    },
+                },
+                Presentation::Label => match &point.value {
+                    zensight_common::TelemetryValue::Text(t) => t.clone(),
+                    other => format!("{other:?}"),
+                },
+            },
+            _ => "—".to_string(),
         },
         None => match value_of(col) {
-            Some((v, Some(unit))) => format!("{} {unit}", fmt_num(v)),
-            Some((v, None)) => fmt_num(v),
+            Some((v, unit)) => format_reading(v, unit.as_deref()),
             None => "—".to_string(),
         },
     }
 }
 
 fn cmp_dynamic(a: &Dynamic, b: &Dynamic) -> std::cmp::Ordering {
-    match (a.as_float(), b.as_float()) {
-        (Ok(x), Ok(y)) => x.total_cmp(&y),
-        _ => match (a.as_int(), b.as_int()) {
-            (Ok(x), Ok(y)) => x.cmp(&y),
-            _ => match (
-                a.as_float().ok().or(a.as_int().ok().map(|i| i as f64)),
-                b.as_float().ok().or(b.as_int().ok().map(|i| i as f64)),
-            ) {
-                (Some(x), Some(y)) => x.total_cmp(&y),
-                _ => a.to_string().cmp(&b.to_string()),
-            },
-        },
+    let num = |d: &Dynamic| d.as_float().ok().or(d.as_int().ok().map(|i| i as f64));
+    match (num(a), num(b)) {
+        (Some(x), Some(y)) => x.total_cmp(&y),
+        _ => a.to_string().cmp(&b.to_string()),
     }
 }
 
@@ -1017,7 +1356,7 @@ critical = "upper_critical_c"
         assert!(!uplink.is_table);
         assert_eq!(uplink.rows[0].cells[0].field, "rx_bytes");
         assert!(
-            uplink.rows[0].cells[0].text.ends_with("By/s"),
+            uplink.rows[0].cells[0].text.ends_with(" B/s"),
             "{}",
             uplink.rows[0].cells[0].text
         );
