@@ -1,0 +1,30 @@
+# The container view (#1259; #1260 replaces `overview/containers.rs` with it):
+# every container on every host, worst first — image drift outranks OOM kills
+# — with the worst of its three pressure gauges named, and a fleet count
+# that never mistakes "nobody checked the image" for "current": an image is
+# behind, current, or UNCHECKED, and a wholly unchecked fleet is not a clean
+# bill of health.
+[view]
+version  = "1"
+producer = "container"
+title    = "Containers"
+
+[[panel]]
+kind      = "facts"
+title     = "Fleet"
+scope     = "{name}"
+aggregate = { rhai = "#{ \"containers\": rows.len(), \"running\": rows.filter(|r| r.running == 1.0).len(), \"image behind upstream\": rows.filter(|r| r.image_behind_upstream == 1.0).len(), \"image unchecked\": rows.filter(|r| r.image_behind_upstream == ()).len(), \"with OOM kills\": rows.filter(|r| r.oom_kills_total != () && r.oom_kills_total > 0.0).len() }" }
+
+[[panel]]
+kind   = "table"
+title  = "Containers"
+scope  = "{name}"
+label  = "$host/$name"
+fields = ["running", "restart_count", "oom_kills_total", "memory_ratio", "healthy"]
+# drifted first, then most OOM-killed — the triage order
+sort   = { rhai = "let oom = if row.oom_kills_total == () { 0.0 } else { row.oom_kills_total }; if row.image_behind_upstream == 1.0 { -1.0e9 - oom } else { -oom }" }
+note   = { rhai = "let standing = if row.image_behind_upstream == 1.0 { \"image behind upstream\" } else if row.image_behind_upstream == () { \"image not checked\" } else { () }; let p = [[\"cpu\", row.cpu_pressure_avg10], [\"memory\", row.memory_pressure_avg10], [\"io\", row.io_pressure_avg10]].filter(|x| x[1] != ()); if p.len() > 0 { p.sort(|a, b| if a[1] > b[1] { -1 } else if a[1] < b[1] { 1 } else { 0 }); let worst = `${p[0][0]} pressure ${fmt_fixed(p[0][1], 1)}%`; if standing == () { worst } else { `${standing} · ${worst}` } } else { standing }" }
+[panel.format]
+# an OOM kill count is a total, not a rate: what matters is that it happened
+oom_kills_total = { rhai = "if row.oom_kills_total == () { () } else { fmt_fixed(row.oom_kills_total, 0) }" }
+restart_count   = { rhai = "if row.restart_count == () { () } else { fmt_fixed(row.restart_count, 0) }" }

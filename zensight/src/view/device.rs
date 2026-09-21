@@ -1222,6 +1222,9 @@ pub struct FamilyRow {
     /// A definition's `note` for this row (#1259), or the provenance of a
     /// literal limit; the default renderer sets none.
     pub note: Option<String>,
+    /// The limits a graded reading was judged against, as text (#1260):
+    /// `warn 75.0°C · crit 89.0°C`. The default renderer sets none.
+    pub limits: Option<String>,
 }
 
 /// One family panel: its title, whether it is a table (rows per instance)
@@ -1229,6 +1232,9 @@ pub struct FamilyRow {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FamilyPanel {
     pub title: String,
+    /// The binding of the definition's `group_by` variable this panel is
+    /// the card for (#1260); shown before the title. `None` without one.
+    pub group: Option<String>,
     pub is_table: bool,
     pub rows: Vec<FamilyRow>,
 }
@@ -1299,10 +1305,12 @@ pub fn family_panels(state: &DeviceDetailState) -> Vec<FamilyPanel> {
                 cells,
                 verdict,
                 note: None,
+                limits: None,
             });
         }
         panels.push(FamilyPanel {
             title,
+            group: None,
             is_table: family.is_table(),
             rows,
         });
@@ -1350,7 +1358,7 @@ pub fn cell_text(
 
 /// A counter's rate from the last two points the view holds: the live
 /// history first, the store's seeded samples when the view has just opened.
-fn counter_rate(state: &DeviceDetailState, metric: &str) -> Option<f64> {
+pub(crate) fn counter_rate(state: &DeviceDetailState, metric: &str) -> Option<f64> {
     use crate::view::family::{rate_between, rate_between_samples};
     if let Some(h) = state.history.get(metric)
         && h.len() >= 2
@@ -1389,7 +1397,7 @@ fn with_unit(value: String, unit: &Option<String>) -> String {
 /// The family panels as widgets (#1258): a header per family, a header row
 /// of field names, a row per instance with its cells and, when graded, the
 /// verdict word in the verdict's colour — never a colour without the word.
-fn render_panels<'a>(panels: Vec<FamilyPanel>) -> Option<Element<'a, Message>> {
+pub(crate) fn render_panels<'a>(panels: Vec<FamilyPanel>) -> Option<Element<'a, Message>> {
     use crate::view::components::limit_table::LimitVerdict;
     if panels.is_empty() {
         return None;
@@ -1399,8 +1407,12 @@ fn render_panels<'a>(panels: Vec<FamilyPanel>) -> Option<Element<'a, Message>> {
     };
     let mut col = column![].spacing(crate::view::tokens::space::MD);
     for panel in panels {
-        let mut section = column![text(panel.title.clone()).size(font::EMPHASIS)]
-            .spacing(crate::view::tokens::space::XS);
+        let heading = match &panel.group {
+            Some(g) => format!("{g} · {}", panel.title),
+            None => panel.title.clone(),
+        };
+        let mut section =
+            column![text(heading).size(font::EMPHASIS)].spacing(crate::view::tokens::space::XS);
         if panel.is_table {
             let header_fields: Vec<String> = panel
                 .rows
@@ -1441,7 +1453,7 @@ fn render_panels<'a>(panels: Vec<FamilyPanel>) -> Option<Element<'a, Message>> {
                     );
                 }
             } else {
-                // A facts family: one row per field.
+                // A facts family: one row per field, then the row's note.
                 for c in &r.cells {
                     section = section.push(
                         row![
@@ -1455,6 +1467,9 @@ fn render_panels<'a>(panels: Vec<FamilyPanel>) -> Option<Element<'a, Message>> {
                         ]
                         .spacing(crate::view::tokens::space::SM),
                     );
+                }
+                if let Some(note) = r.note {
+                    section = section.push(text(note).size(font::DENSE).style(muted));
                 }
                 continue;
             }
@@ -1474,6 +1489,9 @@ fn render_panels<'a>(panels: Vec<FamilyPanel>) -> Option<Element<'a, Message>> {
                 );
             }
             section = section.push(line);
+            if let Some(limits) = r.limits {
+                section = section.push(text(limits).size(font::DENSE).style(muted));
+            }
             if let Some(note) = r.note {
                 section = section.push(text(note).size(font::DENSE).style(muted));
             }

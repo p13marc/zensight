@@ -373,6 +373,16 @@ moving the ratchet's panic. This is the `zensight`
 crate's first `should_panic`; the idiom is the workspace's (24 sites
 elsewhere).
 
+### The declarative regression suite (#1260)
+
+`zensight/tests/declarative_views.rs` carries, assertion for assertion, the
+simulator tests written for `specialized/{bmc,probe}.rs` and the fold tests
+of `overview/{pve,containers}.rs`, run against `definition::render` and
+`render_fleet` over each producer's bundled `views.toml`. When a document
+cannot pass a test written for the hand-built view, the format is not ready
+— add the renderer feature, never a special case in the document. A new
+declarative producer adds its cases there.
+
 ### 1. Test view functions independently
 
 ```rust

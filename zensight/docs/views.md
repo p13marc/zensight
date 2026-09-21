@@ -163,10 +163,43 @@ cell.
 `@rpc/<producer>/views` (`Message::ViewsLoaded`, fetched on the fleet
 sweep's repeating querier), the bundled copy compiled into `zensight-common`
 from `registry/views/<producer>.toml`, or nothing — then the default renderer
-above. A bespoke Rust view still wins at runtime when one exists; #1260
-deletes those once their documents render the same, which
-`bmc::tests::the_bundled_document_renders_the_same_verdicts_as_this_view`
-already holds bmc to.
+above. A bespoke Rust view still wins at runtime when one exists.
+
+### bmc, pve, probe and container are documents (#1260)
+
+`specialized/{bmc,probe}.rs` and `overview/{pve,probe,containers}.rs` are
+gone; their `views.toml` renders them, and the simulator tests written for
+the hand-built views run unchanged against the declarative renderer in
+`zensight/tests/declarative_views.rs` — that file is the format's regression
+suite. What the renderer grew to pass them, all of it the host's look rather
+than the document's vocabulary:
+
+- **unit styles** (`definition::unit_style`): a declared token becomes a
+  suffix and a precision on screen — `Cel` → `58.5°C`, `W` → `750 W`, `By/s`
+  → `B/s`; the default renderer keeps the raw token (`41.5 Cel`) because it
+  is the honest spelling of a slice nobody curated;
+- the **limit line** beside a graded reading (`warn 75.0°C · crit 89.0°C`),
+  **not metered** for a graded reading nobody published, **absent** when
+  `grade.absent` says the bay is empty — the `LimitRow` rules (#1127) as
+  `FamilyRow.limits` and cell text;
+- **`group_by`**: one card per binding of the variable (`FamilyPanel.group`),
+  so a two-chassis enclosure reads as two cards;
+- **`fmt_fixed(v, decimals)`** beside the three host functions, for the
+  sentences a note builds (`timed out after 20.0s`);
+- the **fleet render** (`definition::render_fleet`) for the overview tabs:
+  every device of the producer folded together, a var-keyed instance keyed
+  `host/id` so `redis` on two hosts is two containers, a var-less family kept
+  apart per host with `host` bound on every row;
+- the **`aggregate` slot**: a `facts` panel whose script sees `rows` — the
+  array of row maps — and returns a map of fact → value; pve's "one node
+  reporting `quorate = 0` outweighs the rest" and the container fleet's
+  "unchecked is not current" are this, not last-writer-wins.
+
+What did not fit, stated: a **floor grade**. The vocabulary's limits are
+ceilings (`reading >= limit`), and "an expired certificate" is a floor, so
+probe's expiry carries no grade — the finding is the note, `EXPIRED 3 days
+ago`, and a verdict of `ok` on a dead certificate is a lie the document will
+not tell. A floor is a vocabulary follow-up, not a threshold to fake.
 
 **The lint** (`definition::lint`) runs as a test over every bundled document
 and the system-view fixture: each `scope` and `join` is a family of the

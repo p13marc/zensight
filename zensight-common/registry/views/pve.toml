@@ -7,10 +7,13 @@ producer = "pve"
 title    = "Proxmox VE"
 
 [[panel]]
-kind   = "facts"
-title  = "Cluster"
-scope  = "cluster"
-note   = { rhai = "if row.quorate == 0 { \"quorum lost — every verdict below is one node's view\" }" }
+kind      = "facts"
+title     = "Cluster"
+scope     = "cluster"
+# One row per NODE reporting (the fleet render keeps a var-less family's
+# rows apart by host), so "one node reporting quorate = 0 outweighs the
+# majority still reporting 1" is a fold over `rows`, not last-writer-wins.
+aggregate = { rhai = "let q = rows.filter(|r| r.quorate != ()); #{ \"nodes reporting\": rows.len(), \"quorate\": if q.len() == 0 { \"no quorum data\" } else if q.filter(|r| r.quorate == 0.0).len() > 0 { \"no — a node reports quorum lost\" } else { \"yes\" }, \"guests running\": if rows.len() == 0 { () } else { rows[0].guests_running }, \"replication failed\": if rows.len() == 0 { () } else { rows[0].replication_failed } }" }
 
 [[panel]]
 kind   = "table"
@@ -19,8 +22,11 @@ scope  = "guest/{vmid}"
 join   = "backup/{vmid}"
 fields = ["running", "backup.age_secs", "backup.ok", "backup.size_change_pct"]
 label  = { rhai = "`vmid ${vmid}`" }
-# never backed up sorts first, then oldest first
-sort   = { rhai = "if row.backup == () { -1.0e12 } else { -row.backup.age_secs }" }
+# worst first: never backed up, then a run that failed, then oldest first —
+# a recent backup that FAILED is worse than an old one that worked, and the
+# age alone cannot say so
+sort   = { rhai = "if row.backup == () { -3.0e12 } else if row.backup.ok == 0.0 { -2.0e12 } else { -row.backup.age_secs }" }
+note   = { rhai = "if row.backup == () { \"never backed up\" } else if row.backup.ok == 0.0 { \"last backup FAILED\" }" }
 [panel.format]
 "backup.age_secs" = { rhai = "if row.backup == () { \"never\" } else { fmt_age(row.backup.age_secs) }" }
 [panel.grade]
@@ -35,8 +41,9 @@ label = "$node"
 
 [[panel]]
 kind   = "table"
-title  = "Storage"
+title  = "Overcommitted storage"
 scope  = "storage/{store}"
 label  = "$store"
 fields = ["used_ratio", "overcommit_ratio", "avail_bytes"]
-note   = { rhai = "if row.overcommit_ratio != () && row.overcommit_ratio > 1.0 { \"overcommitted\" }" }
+# only what is overcommitted is listed: a pool at 0.4 is not a finding
+show   = { rhai = "row.overcommit_ratio != () && row.overcommit_ratio > 1.0" }

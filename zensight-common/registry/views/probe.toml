@@ -1,7 +1,9 @@
-# The probe view (#1259): one table per vantage point — every target with
-# its checks as columns. The outcome sentence the Rust view builds
-# ("timed out after 20.0s") is a note, not a threshold; the TLS expiry
-# window is the GUI's and says so.
+# The probe view (#1259; #1260 replaces `specialized/probe.rs` with it): one
+# table per vantage point — every target with its checks as columns. The
+# outcome sentence the Rust view built ("timed out after 20.0s") is a note;
+# timeout ≠ failure, expired ≠ 0 days, and a stratum-0 server is named for
+# what it does, not shown as a number. The TLS expiry window is the GUI's and
+# says so.
 [view]
 version  = "1"
 producer = "probe"
@@ -17,11 +19,15 @@ kind   = "table"
 title  = "Targets"
 scope  = "{target}"
 label  = "$target"
-fields = ["up", "timeout", "duration_ms", "http_status", "rtt_p95_ms", "loss_pct", "tls_days_to_expiry", "ntp_offset_ms", "ntp_stratum"]
-sort   = { rhai = "if row.up == 0 { 0 } else { 1 }" }
-note   = { rhai = "if row.timeout == 1 { `timed out after ${fmt_age(row.duration_ms / 1000.0)}` } else if row.up == 0 && row.http_status != () { `refused with HTTP ${row.http_status}` }" }
+fields = ["up", "duration_ms", "http_status", "rtt_p95_ms", "loss_pct", "tls_days_to_expiry", "ntp_offset_ms", "ntp_stratum"]
+# worst first: a hang, then a refusal, then everything that answered
+sort   = { rhai = "if row.timeout == 1.0 { 0 } else if row.up == 0.0 { 1 } else { 2 }" }
+note   = { rhai = "if row.timeout == 1.0 { if row.duration_ms == () { \"timed out\" } else { `timed out after ${fmt_fixed(row.duration_ms / 1000.0, 1)}s` } } else if row.up == 0.0 && row.http_status != () { `failed (HTTP ${fmt_fixed(row.http_status, 0)})` } else if row.loss_pct == 100.0 { \"no probe answered · 100% loss\" } else if row.tls_days_to_expiry != () && row.tls_days_to_expiry < 0.0 { `EXPIRED ${fmt_fixed(-row.tls_days_to_expiry, 0)} days ago` } else if row.ntp_stratum == 0.0 { \"kiss-o'-death: this server refuses to be a time source\" }" }
 [panel.format]
-duration_ms = { rhai = "fmt_unit(row.duration_ms, \"ms\")" }
-[panel.grade]
-reading  = "tls_days_to_expiry"
-critical = { const = 0, declared_by = "gui" }
+duration_ms        = { rhai = "if row.duration_ms == () { () } else { fmt_unit(row.duration_ms, \"ms\") }" }
+rtt_p95_ms         = { rhai = "if row.rtt_p95_ms == () || row.loss_pct == 100.0 { \"—\" } else { `p95 ${fmt_fixed(row.rtt_p95_ms, 1)} ms` }" }
+tls_days_to_expiry = { rhai = "if row.tls_days_to_expiry == () { () } else if row.tls_days_to_expiry < 0.0 { \"expired\" } else { `${fmt_fixed(row.tls_days_to_expiry, 0)} days left` }" }
+# No grade on expiry: the vocabulary's limits are ceilings (`reading >= limit`),
+# and "expired" is a floor. The finding is the note above — EXPIRED, named —
+# and a verdict of `ok` on a dead certificate would be a lie this file will
+# not tell. A floor grade is a vocabulary follow-up, not a threshold to fake.

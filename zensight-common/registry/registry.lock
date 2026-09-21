@@ -23,6 +23,7 @@ procedure	container	describe	read	-	SchemaSet
 procedure	container	introspect	read	-	RegistrySlice
 procedure	container	thresholds	read	-	ThresholdsConfig
 procedure	container	thresholds/set	write	ThresholdsConfig	Ack
+procedure	container	views	read	-	ViewSet
 procedure	correlator	describe	read	-	SchemaSet
 procedure	correlator	introspect	read	-	RegistrySlice
 procedure	desired	describe	read	-	SchemaSet
