@@ -105,9 +105,23 @@ impl Reply {
     where
         T: DeserializeOwned + std::any::Any + Send + Sync,
     {
-        let slot = self
-            .typed
-            .get_or_init(|| Box::new(self.decode::<T>()) as Box<dyn std::any::Any + Send + Sync>);
+        self.decoded_with(|_: &mut T| {})
+    }
+
+    /// [`Reply::decoded`] with a normalisation applied once, at decode: the
+    /// order a view wants its rows in before the table's own sort (newest
+    /// first, worst peer first), which the old fetch arms applied on arrival.
+    pub fn decoded_with<T>(&self, normalise: impl FnOnce(&mut T)) -> Result<&T, String>
+    where
+        T: DeserializeOwned + std::any::Any + Send + Sync,
+    {
+        let slot = self.typed.get_or_init(|| {
+            let mut decoded = self.decode::<T>();
+            if let Ok(value) = &mut decoded {
+                normalise(value);
+            }
+            Box::new(decoded) as Box<dyn std::any::Any + Send + Sync>
+        });
         match slot.downcast_ref::<Result<T, String>>() {
             Some(Ok(t)) => Ok(t),
             Some(Err(e)) => Err(e.clone()),
@@ -166,6 +180,38 @@ pub fn page_signal_of(value: &serde_json::Value) -> Option<PageSignal> {
     })
 }
 
+/// Where a procedure's call stands, with the answer borrowed as a type —
+/// what a view reads (#1261): the four states of [`Fetch`], the answer
+/// decoded once through [`Reply::decoded_with`].
+#[derive(Debug)]
+pub enum Answer<'a, T> {
+    Idle,
+    Loading,
+    Ready(&'a T),
+    /// The call failed, or the answer was not the type the view expected.
+    Error(String),
+}
+
+impl<'a, T> Answer<'a, T> {
+    pub fn is_loading(&self) -> bool {
+        matches!(self, Answer::Loading)
+    }
+
+    pub fn ready(&self) -> Option<&'a T> {
+        match self {
+            Answer::Ready(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn error(&self) -> Option<&str> {
+        match self {
+            Answer::Error(message) => Some(message.as_str()),
+            _ => None,
+        }
+    }
+}
+
 /// One procedure's call state on a device: the params of the last call and
 /// where it stands.
 #[derive(Debug, Clone, Default)]
@@ -217,6 +263,31 @@ impl Calls {
 
     pub fn is_loading(&self, procedure: &str) -> bool {
         self.fetch(procedure).is_loading()
+    }
+
+    /// Where a procedure stands, its answer as a type — see [`Answer`].
+    pub fn answer<T>(&self, procedure: &str) -> Answer<'_, T>
+    where
+        T: DeserializeOwned + std::any::Any + Send + Sync,
+    {
+        self.answer_with(procedure, |_: &mut T| {})
+    }
+
+    /// [`Calls::answer`] with a normalisation applied once at decode — see
+    /// [`Reply::decoded_with`].
+    pub fn answer_with<T>(&self, procedure: &str, normalise: impl FnOnce(&mut T)) -> Answer<'_, T>
+    where
+        T: DeserializeOwned + std::any::Any + Send + Sync,
+    {
+        match self.fetch(procedure) {
+            Fetch::Idle => Answer::Idle,
+            Fetch::Loading => Answer::Loading,
+            Fetch::Error(e) => Answer::Error(e.clone()),
+            Fetch::Ready(reply) => match reply.decoded_with(normalise) {
+                Ok(value) => Answer::Ready(value),
+                Err(e) => Answer::Error(e),
+            },
+        }
     }
 
     /// Mark a call in flight. Replaces whatever the procedure held, so the
@@ -451,6 +522,29 @@ mod tests {
         // The wrong shape is an error the view shows, never an empty table.
         let wrong = Reply::new(json!({ "available": false }), 0);
         assert!(wrong.decode::<Vec<u8>>().is_err());
+    }
+
+    #[test]
+    fn answer_normalises_once_at_decode() {
+        let mut calls = Calls::default();
+        assert!(matches!(calls.answer::<Vec<u64>>("events"), Answer::Idle));
+        calls.set_ready("events", "", json!([1, 3, 2]));
+        let newest_first = |v: &mut Vec<u64>| v.sort_by_key(|n| std::cmp::Reverse(*n));
+        let rows = calls
+            .answer_with("events", newest_first)
+            .ready()
+            .expect("decoded");
+        assert_eq!(rows, &vec![3, 2, 1]);
+        // The second read is the same decode: normalised once, not per render.
+        let again = calls.answer::<Vec<u64>>("events").ready().unwrap();
+        assert!(std::ptr::eq(rows, again));
+        calls.set_failed("events", "no sensor");
+        assert_eq!(
+            calls.answer::<Vec<u64>>("events").error(),
+            Some("no sensor")
+        );
+        calls.set_ready("events", "", json!({ "not": "a list" }));
+        assert!(calls.answer::<Vec<u64>>("events").error().is_some());
     }
 
     #[test]

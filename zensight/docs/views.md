@@ -281,10 +281,28 @@ The on-demand tables' UI state (sort, filter, page) moved with it:
 into a device (#313) is `DeviceDetailState::pivot` — `Pivot::Process { pid,
 start_time }` for the process explorer's pid filter, cleared by `ClearPivot`.
 
+A view reads an answer as `state.calls.answer::<Vec<Record>>("routes")` —
+an `Answer<'_, T>`: `Idle`/`Loading`/`Ready(&T)`/`Error` — or
+`answer_with(procedure, normalise)` when it wants its rows in an order
+before the table's own sort (newest first, worst peer first): the
+normalisation runs once, at decode, where the old fetch arms ran it on
+arrival. A view's own filter controls — the socket explorer's state chip,
+port substring and sort — are `DeviceDetailState::filters`, keyed
+`<table>/<key>`, set by `SetDetailFilter { table, key, value }` (which resets
+the table's page, so a narrowed filter never hides matches behind "more").
+A tab's prefetch is a list the view owns (`netlink::tab_procedures(tab)`) and
+`app::prefetch_calls` asks for each once — an answered, failed or in-flight
+procedure is not asked again.
+
 **Retired so far**: sysinfo (`processes`, `latency`; `SysinfoDetailState`,
 `ProcessSort` now lives in `specialized/sysinfo.rs` and round-trips through
-the call's params) and netflow (`flows`; `NetflowDetailState`). The rest go
-one producer per PR; a view's `Fetch<T>` field is the sign it has not moved.
+the call's params), netflow (`flows`; `NetflowDetailState`) and netlink (the
+eleven `@rpc/netlink/*` topics; `NetlinkDetailState`, `NetlinkDetailData`,
+`NetlinkTable` and the nine netlink messages — `netlink_detail.rs` keeps the
+record types, `NetlinkDetailTopic` as the procedure vocabulary, the socket
+filter and `fetch_records`, which netring and the app's joins still use).
+The rest go one producer per PR; a view's `Fetch<T>` field is the sign it
+has not moved.
 
 ## Routing: `CurrentView`
 

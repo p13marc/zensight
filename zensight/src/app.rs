@@ -1685,56 +1685,12 @@ impl ZenSight {
                 self.syslog_filter.alert_pivot = None;
             }
 
-            Message::FetchNetlinkDetail(topic) => {
+            Message::SetDetailFilter { table, key, value } => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.loading(topic);
-                }
-                return ControlFlow::Break(self.query_netlink_detail(topic));
-            }
-            Message::NetlinkDetailReceived(topic, result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.apply(topic, result);
-                }
-            }
-
-            Message::SetNetlinkSocketStateFilter(state_filter) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.socket_state_filter = state_filter;
-                    // Changing the filter resets pagination so matches aren't hidden.
-                    device.netlink_detail.sockets_table.limit =
+                    device.filters.insert(format!("{table}/{key}"), value);
+                    // Changing a filter resets pagination so matches aren't hidden.
+                    device.tables.entry(table).or_default().limit =
                         crate::view::components::data_table::DEFAULT_LIMIT;
-                }
-            }
-            Message::SetNetlinkSocketPortFilter(port) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.socket_port_filter = port;
-                    device.netlink_detail.sockets_table.limit =
-                        crate::view::components::data_table::DEFAULT_LIMIT;
-                }
-            }
-            Message::SetNetlinkSocketSort(sort) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.socket_sort = sort;
-                }
-            }
-            Message::NetlinkSocketsMore => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.sockets_table.load_more();
-                }
-            }
-            Message::NetlinkTableSort(which, col) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.table_mut(which).toggle_sort(col);
-                }
-            }
-            Message::NetlinkTableFilter(which, filter) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.table_mut(which).set_filter(filter);
-                }
-            }
-            Message::NetlinkTableMore(which) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netlink_detail.table_mut(which).load_more();
                 }
             }
 
@@ -6932,65 +6888,6 @@ impl ZenSight {
         Task::batch([select, self.query_call("processes".to_string(), params)])
     }
 
-    fn query_netlink_detail(
-        &self,
-        topic: crate::view::specialized::netlink_detail::NetlinkDetailTopic,
-    ) -> Task<Message> {
-        use crate::view::specialized::netlink_detail::{
-            NetlinkDetailData, NetlinkDetailTopic, fetch_records,
-        };
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::NetlinkDetailReceived(
-                topic,
-                Err("Not connected to Zenoh".to_string()),
-            ));
-        };
-        let key = topic.key(
-            self.selected_origin_for(zensight_common::Protocol::Netlink)
-                .as_ref(),
-        );
-        Task::future(async move {
-            let data = match topic {
-                NetlinkDetailTopic::Sockets => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Sockets),
-                NetlinkDetailTopic::Routes => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Routes),
-                NetlinkDetailTopic::Neighbors => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Neighbors),
-                NetlinkDetailTopic::Addresses => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Addresses),
-                NetlinkDetailTopic::Events => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Events),
-                NetlinkDetailTopic::RouteChanges => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::RouteChanges),
-                NetlinkDetailTopic::Tc => {
-                    fetch_records(session, key).await.map(NetlinkDetailData::Tc)
-                }
-                NetlinkDetailTopic::Xfrm => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Xfrm),
-                NetlinkDetailTopic::Nft => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Nft),
-                NetlinkDetailTopic::Retransmits => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Retransmits),
-                NetlinkDetailTopic::Connections => fetch_records(session, key)
-                    .await
-                    .map(NetlinkDetailData::Connections),
-            };
-            let result =
-                data.ok_or_else(|| format!("No netlink sensor responded for {}", topic.label()));
-            Message::NetlinkDetailReceived(topic, result)
-        })
-    }
-
     /// Fetch the on-demand netring flow detail from the sensor's query channel.
     /// Generic on-demand sensor query (#127): fetch a `Vec<T>` from a channel and
     /// wrap the outcome in a message. Collapses the ~near-identical
@@ -7413,53 +7310,37 @@ impl ZenSight {
         &mut self,
         tab: crate::view::specialized::SpecializedTab,
     ) -> Option<Task<Message>> {
-        use crate::view::specialized::SpecializedTab as T;
+        let procedures = crate::view::specialized::netlink::tab_procedures(tab)
+            .iter()
+            .map(|t| (t.procedure().to_string(), String::new()));
+        self.prefetch_calls(procedures)
+    }
+
+    /// Call every procedure of a tab not yet asked (#1261), so it opens with
+    /// its rows on the way; one already answered, failed or in flight is not
+    /// asked again — a failed eBPF topic stays a hint, not a retry loop.
+    fn prefetch_calls(
+        &mut self,
+        calls: impl IntoIterator<Item = (String, String)>,
+    ) -> Option<Task<Message>> {
         use crate::view::specialized::fetch::Fetch;
-        use crate::view::specialized::netlink_detail::NetlinkDetailTopic as Topic;
-
-        let topics: &[Topic] = match tab {
-            // eBPF retransmits/connections (#269) are served only on eBPF-enabled
-            // hosts; a non-responding host just leaves them Error (rendered as a
-            // hint), so prefetching them unconditionally is safe.
-            T::Sockets => &[Topic::Sockets, Topic::Retransmits, Topic::Connections],
-            T::RoutingNeighbors => &[
-                Topic::Routes,
-                Topic::Neighbors,
-                Topic::Addresses,
-                Topic::RouteChanges,
-            ],
-            T::Qos => &[Topic::Tc],
-            T::FirewallIpsec => &[Topic::Xfrm, Topic::Nft],
-            T::Events => &[Topic::Events],
-            _ => return None,
+        let todo: Vec<(String, String)> = {
+            let device = self.selected_device.as_mut()?;
+            let todo: Vec<(String, String)> = calls
+                .into_iter()
+                .filter(|(procedure, _)| matches!(device.calls.fetch(procedure), Fetch::Idle))
+                .collect();
+            for (procedure, params) in &todo {
+                device.calls.loading(procedure, params);
+            }
+            todo
         };
-
-        let d = &self.selected_device.as_ref()?.netlink_detail;
-        let is_idle = |t: Topic| match t {
-            Topic::Sockets => matches!(d.sockets, Fetch::Idle),
-            Topic::Routes => matches!(d.routes, Fetch::Idle),
-            Topic::Neighbors => matches!(d.neighbors, Fetch::Idle),
-            Topic::Addresses => matches!(d.addresses, Fetch::Idle),
-            Topic::Events => matches!(d.events, Fetch::Idle),
-            Topic::RouteChanges => matches!(d.route_changes, Fetch::Idle),
-            Topic::Tc => matches!(d.tc, Fetch::Idle),
-            Topic::Xfrm => matches!(d.xfrm, Fetch::Idle),
-            Topic::Nft => matches!(d.nft, Fetch::Idle),
-            Topic::Retransmits => matches!(d.retransmits, Fetch::Idle),
-            Topic::Connections => matches!(d.connections, Fetch::Idle),
-        };
-        let todo: Vec<Topic> = topics.iter().copied().filter(|t| is_idle(*t)).collect();
         if todo.is_empty() {
             return None;
         }
-        if let Some(device) = self.selected_device.as_mut() {
-            for t in &todo {
-                device.netlink_detail.loading(*t);
-            }
-        }
-        Some(Task::batch(
-            todo.into_iter().map(|t| self.query_netlink_detail(t)),
-        ))
+        Some(Task::batch(todo.into_iter().map(|(procedure, params)| {
+            self.query_call(procedure, params)
+        })))
     }
 
     fn query_netring_flows(&self) -> Task<Message> {
@@ -10704,12 +10585,12 @@ fn prefetch_channels(producer: &str) -> Vec<Message> {
     };
     match protocol {
         Protocol::Netlink => vec![
-            Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets),
-            Message::FetchNetlinkDetail(NetlinkDetailTopic::Routes),
-            Message::FetchNetlinkDetail(NetlinkDetailTopic::Neighbors),
+            NetlinkDetailTopic::Sockets.call(),
+            NetlinkDetailTopic::Routes.call(),
+            NetlinkDetailTopic::Neighbors.call(),
             // Pre-populate the default-route flap history (#111) so it's visible
             // on open, not behind an extra click.
-            Message::FetchNetlinkDetail(NetlinkDetailTopic::RouteChanges),
+            NetlinkDetailTopic::RouteChanges.call(),
         ],
         Protocol::Netring => vec![Message::FetchNetringFlows],
         // The outlet panel decides what to offer from the sensor's advertised
@@ -10895,7 +10776,6 @@ mod promote_tests {
 #[cfg(test)]
 mod prefetch_tests {
     use super::*;
-    use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
 
     #[test]
     fn prefetch_policy_by_protocol() {
@@ -10904,12 +10784,12 @@ mod prefetch_tests {
         let nl = prefetch_channels("netlink");
         assert_eq!(nl.len(), 4);
         assert!(matches!(
-            nl[0],
-            Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets)
+            &nl[0],
+            Message::Call { procedure, .. } if procedure == "sockets"
         ));
         assert!(matches!(
-            nl[3],
-            Message::FetchNetlinkDetail(NetlinkDetailTopic::RouteChanges)
+            &nl[3],
+            Message::Call { procedure, .. } if procedure == "route_changes"
         ));
 
         // Netring prefetches flows; sysinfo prefetches the process explorer.
@@ -11372,7 +11252,11 @@ mod update_routing_tests {
         ));
         // A detail filter is owned by update_detail.
         assert!(matches!(
-            a.update_detail(Message::SetNetlinkSocketPortFilter("80".into())),
+            a.update_detail(Message::SetDetailFilter {
+                table: "sockets".into(),
+                key: "port".into(),
+                value: "80".into(),
+            }),
             ControlFlow::Break(_)
         ));
     }

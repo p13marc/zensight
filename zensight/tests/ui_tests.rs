@@ -2207,44 +2207,43 @@ fn test_netlink_specialized_view() {
     // Pre-populate an on-demand fetched socket detail table (as if the query
     // channel had replied) to exercise the drill-down render path.
     {
-        use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
-        state.netlink_detail.apply(
-            NetlinkDetailTopic::Sockets,
-            Ok(NetlinkDetailData::Sockets(vec![
-                zensight_common::SocketRecord {
-                    local: "10.0.0.1:5555".into(),
-                    remote: "1.1.1.1:443".into(),
-                    state: "established".into(),
-                    uid: 1000,
-                    recv_q: 0,
-                    send_q: 0,
-                    rtt_us: 1234,
-                    retrans: 0,
-                    inode: 9999,
-                    congestion: Some("cubic".into()),
-                    bbr_bw_bps: None,
-                    cc_min_rtt_us: None,
-                    snd_cwnd: 10,
-                    snd_buf: 16384,
-                    rcv_buf: 32768,
-                    delivery_rate: 0,
-                    pacing_rate: 0,
-                    bytes_retrans: 0,
-                    bytes_acked: 0,
-                    bytes_received: 0,
-                    bytes_sent: 0,
-                    total_retrans: 0,
-                    rcv_rtt_us: 0,
-                    lost: 0,
-                    reord_seen: 0,
-                    cookie: 42,
-                    cgroup_id: None,
-                    cgroup: None,
-                    pid: Some(4321),
-                    process: Some("sshd".into()),
-                    proc_start_time: Some(987654),
-                },
-            ])),
+        state.calls.set_ready(
+            "sockets",
+            "",
+            serde_json::to_value(vec![zensight_common::SocketRecord {
+                local: "10.0.0.1:5555".into(),
+                remote: "1.1.1.1:443".into(),
+                state: "established".into(),
+                uid: 1000,
+                recv_q: 0,
+                send_q: 0,
+                rtt_us: 1234,
+                retrans: 0,
+                inode: 9999,
+                congestion: Some("cubic".into()),
+                bbr_bw_bps: None,
+                cc_min_rtt_us: None,
+                snd_cwnd: 10,
+                snd_buf: 16384,
+                rcv_buf: 32768,
+                delivery_rate: 0,
+                pacing_rate: 0,
+                bytes_retrans: 0,
+                bytes_acked: 0,
+                bytes_received: 0,
+                bytes_sent: 0,
+                total_retrans: 0,
+                rcv_rtt_us: 0,
+                lost: 0,
+                reord_seen: 0,
+                cookie: 42,
+                cgroup_id: None,
+                cgroup: None,
+                pid: Some(4321),
+                process: Some("sshd".into()),
+                proc_start_time: Some(987654),
+            }])
+            .unwrap(),
         );
     }
 
@@ -2995,9 +2994,7 @@ fn test_netlink_wireguard_tab() {
 #[test]
 fn test_netlink_events_tab() {
     use zensight::view::specialized::netlink::netlink_host_view;
-    use zensight::view::specialized::netlink_detail::{
-        EventRecord, NetlinkDetailData, NetlinkDetailTopic,
-    };
+    use zensight::view::specialized::netlink_detail::EventRecord;
     use zensight_common::{TelemetryPoint, TelemetryValue};
 
     let device_id = DeviceId::fixture("netlink", "gw01");
@@ -3008,9 +3005,10 @@ fn test_netlink_events_tab() {
         "events/link/added_total",
         TelemetryValue::Counter(4),
     ));
-    state.netlink_detail.apply(
-        NetlinkDetailTopic::Events,
-        Ok(NetlinkDetailData::Events(vec![
+    state.calls.set_ready(
+        "events",
+        "",
+        serde_json::to_value(vec![
             EventRecord {
                 ts_unix: 100,
                 family: "link".into(),
@@ -3025,7 +3023,8 @@ fn test_netlink_events_tab() {
                 ifindex: None,
                 detail: "default".into(),
             },
-        ])),
+        ])
+        .unwrap(),
     );
 
     let mut ui = simulator(netlink_host_view(&state));
@@ -3034,7 +3033,16 @@ fn test_netlink_events_tab() {
     assert!(ui.find("eth0").is_ok());
     assert!(ui.find("default").is_ok());
     // Timeline is newest-first: the ts=200 route event sorted ahead of ts=100.
-    assert_eq!(state.netlink_detail.events.ready().unwrap()[0].ts_unix, 200);
+    let newest_first = |v: &mut Vec<EventRecord>| v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix));
+    assert_eq!(
+        state
+            .calls
+            .answer_with("events", newest_first)
+            .ready()
+            .unwrap()[0]
+            .ts_unix,
+        200
+    );
 }
 
 /// #264: the Firewall & IPsec tab renders the conntrack gauge + per-proto donut,
@@ -3042,7 +3050,6 @@ fn test_netlink_events_tab() {
 #[test]
 fn test_netlink_firewall_tab() {
     use zensight::view::specialized::netlink::netlink_host_view;
-    use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
     use zensight_common::{TelemetryPoint, TelemetryValue};
 
     let device_id = DeviceId::fixture("netlink", "gw01");
@@ -3056,9 +3063,10 @@ fn test_netlink_firewall_tab() {
     ] {
         state.update(TelemetryPoint::new("gw01", m, v));
     }
-    state.netlink_detail.apply(
-        NetlinkDetailTopic::Nft,
-        Ok(NetlinkDetailData::Nft(vec![
+    state.calls.set_ready(
+        "nft",
+        "",
+        serde_json::to_value(vec![
             zensight::view::specialized::netlink_detail::NftRuleRecord {
                 family: "inet".into(),
                 table: "filter".into(),
@@ -3068,7 +3076,8 @@ fn test_netlink_firewall_tab() {
                 packets: 12,
                 bytes: 900,
             },
-        ])),
+        ])
+        .unwrap(),
     );
 
     let mut ui = simulator(netlink_host_view(&state));
@@ -3115,7 +3124,6 @@ fn test_netlink_qos_tab() {
 #[test]
 fn test_netlink_routing_tab() {
     use zensight::view::specialized::netlink::netlink_host_view;
-    use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
     use zensight_common::{RouteRecord, TelemetryPoint, TelemetryValue};
 
     let device_id = DeviceId::fixture("netlink", "gw01");
@@ -3130,9 +3138,10 @@ fn test_netlink_routing_tab() {
     ] {
         state.update(TelemetryPoint::new("gw01", m, v));
     }
-    state.netlink_detail.apply(
-        NetlinkDetailTopic::Routes,
-        Ok(NetlinkDetailData::Routes(vec![RouteRecord {
+    state.calls.set_ready(
+        "routes",
+        "",
+        serde_json::to_value(vec![RouteRecord {
             family: 2,
             dst: "10.0.0.0/24".into(),
             gateway: Some("10.0.0.1".into()),
@@ -3141,7 +3150,8 @@ fn test_netlink_routing_tab() {
             protocol: "kernel".into(),
             scope: "link".into(),
             table: 254,
-        }])),
+        }])
+        .unwrap(),
     );
 
     let mut ui = simulator(netlink_host_view(&state));
@@ -3235,7 +3245,6 @@ fn test_netlink_overview_hero() {
 #[test]
 fn test_netlink_sockets_explorer_pagination_and_charts() {
     use zensight::view::specialized::netlink::netlink_host_view;
-    use zensight::view::specialized::netlink_detail::{NetlinkDetailData, NetlinkDetailTopic};
     use zensight_common::SocketRecord;
 
     let device_id = DeviceId::fixture("netlink", "gw01");
@@ -3277,13 +3286,12 @@ fn test_netlink_sockets_explorer_pagination_and_charts() {
             proc_start_time: None,
         })
         .collect();
-    state.netlink_detail.apply(
-        NetlinkDetailTopic::Sockets,
-        Ok(NetlinkDetailData::Sockets(socks)),
-    );
+    state
+        .calls
+        .set_ready("sockets", "", serde_json::to_value(socks).unwrap());
     // Force a small page cap so the "Show more" footer sits within the test
     // viewport (the default 200-row cap would push it off-screen).
-    state.netlink_detail.sockets_table.limit = 2;
+    state.tables.entry("sockets".into()).or_default().limit = 2;
 
     let mut ui = simulator(netlink_host_view(&state));
     assert!(ui.find("RTT distribution").is_ok());
@@ -3294,7 +3302,7 @@ fn test_netlink_sockets_explorer_pagination_and_charts() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::NetlinkSocketsMore))
+            .any(|m| matches!(m, Message::DetailTableMore { table } if table == "sockets"))
     );
 }
 
@@ -3305,9 +3313,7 @@ fn test_netlink_sockets_explorer_pagination_and_charts() {
 fn test_netlink_sockets_ebpf_section() {
     use zensight::view::specialized::SpecializedTab;
     use zensight::view::specialized::netlink::netlink_host_view;
-    use zensight::view::specialized::netlink_detail::{
-        ConnectionRecord, NetlinkDetailData, NetlinkDetailTopic, RetransmitRecord,
-    };
+    use zensight::view::specialized::netlink_detail::{ConnectionRecord, RetransmitRecord};
     use zensight_common::{TelemetryPoint, TelemetryValue};
 
     let device_id = DeviceId::fixture("netlink", "gw01");
@@ -3333,19 +3339,22 @@ fn test_netlink_sockets_ebpf_section() {
     ] {
         state.update(TelemetryPoint::new("gw01", m, v));
     }
-    state.netlink_detail.apply(
-        NetlinkDetailTopic::Retransmits,
-        Ok(NetlinkDetailData::Retransmits(vec![RetransmitRecord {
+    state.calls.set_ready(
+        "retransmits",
+        "",
+        serde_json::to_value(vec![RetransmitRecord {
             peer: "203.0.113.9".into(),
             // 4, not AF_INET's 2: `fam_digit` is the only thing that puts a
             // family on this wire and it emits digits (#685).
             family: 4,
             count: 42,
-        }])),
+        }])
+        .unwrap(),
     );
-    state.netlink_detail.apply(
-        NetlinkDetailTopic::Connections,
-        Ok(NetlinkDetailData::Connections(vec![ConnectionRecord {
+    state.calls.set_ready(
+        "connections",
+        "",
+        serde_json::to_value(vec![ConnectionRecord {
             pid: 1234,
             comm: "curl".into(),
             family: 4,
@@ -3362,7 +3371,8 @@ fn test_netlink_sockets_ebpf_section() {
             segs_in: 80,
             retrans: 1,
             counters_measured: true,
-        }])),
+        }])
+        .unwrap(),
     );
 
     let mut ui = simulator(netlink_host_view(&state));

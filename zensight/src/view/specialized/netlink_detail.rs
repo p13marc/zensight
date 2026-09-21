@@ -1,20 +1,22 @@
-//! On-demand netlink detail client: fetches the full route/neighbor/socket
-//! tables from the sensor's `@rpc/netlink/*` procedures (principle P2 — nothing is
-//! streamed; the GUI pulls detail only when a user drills in).
+//! The netlink view's on-demand vocabulary: the record types its
+//! `@rpc/netlink/*` procedures reply with (principle P2 — nothing is
+//! streamed; the GUI pulls detail only when a user drills in), the topics it
+//! calls them by, and the socket explorer's client-side filter. The calls
+//! themselves go through `Message::Call` and land in
+//! `DeviceDetailState::calls` (#1261); the view reads them back as
+//! `Answer<Vec<Record>>`.
 //!
 //! The fetch+decode core ([`fetch_records`]) is independent of Iced so it can be
-//! integration-tested against a real in-process Zenoh queryable.
+//! integration-tested against a real in-process Zenoh queryable; the netring
+//! detail and the app's cross-sensor joins still use it.
 
 use std::sync::Arc;
 
-use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use zensight_common::{NeighborRecord, RouteRecord, SocketRecord};
+use serde::{Deserialize, Serialize};
+use zensight_common::SocketRecord;
 
-use std::collections::HashMap;
-
-use crate::view::components::TableState;
-use crate::view::specialized::fetch::Fetch;
+use crate::message::Message;
 
 // The sensor defines these record types locally (it owns only its own crate); we
 // mirror their JSON shape here so the GUI can decode the addresses/events/tc/
@@ -22,7 +24,7 @@ use crate::view::specialized::fetch::Fetch;
 // `zensight-sensor-netlink/src/{map,events}.rs` exactly.
 
 /// One configured IP address (`@rpc/netlink/addresses`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AddressRecord {
     pub family: u8,
     pub ip: Option<String>,
@@ -33,7 +35,7 @@ pub struct AddressRecord {
 }
 
 /// One row of the recent control-plane events ring (`@rpc/netlink/events`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EventRecord {
     pub ts_unix: u64,
     pub family: String,
@@ -44,7 +46,7 @@ pub struct EventRecord {
 
 /// One default-route transition (`@rpc/netlink/route_changes`, #111). Mirrors the
 /// sensor's `RouteChangeRecord` JSON shape.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RouteChangeRecord {
     pub ts_unix: u64,
     pub family: String,
@@ -55,7 +57,7 @@ pub struct RouteChangeRecord {
 }
 
 /// One TC qdisc/class entry (`@rpc/netlink/tc`). `node` is `qdisc` or `class`.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TcRecord {
     pub iface: String,
     pub node: String,
@@ -72,7 +74,7 @@ pub struct TcRecord {
 }
 
 /// One IPsec Security Association (`@rpc/netlink/xfrm`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct XfrmSaRecord {
     pub src: Option<String>,
     pub dst: Option<String>,
@@ -85,7 +87,7 @@ pub struct XfrmSaRecord {
 }
 
 /// One nftables rule (`@rpc/netlink/nft`).
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NftRuleRecord {
     pub family: String,
     pub table: String,
@@ -105,7 +107,8 @@ pub struct NftRuleRecord {
 /// sensor crate; they are shared now, under the names the registry declares.
 pub use zensight_common::query_detail::{ConnectionRecord, RetransmitRecord};
 
-/// Which detail table to fetch.
+/// Which detail table to call for — one read procedure of the netlink
+/// slice each.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NetlinkDetailTopic {
     Sockets,
@@ -124,11 +127,10 @@ pub enum NetlinkDetailTopic {
 }
 
 impl NetlinkDetailTopic {
-    /// The queryable key for this topic (matches the sensor's `query.rs`).
-    /// `Some(origin)` targets the drilled-in host's concrete key; `None`
-    /// selects the fleet.
-    pub fn key(&self, origin: Option<&zenkey::RemoteOrigin>) -> String {
-        let topic = match self {
+    /// The procedure this topic calls (matches the sensor's `query.rs`), and
+    /// the name its answer and its table's UI state are keyed by.
+    pub fn procedure(&self) -> &'static str {
+        match self {
             NetlinkDetailTopic::Sockets => "sockets",
             NetlinkDetailTopic::Routes => "routes",
             NetlinkDetailTopic::Neighbors => "neighbors",
@@ -140,10 +142,14 @@ impl NetlinkDetailTopic {
             NetlinkDetailTopic::Nft => "nft",
             NetlinkDetailTopic::Retransmits => "retransmits",
             NetlinkDetailTopic::Connections => "connections",
-        };
-        match origin {
-            Some(o) => zensight_common::origin_rpc_key(o, "netlink", topic),
-            None => zensight_common::fleet_rpc_key("netlink", topic),
+        }
+    }
+
+    /// The call for this topic on the selected device (#1261).
+    pub fn call(&self) -> Message {
+        Message::Call {
+            procedure: self.procedure().to_string(),
+            params: String::new(),
         }
     }
 
@@ -164,37 +170,6 @@ impl NetlinkDetailTopic {
     }
 }
 
-/// A decoded detail table.
-#[derive(Debug, Clone)]
-pub enum NetlinkDetailData {
-    Sockets(Vec<SocketRecord>),
-    Routes(Vec<RouteRecord>),
-    Neighbors(Vec<NeighborRecord>),
-    Addresses(Vec<AddressRecord>),
-    Events(Vec<EventRecord>),
-    RouteChanges(Vec<RouteChangeRecord>),
-    Tc(Vec<TcRecord>),
-    Xfrm(Vec<XfrmSaRecord>),
-    Nft(Vec<NftRuleRecord>),
-    Retransmits(Vec<RetransmitRecord>),
-    Connections(Vec<ConnectionRecord>),
-}
-
-/// Identifies a sortable/filterable netlink detail table so the shared sort/
-/// filter/load-more messages can address one table without a message per table
-/// (#244, reused across the Routing/QoS/Firewall tabs).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NetlinkTable {
-    Routes,
-    Neighbors,
-    Addresses,
-    RouteChanges,
-    Tc,
-    Xfrm,
-    Nft,
-    Events,
-}
-
 /// Sort order for the socket explorer (#112). `Default` keeps the sensor's order;
 /// the others surface the worst flows first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -207,50 +182,22 @@ pub enum SocketSort {
     Retrans,
 }
 
-/// Fetched detail tables for the selected host (each fetched on demand, each with
-/// its own loading/error state).
-#[derive(Debug, Clone, Default)]
-pub struct NetlinkDetailState {
-    pub sockets: Fetch<Vec<SocketRecord>>,
-    pub routes: Fetch<Vec<RouteRecord>>,
-    pub neighbors: Fetch<Vec<NeighborRecord>>,
-    pub addresses: Fetch<Vec<AddressRecord>>,
-    pub events: Fetch<Vec<EventRecord>>,
-    pub route_changes: Fetch<Vec<RouteChangeRecord>>,
-    pub tc: Fetch<Vec<TcRecord>>,
-    pub xfrm: Fetch<Vec<XfrmSaRecord>>,
-    pub nft: Fetch<Vec<NftRuleRecord>>,
-    /// eBPF top-retransmit peers (#269); populated only on eBPF-enabled hosts.
-    pub retransmits: Fetch<Vec<RetransmitRecord>>,
-    /// eBPF tcplife connection records (#269).
-    pub connections: Fetch<Vec<ConnectionRecord>>,
-    /// Socket explorer (#112): active TCP-state filter (`None` = all states).
-    pub socket_state_filter: Option<String>,
-    /// Socket explorer: port substring filter (matches local or remote port).
-    pub socket_port_filter: String,
-    /// Socket explorer: active sort order.
-    pub socket_sort: SocketSort,
-    /// Socket explorer pagination (#261): only `limit` used here (row cap + load
-    /// more), replacing the old silent `.take(200)` cutoff. Default = 200 rows.
-    pub sockets_table: TableState,
-    /// Per-detail-table sort/filter/pagination state, addressed by
-    /// [`NetlinkTable`] (#244).
-    pub tables: HashMap<NetlinkTable, TableState>,
-}
-
-impl NetlinkDetailState {
-    /// Read a detail table's interaction state (a shared default when untouched).
-    pub fn table(&self, which: NetlinkTable) -> &TableState {
-        use std::sync::OnceLock;
-        static DEFAULT: OnceLock<TableState> = OnceLock::new();
-        self.tables
-            .get(&which)
-            .unwrap_or_else(|| DEFAULT.get_or_init(TableState::default))
+impl SocketSort {
+    /// The value the `sockets/sort` filter holds (#1261).
+    pub fn token(&self) -> &'static str {
+        match self {
+            SocketSort::Default => "",
+            SocketSort::Rtt => "rtt",
+            SocketSort::Retrans => "retrans",
+        }
     }
 
-    /// Mutable table state, created lazily on first interaction.
-    pub fn table_mut(&mut self, which: NetlinkTable) -> &mut TableState {
-        self.tables.entry(which).or_default()
+    pub fn from_token(token: &str) -> Self {
+        match token {
+            "rtt" => SocketSort::Rtt,
+            "retrans" => SocketSort::Retrans,
+            _ => SocketSort::Default,
+        }
     }
 }
 
@@ -284,70 +231,6 @@ pub fn filter_sort_sockets<'a>(
         SocketSort::Retrans => out.sort_by_key(|s| std::cmp::Reverse(s.retrans)),
     }
     out
-}
-
-impl NetlinkDetailState {
-    /// Mark a topic's fetch as in flight.
-    pub fn loading(&mut self, topic: NetlinkDetailTopic) {
-        match topic {
-            NetlinkDetailTopic::Sockets => self.sockets = Fetch::Loading,
-            NetlinkDetailTopic::Routes => self.routes = Fetch::Loading,
-            NetlinkDetailTopic::Neighbors => self.neighbors = Fetch::Loading,
-            NetlinkDetailTopic::Addresses => self.addresses = Fetch::Loading,
-            NetlinkDetailTopic::Events => self.events = Fetch::Loading,
-            NetlinkDetailTopic::RouteChanges => self.route_changes = Fetch::Loading,
-            NetlinkDetailTopic::Tc => self.tc = Fetch::Loading,
-            NetlinkDetailTopic::Xfrm => self.xfrm = Fetch::Loading,
-            NetlinkDetailTopic::Nft => self.nft = Fetch::Loading,
-            NetlinkDetailTopic::Retransmits => self.retransmits = Fetch::Loading,
-            NetlinkDetailTopic::Connections => self.connections = Fetch::Loading,
-        }
-    }
-
-    /// Store a topic's fetch outcome (success data or an error message).
-    pub fn apply(&mut self, topic: NetlinkDetailTopic, result: Result<NetlinkDetailData, String>) {
-        match result {
-            Ok(NetlinkDetailData::Sockets(v)) => self.sockets = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Routes(v)) => self.routes = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Neighbors(v)) => self.neighbors = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Addresses(v)) => self.addresses = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Events(mut v)) => {
-                // Timelines render newest-first (#265).
-                v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix));
-                self.events = Fetch::Ready(v);
-            }
-            Ok(NetlinkDetailData::RouteChanges(mut v)) => {
-                v.sort_by_key(|r| std::cmp::Reverse(r.ts_unix));
-                self.route_changes = Fetch::Ready(v);
-            }
-            Ok(NetlinkDetailData::Tc(v)) => self.tc = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Xfrm(v)) => self.xfrm = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Nft(v)) => self.nft = Fetch::Ready(v),
-            Ok(NetlinkDetailData::Retransmits(mut v)) => {
-                // Worst peers first.
-                v.sort_by_key(|r| std::cmp::Reverse(r.count));
-                self.retransmits = Fetch::Ready(v);
-            }
-            Ok(NetlinkDetailData::Connections(mut v)) => {
-                // Longest-lived first.
-                v.sort_by_key(|r| std::cmp::Reverse(r.duration_ms));
-                self.connections = Fetch::Ready(v);
-            }
-            Err(e) => match topic {
-                NetlinkDetailTopic::Sockets => self.sockets = Fetch::Error(e),
-                NetlinkDetailTopic::Routes => self.routes = Fetch::Error(e),
-                NetlinkDetailTopic::Neighbors => self.neighbors = Fetch::Error(e),
-                NetlinkDetailTopic::Addresses => self.addresses = Fetch::Error(e),
-                NetlinkDetailTopic::Events => self.events = Fetch::Error(e),
-                NetlinkDetailTopic::RouteChanges => self.route_changes = Fetch::Error(e),
-                NetlinkDetailTopic::Tc => self.tc = Fetch::Error(e),
-                NetlinkDetailTopic::Xfrm => self.xfrm = Fetch::Error(e),
-                NetlinkDetailTopic::Nft => self.nft = Fetch::Error(e),
-                NetlinkDetailTopic::Retransmits => self.retransmits = Fetch::Error(e),
-                NetlinkDetailTopic::Connections => self.connections = Fetch::Error(e),
-            },
-        }
-    }
 }
 
 /// The sockets key narrowed to one endpoint IP (#309), for the flow↔process
@@ -475,94 +358,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn topic_keys_match_sensor() {
-        assert_eq!(
-            NetlinkDetailTopic::Sockets.key(None),
-            "v1/*/@rpc/netlink/sockets"
-        );
+    fn topics_name_the_sensor_s_procedures() {
+        use NetlinkDetailTopic as T;
+        for (topic, procedure) in [
+            (T::Sockets, "sockets"),
+            (T::Routes, "routes"),
+            (T::Neighbors, "neighbors"),
+            (T::Addresses, "addresses"),
+            (T::Events, "events"),
+            (T::RouteChanges, "route_changes"),
+            (T::Tc, "tc"),
+            (T::Xfrm, "xfrm"),
+            (T::Nft, "nft"),
+            (T::Retransmits, "retransmits"),
+            (T::Connections, "connections"),
+        ] {
+            assert_eq!(topic.procedure(), procedure);
+            assert!(matches!(
+                topic.call(),
+                Message::Call { procedure: p, params } if p == procedure && params.is_empty()
+            ));
+        }
         // The endpoint-narrowed sockets key (#309) matches the sensor's
         // SocketSelector `ip=` parameter.
         assert_eq!(
             sockets_match_key("10.0.0.5"),
             "v1/*/@rpc/netlink/sockets?ip=10.0.0.5"
         );
-        assert_eq!(
-            NetlinkDetailTopic::Routes.key(None),
-            "v1/*/@rpc/netlink/routes"
-        );
-        assert_eq!(
-            NetlinkDetailTopic::Neighbors.key(None),
-            "v1/*/@rpc/netlink/neighbors"
-        );
-        // The 5 previously-dead channels now reachable (#109).
-        assert_eq!(
-            NetlinkDetailTopic::Addresses.key(None),
-            "v1/*/@rpc/netlink/addresses"
-        );
-        assert_eq!(
-            NetlinkDetailTopic::Events.key(None),
-            "v1/*/@rpc/netlink/events"
-        );
-        // Default-route flap history (#111).
-        assert_eq!(
-            NetlinkDetailTopic::RouteChanges.key(None),
-            "v1/*/@rpc/netlink/route_changes"
-        );
-        assert_eq!(NetlinkDetailTopic::Tc.key(None), "v1/*/@rpc/netlink/tc");
-        assert_eq!(NetlinkDetailTopic::Xfrm.key(None), "v1/*/@rpc/netlink/xfrm");
-        assert_eq!(NetlinkDetailTopic::Nft.key(None), "v1/*/@rpc/netlink/nft");
-    }
-
-    #[test]
-    fn apply_stores_new_topics() {
-        let mut s = NetlinkDetailState::default();
-        s.loading(NetlinkDetailTopic::Tc);
-        assert!(s.tc.is_loading());
-        s.apply(
-            NetlinkDetailTopic::Tc,
-            Ok(NetlinkDetailData::Tc(vec![TcRecord {
-                iface: "eth0".into(),
-                node: "qdisc".into(),
-                kind: Some("fq_codel".into()),
-                handle: "0:".into(),
-                parent: "root".into(),
-                bytes: 1,
-                packets: 1,
-                drops: 0,
-                overlimits: 0,
-                requeues: 0,
-                backlog_bytes: 0,
-                backlog_pkts: 0,
-            }])),
-        );
-        assert_eq!(s.tc.ready().map(|v| v.len()), Some(1));
-        s.apply(NetlinkDetailTopic::Nft, Err("no sensor".into()));
-        assert_eq!(s.nft.error(), Some("no sensor"));
-    }
-
-    #[test]
-    fn apply_stores_each_topic() {
-        let mut s = NetlinkDetailState::default();
-        s.loading(NetlinkDetailTopic::Routes);
-        assert!(s.routes.is_loading());
-        s.apply(
-            NetlinkDetailTopic::Routes,
-            Ok(NetlinkDetailData::Routes(vec![RouteRecord {
-                family: 4,
-                dst: "default".into(),
-                gateway: Some("10.0.0.1".into()),
-                oif: Some(2),
-                priority: Some(100),
-                protocol: "dhcp".into(),
-                scope: "universe".into(),
-                table: 254,
-            }])),
-        );
-        assert_eq!(s.routes.ready().map(|v| v.len()), Some(1));
-        assert!(matches!(s.sockets, Fetch::Idle));
-        // An error on a topic is recorded as such.
-        s.apply(NetlinkDetailTopic::Sockets, Err("no sensor".into()));
-        assert_eq!(s.sockets.error(), Some("no sensor"));
+        for sort in [SocketSort::Default, SocketSort::Rtt, SocketSort::Retrans] {
+            assert_eq!(SocketSort::from_token(sort.token()), sort);
+        }
     }
 
     /// End-to-end: `fetch_records` against a real in-process Zenoh queryable

@@ -11,6 +11,7 @@ use zensight_common::{NeighborRecord, RouteRecord, SocketRecord, TelemetryValue}
 
 use zensight_common::registry::netlink::Subject;
 
+use crate::call::Answer;
 use crate::message::Message;
 use crate::view::components::{
     Column as DataColumn, DataTable, Gauge, SortKey, TabItem, badge, card, empty_state,
@@ -18,11 +19,61 @@ use crate::view::components::{
 };
 use crate::view::device::DeviceDetailState;
 use crate::view::specialized::SpecializedTab;
-use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netlink_detail::{
-    AddressRecord, EventRecord, NetlinkDetailState, NetlinkDetailTopic, NetlinkTable,
-    NftRuleRecord, RouteChangeRecord, SocketSort, TcRecord, XfrmSaRecord, filter_sort_sockets,
+    AddressRecord, ConnectionRecord, EventRecord, NetlinkDetailTopic, NftRuleRecord,
+    RetransmitRecord, RouteChangeRecord, SocketSort, TcRecord, XfrmSaRecord, filter_sort_sockets,
 };
+
+/// The procedures a tab calls when it opens (#1261): what
+/// `prefetch_netlink_tab` asks for, each once, so a tab opens with its rows
+/// on the way and never empty behind a manual fetch.
+pub fn tab_procedures(tab: SpecializedTab) -> &'static [NetlinkDetailTopic] {
+    use NetlinkDetailTopic as Topic;
+    match tab {
+        // eBPF retransmits/connections (#269) are served only on eBPF-enabled
+        // hosts; a non-responding host just leaves them Error (rendered as a
+        // hint), so prefetching them unconditionally is safe.
+        SpecializedTab::Sockets => &[Topic::Sockets, Topic::Retransmits, Topic::Connections],
+        SpecializedTab::RoutingNeighbors => &[
+            Topic::Routes,
+            Topic::Neighbors,
+            Topic::Addresses,
+            Topic::RouteChanges,
+        ],
+        SpecializedTab::Qos => &[Topic::Tc],
+        SpecializedTab::FirewallIpsec => &[Topic::Xfrm, Topic::Nft],
+        SpecializedTab::Events => &[Topic::Events],
+        _ => &[],
+    }
+}
+
+/// Timelines render newest-first (#265).
+fn newest_first<T: HasTs>(rows: &mut [T]) {
+    rows.sort_by_key(|r| std::cmp::Reverse(r.ts()));
+}
+
+trait HasTs {
+    fn ts(&self) -> i64;
+}
+impl HasTs for EventRecord {
+    fn ts(&self) -> i64 {
+        self.ts_unix as i64
+    }
+}
+impl HasTs for RouteChangeRecord {
+    fn ts(&self) -> i64 {
+        self.ts_unix as i64
+    }
+}
+
+/// The socket explorer's filter message (#1261): one control, one key.
+fn socket_filter(key: &str, value: &str) -> Message {
+    Message::SetDetailFilter {
+        table: "sockets".to_string(),
+        key: key.to_string(),
+        value: value.to_string(),
+    }
+}
 use crate::view::subject::{leaf, var};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -353,9 +404,9 @@ fn render_sockets(state: &DeviceDetailState) -> Element<'_, Message> {
 /// silent `.take(200)` cutoff). Surfaces the enriched tcp_info columns
 /// (delivery/pacing rate, bytes_retrans, rcv_rtt, lost, reord, cong).
 fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
-    let d = &state.netlink_detail;
+    let sockets = state.calls.answer::<Vec<SocketRecord>>("sockets");
     let title = section_header("Socket Explorer", None);
-    let loading = d.sockets.is_loading();
+    let loading = sockets.is_loading();
     let refresh_label = if loading {
         "Fetching Sockets…".to_string()
     } else {
@@ -363,19 +414,19 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
     };
     let mut refresh = button(text(refresh_label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        refresh = refresh.on_press(Message::FetchNetlinkDetail(NetlinkDetailTopic::Sockets));
+        refresh = refresh.on_press(NetlinkDetailTopic::Sockets.call());
     }
     let header = row![title, refresh]
         .spacing(space::MD)
         .align_y(iced::Alignment::Center);
     let mut col = column![header].spacing(space::SM);
 
-    if let Some(err) = d.sockets.error() {
+    if let Some(err) = sockets.error() {
         return col
             .push(empty_state(format!("Sockets fetch failed: {err}"), None))
             .into();
     }
-    let Some(socks) = d.sockets.ready() else {
+    let Some(socks) = sockets.ready() else {
         return col.push(empty_state("Loading sockets…", None)).into();
     };
     if socks.is_empty() {
@@ -409,15 +460,16 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
     col = col.push(charts);
 
     // State/port/sort controls, then the paginated record table.
-    col = col.push(render_socket_controls(socks, d));
+    col = col.push(render_socket_controls(socks, state));
+    let state_filter = Some(state.filter("sockets", "state")).filter(|s| !s.is_empty());
     let shown = filter_sort_sockets(
         socks,
-        d.socket_state_filter.as_deref(),
-        &d.socket_port_filter,
-        d.socket_sort,
+        state_filter,
+        state.filter("sockets", "port"),
+        SocketSort::from_token(state.filter("sockets", "sort")),
     );
     let total = shown.len();
-    let limit = d.sockets_table.limit;
+    let limit = state.table("sockets").limit;
     let mut list = Column::new().spacing(3).push(
         row![
             cell("local", 180),
@@ -493,7 +545,9 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         footer = footer.push(
             button(text("Show more").size(font::CAPTION))
                 .padding([2, 8])
-                .on_press(Message::NetlinkSocketsMore),
+                .on_press(Message::DetailTableMore {
+                    table: "sockets".to_string(),
+                }),
         );
     }
     col.push(list).push(footer).into()
@@ -505,11 +559,21 @@ fn render_sockets_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
 /// Returns `None` on the unprivileged baseline (no eBPF) so the Sockets tab shows
 /// nothing extra.
 fn render_ebpf_sockets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
-    let d = &state.netlink_detail;
     let has_connlat = state.metrics.contains_key("sockets/tcp/connlat_us_p50")
         || state.metrics.contains_key("sockets/tcp/connlat_us_p95");
-    let retrans = d.retransmits.ready().filter(|v| !v.is_empty());
-    let conns = d.connections.ready().filter(|v| !v.is_empty());
+    // Worst peers first; longest-lived connections first.
+    let retransmits = state
+        .calls
+        .answer_with("retransmits", |v: &mut Vec<RetransmitRecord>| {
+            v.sort_by_key(|r| std::cmp::Reverse(r.count))
+        });
+    let connections = state
+        .calls
+        .answer_with("connections", |v: &mut Vec<ConnectionRecord>| {
+            v.sort_by_key(|r| std::cmp::Reverse(r.duration_ms))
+        });
+    let retrans = retransmits.ready().filter(|v| !v.is_empty());
+    let conns = connections.ready().filter(|v| !v.is_empty());
     if !has_connlat && retrans.is_none() && conns.is_none() {
         return None;
     }
@@ -780,12 +844,10 @@ fn render_qos_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     }
 
     // Full qdisc/class tree (@rpc/netlink/tc).
-    let d = &state.netlink_detail;
     col = col.push(card(detail_datatable(
-        d,
-        NetlinkTable::Tc,
+        state,
         NetlinkDetailTopic::Tc,
-        &d.tc,
+        state.calls.answer("tc"),
         "Qdisc / class tree",
         "nodes",
         tc_columns(),
@@ -1256,7 +1318,6 @@ fn render_routes(state: &DeviceDetailState) -> Element<'_, Message> {
 /// flap section (count tile + flap timeline table), a neighbor-state breakdown
 /// donut, and DataTable views of routes / neighbors / addresses.
 fn render_routing_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.netlink_detail;
     let mut col = column![card(render_routes(state))].spacing(space::MD);
 
     // Default-route flap section: count tile + flap timeline table.
@@ -1286,20 +1347,18 @@ fn render_routing_tab(state: &DeviceDetailState) -> Column<'_, Message> {
 
     // Record tables (DataTable, #244 — sortable/filterable, no silent cutoff).
     col = col.push(card(detail_datatable(
-        d,
-        NetlinkTable::Routes,
+        state,
         NetlinkDetailTopic::Routes,
-        &d.routes,
+        state.calls.answer("routes"),
         "Routes",
         "routes",
         routes_columns(),
         |r: &RouteRecord| format!("{} {}", r.dst, r.gateway.as_deref().unwrap_or("")),
     )));
     col = col.push(card(detail_datatable(
-        d,
-        NetlinkTable::Neighbors,
+        state,
         NetlinkDetailTopic::Neighbors,
-        &d.neighbors,
+        state.calls.answer("neighbors"),
         "Neighbors",
         "neighbors",
         neighbors_columns(),
@@ -1313,10 +1372,9 @@ fn render_routing_tab(state: &DeviceDetailState) -> Column<'_, Message> {
         },
     )));
     col = col.push(card(detail_datatable(
-        d,
-        NetlinkTable::Addresses,
+        state,
         NetlinkDetailTopic::Addresses,
-        &d.addresses,
+        state.calls.answer("addresses"),
         "Addresses",
         "addresses",
         addresses_columns(),
@@ -1353,8 +1411,8 @@ fn render_policy_rule_section(state: &DeviceDetailState) -> Option<Element<'_, M
 
     // The most recent rule event's human detail, when the events table has one.
     let last = state
-        .netlink_detail
-        .events
+        .calls
+        .answer_with("events", |v: &mut Vec<EventRecord>| newest_first(v))
         .ready()
         .and_then(|evs| evs.iter().find(|e| e.family == "rule"))
         .map(|e| format!("last: {} {}", e.action, e.detail));
@@ -1382,7 +1440,6 @@ fn render_policy_rule_section(state: &DeviceDetailState) -> Option<Element<'_, M
 
 /// Default-route flap count tile + the flap timeline record table (#262).
 fn render_flap_section(state: &DeviceDetailState) -> Element<'_, Message> {
-    let d = &state.netlink_detail;
     let tile = row![metric_tile(
         state,
         "flaps (total)",
@@ -1391,10 +1448,13 @@ fn render_flap_section(state: &DeviceDetailState) -> Element<'_, Message> {
     )]
     .spacing(space::MD);
     let table = detail_datatable(
-        d,
-        NetlinkTable::RouteChanges,
+        state,
         NetlinkDetailTopic::RouteChanges,
-        &d.route_changes,
+        state
+            .calls
+            .answer_with("route_changes", |v: &mut Vec<RouteChangeRecord>| {
+                newest_first(v)
+            }),
         "Flap timeline",
         "flaps",
         route_changes_columns(),
@@ -1436,16 +1496,15 @@ fn tv_num(v: &TelemetryValue) -> Option<f64> {
 /// Reused across the Routing, QoS, and Firewall tabs.
 #[allow(clippy::too_many_arguments)]
 fn detail_datatable<'a, T>(
-    d: &'a NetlinkDetailState,
-    which: NetlinkTable,
+    state: &'a DeviceDetailState,
     topic: NetlinkDetailTopic,
-    fetch: &'a Fetch<Vec<T>>,
+    answer: Answer<'a, Vec<T>>,
     title: &'static str,
     noun: &'static str,
     columns: Vec<DataColumn<'a, T, Message>>,
     searchable: impl Fn(&T) -> String + 'a,
 ) -> Element<'a, Message> {
-    let loading = fetch.is_loading();
+    let loading = answer.is_loading();
     let label = if loading {
         format!("Fetching {title}…")
     } else {
@@ -1453,21 +1512,30 @@ fn detail_datatable<'a, T>(
     };
     let mut refresh = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        refresh = refresh.on_press(Message::FetchNetlinkDetail(topic));
+        refresh = refresh.on_press(topic.call());
     }
     let head = row![section_header(title, None), refresh]
         .spacing(space::MD)
         .align_y(iced::Alignment::Center);
-    let body: Element<'a, Message> = if let Some(err) = fetch.error() {
+    let table = topic.procedure();
+    let body: Element<'a, Message> = if let Some(err) = answer.error() {
         empty_state(format!("{title} fetch failed: {err}"), None)
-    } else if let Some(rows) = fetch.ready() {
+    } else if let Some(rows) = answer.ready() {
         DataTable::new(columns)
             .searchable(searchable)
-            .on_sort(move |c| Message::NetlinkTableSort(which, c))
-            .on_filter(move |f| Message::NetlinkTableFilter(which, f))
-            .on_more(Message::NetlinkTableMore(which))
+            .on_sort(move |column| Message::DetailTableSort {
+                table: table.to_string(),
+                column,
+            })
+            .on_filter(move |query| Message::DetailTableFilter {
+                table: table.to_string(),
+                query,
+            })
+            .on_more(Message::DetailTableMore {
+                table: table.to_string(),
+            })
             .noun(noun)
-            .view(rows, d.table(which))
+            .view(rows, state.table(table))
     } else {
         empty_state(format!("Fetch {title} to load"), None)
     };
@@ -1579,7 +1647,6 @@ fn route_changes_columns<'a>() -> Vec<DataColumn<'a, RouteChangeRecord, Message>
 /// columns so the DataTable filter box filters by either; `detail` is the
 /// sensor's already-humanized field (iface name / ip / route dest), not raw JSON.
 fn render_events_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.netlink_detail;
     let mut col = column![].spacing(space::MD);
 
     let fam = event_family_totals(state);
@@ -1594,10 +1661,11 @@ fn render_events_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     }
 
     col = col.push(card(detail_datatable(
-        d,
-        NetlinkTable::Events,
+        state,
         NetlinkDetailTopic::Events,
-        &d.events,
+        state
+            .calls
+            .answer_with("events", |v: &mut Vec<EventRecord>| newest_first(v)),
         "Event timeline",
         "events",
         events_columns(),
@@ -1691,8 +1759,11 @@ fn socket_process_label(s: &SocketRecord) -> String {
 /// the already-fetched record set client-side via [`filter_sort_sockets`].
 fn render_socket_controls<'a>(
     socks: &[SocketRecord],
-    d: &'a NetlinkDetailState,
+    state: &'a DeviceDetailState,
 ) -> Element<'a, Message> {
+    let state_filter = Some(state.filter("sockets", "state")).filter(|s| !s.is_empty());
+    let port_filter = state.filter("sockets", "port");
+    let sort = SocketSort::from_token(state.filter("sockets", "sort"));
     // Distinct states present, sorted for stable chip order.
     let states: std::collections::BTreeSet<&str> = socks.iter().map(|s| s.state.as_str()).collect();
 
@@ -1711,22 +1782,18 @@ fn render_socket_controls<'a>(
     let mut state_row = row![text("state:").size(font::CAPTION)].spacing(space::XS);
     state_row = state_row.push(chip(
         "all",
-        d.socket_state_filter.is_none(),
-        Message::SetNetlinkSocketStateFilter(None),
+        state_filter.is_none(),
+        socket_filter("state", ""),
     ));
     for st in states {
-        let active = d.socket_state_filter.as_deref() == Some(st);
-        state_row = state_row.push(chip(
-            st,
-            active,
-            Message::SetNetlinkSocketStateFilter(Some(st.to_string())),
-        ));
+        let active = state_filter == Some(st);
+        state_row = state_row.push(chip(st, active, socket_filter("state", st)));
     }
 
     let port_input = row![
         text("port:").size(font::CAPTION),
-        text_input("any", &d.socket_port_filter)
-            .on_input(Message::SetNetlinkSocketPortFilter)
+        text_input("any", port_filter)
+            .on_input(|value| socket_filter("port", &value))
             .size(font::CAPTION)
             .width(Length::Fixed(90.0)),
     ]
@@ -1734,11 +1801,7 @@ fn render_socket_controls<'a>(
     .align_y(iced::Alignment::Center);
 
     let sort_btn = |label: &str, which: SocketSort| {
-        chip(
-            label,
-            d.socket_sort == which,
-            Message::SetNetlinkSocketSort(which),
-        )
+        chip(label, sort == which, socket_filter("sort", which.token()))
     };
     let sort_row = row![
         text("sort:").size(font::CAPTION),
@@ -1758,7 +1821,6 @@ fn render_socket_controls<'a>(
 /// Firewall & IPsec tab (#264): conntrack utilization gauge + per-proto donut,
 /// nft per-rule hit-rate table, and the xfrm/IPsec SA inventory + lifecycle.
 fn render_firewall_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.netlink_detail;
     let mut col = column![].spacing(space::MD);
 
     if has_prefix(state, "conntrack/") {
@@ -1766,10 +1828,9 @@ fn render_firewall_tab(state: &DeviceDetailState) -> Column<'_, Message> {
     }
     // nft per-rule hit-rate (@rpc/netlink/nft) with decoded packet/byte counters.
     col = col.push(card(detail_datatable(
-        d,
-        NetlinkTable::Nft,
+        state,
         NetlinkDetailTopic::Nft,
-        &d.nft,
+        state.calls.answer("nft"),
         "nftables rules",
         "rules",
         nft_columns(),
@@ -1780,10 +1841,9 @@ fn render_firewall_tab(state: &DeviceDetailState) -> Column<'_, Message> {
         col = col.push(card(render_xfrm(state)));
     }
     col = col.push(card(detail_datatable(
-        d,
-        NetlinkTable::Xfrm,
+        state,
         NetlinkDetailTopic::Xfrm,
-        &d.xfrm,
+        state.calls.answer("xfrm"),
         "IPsec SAs",
         "SAs",
         xfrm_columns(),
