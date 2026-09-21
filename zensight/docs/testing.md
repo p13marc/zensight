@@ -353,8 +353,8 @@ built from the missing fact (a `DeviceId` was the closed enum until #1256),
 proving nothing. Keep exactly one such test per architectural invariant.
 
 It is **red by design**, and it runs on every CI run as a ratchet rather than
-an `#[ignore]` nobody runs: `#[should_panic(expected = "GATE 2/model")]`
-(gate 1 passed with #1255 and #1256),
+an `#[ignore]` nobody runs: `#[should_panic(expected = "GATE 3/view")]`
+(gate 1 passed with #1255 and #1256, gate 2 with #1257),
 where the body is the real requirement in six gates (intake, model, view,
 honesty, definition + scripts, subscription), each assertion prefixed with its
 gate label, and each seam that does not exist yet an honest

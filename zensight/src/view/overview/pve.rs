@@ -427,6 +427,63 @@ mod tests {
 
     /// A stopped guest still has a disk, and that disk still wants backing up.
     /// It publishes no cpu or uptime, so a row keyed on liveness would lose it.
+    /// #1257: `backup_rows` joins two families the slice declares
+    /// separately — `guest/{vmid}` and `backup/{vmid}` share a variable, not
+    /// a prefix — by their binding. The family model derives both; the join
+    /// is the view definition's (§6.3). So the union of the two families'
+    /// instances is exactly the row set, and each row's numbers are the
+    /// instance's fields.
+    #[test]
+    fn the_family_model_reproduces_the_hand_written_join() {
+        use crate::view::family::FamilyModel;
+        use std::collections::BTreeSet;
+        let pairs = [dev(&[
+            ("guest/101/running", TelemetryValue::Gauge(1.0)),
+            ("backup/101/age_secs", TelemetryValue::Gauge(3600.0)),
+            ("backup/101/ok", TelemetryValue::Gauge(1.0)),
+            ("backup/101/size_change_pct", TelemetryValue::Gauge(2.5)),
+            ("guest/102/running", TelemetryValue::Gauge(1.0)),
+            ("guest/103/disk_bytes", TelemetryValue::Gauge(4.2e10)),
+            ("backup/104/age_secs", TelemetryValue::Gauge(7.0)),
+        ])];
+        let rows = backup_rows(&fleet(&pairs));
+        let model = FamilyModel::for_producer("pve").expect("pve is compiled in");
+        let derived = model.instances(pairs[0].1.metrics.iter());
+        let instances_of = |path: &str| -> Vec<&crate::view::family::Instance> {
+            let idx = model.families.iter().position(|f| f.path == path).unwrap();
+            derived
+                .iter()
+                .find(|f| f.family == idx)
+                .map(|f| f.instances.iter().collect())
+                .unwrap_or_default()
+        };
+        let guests = instances_of("guest/{vmid}");
+        let backups = instances_of("backup/{vmid}");
+        let vmids: BTreeSet<&str> = guests
+            .iter()
+            .chain(backups.iter())
+            .map(|i| i.id.as_str())
+            .collect();
+        let row_vmids: BTreeSet<&str> = rows.iter().map(|r| r.vmid.as_str()).collect();
+        assert_eq!(
+            vmids, row_vmids,
+            "the join's row set is the two families' union"
+        );
+        for row in &rows {
+            let backup = backups.iter().find(|i| i.id == row.vmid);
+            let guest = guests.iter().find(|i| i.id == row.vmid);
+            assert_eq!(row.age_secs, backup.and_then(|b| b.number("age_secs")));
+            assert_eq!(
+                row.size_change_pct,
+                backup.and_then(|b| b.number("size_change_pct"))
+            );
+            assert_eq!(
+                row.running,
+                guest.and_then(|g| g.state("running")).unwrap_or(false)
+            );
+        }
+    }
+
     #[test]
     fn a_stopped_guest_still_earns_a_backup_row() {
         let pairs = [dev(&[(

@@ -12320,10 +12320,11 @@ mod system_view_tests {
     /// #1258 · GATE 4/honesty → #1256 · GATE 5/definition → #1259 · GATE
     /// 6/subscribe → #1262. Gate 1 passes since #1255 (the enum is off the
     /// wire) and #1256 (the device is a name; the state document is judged
-    /// against the runtime slice). Today it dies at gate 2: nothing derives
-    /// the family model from the slice. That failure is the finding.
+    /// against the runtime slice); gate 2 since #1257 (the family model
+    /// derives rows and columns from the slice). Today it dies at gate 3:
+    /// no renderer reads the model. That failure is the finding.
     #[test]
-    #[should_panic(expected = "GATE 2/model")]
+    #[should_panic(expected = "GATE 3/view")]
     fn a_fictional_producer_renders_from_its_introspect_slice() {
         let mut a = app();
 
@@ -12399,9 +12400,93 @@ mod system_view_tests {
             "GATE 1/intake: the served schema was not consulted"
         );
 
-        // (b) model — the family instances and the counter-as-rate.
-        // Seam: #1257 derives rows and columns from the slice.
-        panic!("GATE 2/model: no seam yet — #1257 adds the family model and replaces this line");
+        // (b) model — the family instances and the counter-as-rate (#1257).
+        // From the slice the *fleet* served, not a compiled-in one: this is
+        // the producer this build never heard of.
+        let slice = a
+            .slices
+            .get(PRODUCER)
+            .unwrap_or_else(|| panic!("GATE 2/model: the fleet fold kept no slice for {PRODUCER}"));
+        let model = crate::view::family::FamilyModel::from_slice(slice);
+        let temp = model.family("{unit}/temp/{sensor}").unwrap_or_else(|| {
+            panic!(
+                "GATE 2/model: no {{unit}}/temp/{{sensor}} family; families: {:?}",
+                model.families.iter().map(|f| &f.path).collect::<Vec<_>>()
+            )
+        });
+        assert_eq!(
+            temp.fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["celsius", "upper_critical_c"],
+            "GATE 2/model: the limit is a sibling column, not a separate family"
+        );
+        let metrics = &a.dashboard.devices[&device].metrics;
+        let folded = model.instances(metrics.iter());
+        let temp_idx = model
+            .families
+            .iter()
+            .position(|f| f.path == "{unit}/temp/{sensor}")
+            .unwrap();
+        let sensors = folded
+            .iter()
+            .find(|f| f.family == temp_idx)
+            .unwrap_or_else(|| panic!("GATE 2/model: no temperature instances folded"));
+        assert_eq!(
+            sensors
+                .instances
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                format!("{UNIT}/exhaust"),
+                format!("{UNIT}/inlet"),
+                format!("{UNIT}/outlet")
+            ],
+            "GATE 2/model: one row per (unit, sensor)"
+        );
+        let inlet = sensors
+            .instances
+            .iter()
+            .find(|i| i.id == format!("{UNIT}/inlet"))
+            .unwrap();
+        assert_eq!(
+            inlet.number("celsius"),
+            Some(41.5),
+            "GATE 2/model: inlet reading"
+        );
+        assert_eq!(
+            inlet.number("upper_critical_c"),
+            Some(40.0),
+            "GATE 2/model: inlet's declared limit beside it"
+        );
+        let exhaust = sensors
+            .instances
+            .iter()
+            .find(|i| i.id == format!("{UNIT}/exhaust"))
+            .unwrap();
+        assert_eq!(
+            exhaust.number("upper_critical_c"),
+            None,
+            "GATE 2/model: exhaust has no limit, and the model invents none"
+        );
+        let rx = model
+            .family("{unit}")
+            .and_then(|f| f.field("uplink/rx_bytes"))
+            .unwrap_or_else(|| {
+                panic!("GATE 2/model: no uplink/rx_bytes field on the {{unit}} family")
+            });
+        assert_eq!(
+            rx.presentation(),
+            crate::view::family::Presentation::Rate,
+            "GATE 2/model: a counter presents as a rate"
+        );
+        assert_eq!(
+            rx.display_unit().as_deref(),
+            Some("By/s"),
+            "GATE 2/model: the rate carries the declared unit per second"
+        );
 
         // (c) view — with no definition loaded, `simulator(a.view())` after
         // `Message::SelectDevice(device)` finds a table per family, `41.5 Cel`
@@ -12467,9 +12552,10 @@ mod system_view_tests {
         }
     }
 
-    /// The green companion: what the ratchet above cannot see past gate 2 is
+    /// The green companion: what the ratchet above cannot see past gate 3 is
     /// pinned here individually — gate 1's intake positively, and gate 4's
     /// honesty finding, which the ratchet only reaches once gate 3 passes.
+    /// (Gate 2's model has its own tests in `view::family`.)
     /// Every assertion names the phase that owns it. (Gate 6's pin already
     /// exists by name — `subscription::tests::test_effective_scopes_empty_is_firehose`
     /// — and is not duplicated here.)

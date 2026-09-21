@@ -364,6 +364,81 @@ mod tests {
     /// own panel. Folding on `split('/')` position would be correct here by
     /// accident; folding on the registry's `{chassis}` chunk is correct because
     /// that chunk is what the sensor minted, `-` and all.
+    /// #1257: the family model derives from the bmc slice what `fold` does
+    /// by hand — one instance per `(chassis, sensor)` with `celsius` and its
+    /// declared limits as sibling columns, one per `(chassis, psu)`, and the
+    /// `{chassis}` family carrying `reachable` — so the two agree on every
+    /// row and every reading of this fixture.
+    #[test]
+    fn the_family_model_reproduces_the_hand_written_fold() {
+        use crate::view::family::FamilyModel;
+        let state = device(&[
+            ("bmc01-blade1/thermal/inlet/celsius", 41.0),
+            ("bmc01-blade1/thermal/inlet/upper_critical_c", 89.0),
+            ("bmc01-blade1/thermal/outlet/celsius", 55.0),
+            ("bmc01-blade2/thermal/inlet/celsius", 67.0),
+            ("bmc01-blade1/psu/1/input_watts", 210.0),
+            ("bmc01-blade1/psu/1/capacity_watts", 750.0),
+            ("bmc01-blade1/psu/1/present", 1.0),
+            ("bmc01-blade1/fan/fan1/rpm", 4200.0),
+            ("bmc01-blade1/reachable", 1.0),
+        ]);
+        let folded = fold(&state);
+        let model = FamilyModel::for_producer("bmc").expect("bmc is compiled in");
+        let derived = model.instances(state.metrics.iter());
+        let family = |path: &str| {
+            let idx = model
+                .families
+                .iter()
+                .position(|f| f.path == path)
+                .unwrap_or_else(|| panic!("no family {path}"));
+            derived.iter().find(|f| f.family == idx)
+        };
+
+        // Thermal: every (chassis, sensor) the fold saw, with the same numbers.
+        let thermal = family("{chassis}/thermal/{sensor}").expect("thermal instances");
+        let mut expected: Vec<(String, String)> = Vec::new();
+        for (chassis, r) in &folded {
+            for (sensor, t) in &r.thermal {
+                expected.push((chassis.clone(), sensor.clone()));
+                let inst = thermal
+                    .instances
+                    .iter()
+                    .find(|i| i.id == format!("{chassis}/{sensor}"))
+                    .unwrap_or_else(|| panic!("{chassis}/{sensor} missing"));
+                assert_eq!(inst.number("celsius"), t.celsius);
+                assert_eq!(inst.number("upper_critical_c"), t.upper_critical_c);
+                assert_eq!(inst.number("upper_warning_c"), t.upper_warning_c);
+            }
+        }
+        assert_eq!(thermal.instances.len(), expected.len());
+
+        // PSU and fans and the chassis-level `reachable`.
+        let psu = family("{chassis}/psu/{psu}").expect("psu instances");
+        let p = &psu.instances[0];
+        assert_eq!(p.id, "bmc01-blade1/1");
+        assert_eq!(
+            p.number("input_watts"),
+            folded["bmc01-blade1"].psu["1"].input_watts
+        );
+        assert_eq!(p.state("present"), folded["bmc01-blade1"].psu["1"].present);
+        let fan = family("{chassis}/fan/{fan}").expect("fan instances");
+        assert_eq!(fan.instances[0].number("rpm"), Some(4200.0));
+        let chassis = family("{chassis}").expect("chassis facts");
+        assert_eq!(chassis.instances[0].id, "bmc01-blade1");
+        assert_eq!(
+            chassis.instances[0].number("reachable"),
+            folded["bmc01-blade1"].reachable
+        );
+        // The slice's own limit column is a declared field with a unit, so
+        // a default renderer can grade against it without a GUI constant.
+        let f = model.family("{chassis}/thermal/{sensor}").unwrap();
+        assert_eq!(
+            f.field("upper_critical_c").unwrap().unit.as_deref(),
+            Some("Cel")
+        );
+    }
+
     #[test]
     fn two_chassis_behind_one_endpoint_get_one_panel_each() {
         let state = device(&[

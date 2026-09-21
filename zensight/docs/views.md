@@ -73,9 +73,34 @@ device when `(origin, producer)` match and the subject is under the device's
 source, or when the device is the only one its producer has on that origin.
 Documents never create a device.
 
-Two things the intake does *not* do yet: derive the family model from the
-slice (gate 2, #1257 — the ratchet in `app::system_view_tests` stops there
-today) and render a producer's `views.toml` (gate 5, #1259).
+Two things the intake does *not* do yet: render the family model below with
+no bespoke view (gate 3, #1258 — the ratchet in `app::system_view_tests` stops
+there today) and render a producer's `views.toml` (gate 5, #1259).
+
+### The family model (#1257)
+
+`view::family` derives rows and columns from a producer's slice, with no
+Iced in it (design §5.3). A **family** is the longest common prefix of paths
+sharing the same variables, ending at the last variable —
+`{chassis}/thermal/{sensor}` — or, for a var-less path, everything but its
+last chunk (`cluster/quorate` → `cluster`, a facts family). Its **fields** are
+the literal tails (`celsius`, `upper_critical_c`), each carrying its
+`SubjectDecl`: `kind` decides the presentation (`Rate` for a counter,
+`Absolute`, `State`, `Label`), `unit` the display unit (`By` on a counter is
+`By/s`), `cardinality`, `ttl_s` (stale after twice it, or nothing when none is
+declared) and `description`. A trailing rest variable (`{metric...}`, the
+proxy producers' device trees) makes an **open** family whose field is named
+by the live tail. `FamilyModel::instances` folds a device's metric map into
+one **instance** per variable binding (`rack7/inlet`) with the latest point
+per field; `bind` is the private binder over zenkey's `SubjectPattern` with
+its precedence (literals before variables before rest), to be replaced by
+`RegistrySlice::bind` when zenkey #460 lands — not kept beside it.
+
+Two families may share a variable name and not a prefix — pve's
+`guest/{vmid}` and `backup/{vmid}` — and they stay two families; joining them
+by binding is the view definition's business (§6.3). The three hand-written
+folds (`bmc::fold`, `pve::backup_rows`, `probe::target_rows`) are each pinned
+against the derivation on their own fixture: same row set, same readings.
 
 ## Routing: `CurrentView`
 
