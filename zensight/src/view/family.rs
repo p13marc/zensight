@@ -407,12 +407,81 @@ fn numeric(value: &TelemetryValue) -> Option<f64> {
 /// did not advance or the counter went backwards (a reset: the rate is
 /// unknowable from these two points, and a negative rate is a lie).
 pub fn rate_between(prev: &TelemetryPoint, cur: &TelemetryPoint) -> Option<f64> {
-    let (a, b) = (numeric(&prev.value)?, numeric(&cur.value)?);
-    let dt_ms = cur.timestamp - prev.timestamp;
-    if dt_ms <= 0 || b < a {
+    rate_between_samples(
+        (prev.timestamp, numeric(&prev.value)?),
+        (cur.timestamp, numeric(&cur.value)?),
+    )
+}
+
+/// [`rate_between`] over `(timestamp_ms, value)` pairs — the store's samples.
+pub fn rate_between_samples(prev: (i64, f64), cur: (i64, f64)) -> Option<f64> {
+    let dt_ms = cur.0 - prev.0;
+    if dt_ms <= 0 || cur.1 < prev.1 {
         return None;
     }
-    Some((b - a) / (dt_ms as f64 / 1000.0))
+    Some((cur.1 - prev.1) / (dt_ms as f64 / 1000.0))
+}
+
+/// Which field a family's rows are graded on, and against which siblings —
+/// the **default** rule, with no definition loaded (#1258).
+///
+/// A limit is a sibling the publisher declares, never a number this GUI
+/// holds: the rule reads the slice's field *names* and nothing else. A field
+/// named `upper_critical_*` / `critical_*` is a critical limit,
+/// `upper_warning_*` / `warning_*` a warning limit, and the reading they
+/// grade is the family's one remaining absolute field — a gauge, or a field
+/// whose slice declares no kind at all (bmc's, today). Two candidate
+/// readings, or none, or no limit-named sibling at all — no grading: a
+/// definition (`[panel.grade]`, #1259) can say what the names cannot, and
+/// until it does a reading with no limit gets no verdict (the #1126–#1128
+/// honesty rules, by construction).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Grading {
+    /// Index into `family.fields` of the graded reading.
+    pub reading: usize,
+    pub warning: Option<usize>,
+    pub critical: Option<usize>,
+}
+
+fn is_limit_name(name: &str, level: &str) -> bool {
+    let last = name.rsplit('/').next().unwrap_or(name);
+    last.starts_with(&format!("upper_{level}")) || last.starts_with(level)
+}
+
+pub fn default_grading(family: &Family) -> Option<Grading> {
+    let critical = family
+        .fields
+        .iter()
+        .position(|f| is_limit_name(&f.name, "critical"));
+    let warning = family
+        .fields
+        .iter()
+        .position(|f| is_limit_name(&f.name, "warning"));
+    if critical.is_none() && warning.is_none() {
+        return None;
+    }
+    let readings: Vec<usize> = family
+        .fields
+        .iter()
+        .enumerate()
+        .filter(|(i, f)| {
+            Some(*i) != critical
+                && Some(*i) != warning
+                && matches!(
+                    f.presentation(),
+                    Presentation::Absolute | Presentation::Unknown
+                )
+        })
+        .map(|(i, _)| i)
+        .collect();
+    match readings.as_slice() {
+        [reading] => Some(Grading {
+            reading: *reading,
+            warning,
+            critical,
+        }),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -548,6 +617,42 @@ mod tests {
         // Backwards is a reset, not a negative rate; no time is no rate.
         assert_eq!(rate_between(&samples[1], &samples[0]), None);
         assert_eq!(rate_between(&samples[0], &samples[0]), None);
+    }
+
+    /// The default grading rule: the fixture's temperature family grades
+    /// `celsius` against `upper_critical_c`; bmc's thermal family against
+    /// both limits; bmc's PSU family, with no limit-named sibling, is not
+    /// graded — `capacity_watts` is a limit only when a definition says so.
+    #[test]
+    fn the_default_grading_reads_only_limit_named_siblings() {
+        let m = model();
+        let temp = m.family("{unit}/temp/{sensor}").unwrap();
+        let g = default_grading(temp).expect("graded");
+        assert_eq!(temp.fields[g.reading].name, "celsius");
+        assert_eq!(
+            g.critical.map(|i| temp.fields[i].name.as_str()),
+            Some("upper_critical_c")
+        );
+        assert_eq!(g.warning, None);
+        assert_eq!(
+            default_grading(m.family("{unit}").unwrap()),
+            None,
+            "a counter is not graded"
+        );
+
+        let bmc = FamilyModel::for_producer("bmc").unwrap();
+        let thermal = bmc.family("{chassis}/thermal/{sensor}").unwrap();
+        let g = default_grading(thermal).unwrap();
+        assert_eq!(thermal.fields[g.reading].name, "celsius");
+        assert!(g.warning.is_some() && g.critical.is_some());
+        assert_eq!(
+            default_grading(bmc.family("{chassis}/psu/{psu}").unwrap()),
+            None
+        );
+        assert_eq!(
+            default_grading(bmc.family("{chassis}/fan/{fan}").unwrap()),
+            None
+        );
     }
 
     /// The var-less rule and the rest-var rule, on real registries.

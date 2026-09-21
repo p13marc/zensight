@@ -145,6 +145,11 @@ pub struct DeviceDetailState {
     pub documents: std::collections::BTreeMap<String, crate::intake::DocumentState>,
     /// Events-class records for this device, oldest first (#1256).
     pub events: VecDeque<crate::intake::EventState>,
+    /// The producer's family model (#1257), from the slice the fleet served
+    /// or, failing that, the one this build compiled in. `None` when neither
+    /// knows the producer: then there is nothing to derive, and the flat
+    /// metric list below is all the view can honestly show.
+    pub family: Option<crate::view::family::FamilyModel>,
 }
 
 impl DeviceDetailState {
@@ -186,6 +191,7 @@ impl DeviceDetailState {
             slice_known: None,
             documents: std::collections::BTreeMap::new(),
             events: VecDeque::new(),
+            family: None,
         }
     }
 
@@ -1144,7 +1150,11 @@ fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
     if let Some(finding) = intake_findings(state) {
         body = body.push(finding);
     }
-    body = body.push(chart_section).push(metrics);
+    body = body.push(chart_section);
+    if let Some(families) = render_families(state) {
+        body = body.push(families);
+    }
+    body = body.push(metrics);
     if !state.documents.is_empty() {
         body = body.push(render_documents(state));
     }
@@ -1152,6 +1162,267 @@ fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
         body = body.push(render_events(state));
     }
     body.into()
+}
+
+/// One rendered cell of a family row: the field and its presented value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FamilyCell {
+    pub field: String,
+    /// The value as shown — `41.5 Cel`, `100000 By/s`, `yes`, or the honest
+    /// placeholder when the field has no reading yet.
+    pub text: String,
+}
+
+/// One row of a family panel (#1258): an instance with its cells and, when
+/// the default grading rule applies, the verdict on its graded reading.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FamilyRow {
+    pub instance: String,
+    pub cells: Vec<FamilyCell>,
+    /// `None` is "no limit declared, no verdict" — not "ok".
+    pub verdict: Option<crate::view::components::limit_table::LimitVerdict>,
+}
+
+/// One family panel: its title, whether it is a table (rows per instance)
+/// or a facts list (one instance, a row per field), and its rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FamilyPanel {
+    pub title: String,
+    pub is_table: bool,
+    pub rows: Vec<FamilyRow>,
+}
+
+/// The default renderer's rows (#1258, design §5.4), as data: one panel per
+/// family the device has instances of, derived from the producer's slice.
+///
+/// - a **table** per family with variables — a row per instance, a cell per
+///   field, kinds and units formatted: a gauge as `41.5 Cel`, a counter as a
+///   rate (`100000 By/s`, from the last two points; before there are two it
+///   says so), a bool as `yes`/`no`, text as itself;
+/// - a **facts** panel for a var-less family — one row per field;
+/// - grading only by [`crate::view::family::default_grading`]: a sibling the
+///   slice names as a limit, or nothing. A reading with no limit is shown
+///   plainly and carries no verdict, exactly as `limit_table` does.
+///
+/// Pure, so the ratchet can assert on it without a simulator; the widget is
+/// [`render_families`] over it.
+pub fn family_panels(state: &DeviceDetailState) -> Vec<FamilyPanel> {
+    use crate::view::components::limit_table::LimitRow;
+    use crate::view::family::{Presentation, default_grading};
+    let Some(model) = state.family.as_ref() else {
+        return Vec::new();
+    };
+    let mut panels = Vec::new();
+    for fi in model.instances(state.metrics.iter()) {
+        let family = &model.families[fi.family];
+        let grading = default_grading(family);
+        let title = if family.path.is_empty() {
+            model.producer.clone()
+        } else {
+            family.path.clone()
+        };
+        let mut rows = Vec::new();
+        for instance in &fi.instances {
+            let mut cells = Vec::new();
+            // A closed family's columns are its declared fields, in
+            // declaration order; an open one's are whatever the tails were.
+            let field_names: Vec<String> = if family.open {
+                instance.values.keys().cloned().collect()
+            } else {
+                family.fields.iter().map(|f| f.name.clone()).collect()
+            };
+            for name in field_names {
+                let field = family.field(&name);
+                let Some(point) = instance.point(&name) else {
+                    continue;
+                };
+                let unit = field.and_then(|f| f.display_unit());
+                let text = match field.map(|f| f.presentation()) {
+                    Some(Presentation::Rate) => match counter_rate(state, &point.metric) {
+                        Some(rate) => with_unit(fmt_num(rate), &unit),
+                        None => format!(
+                            "{} total · rate after the next sample",
+                            with_unit(
+                                fmt_num(instance.number(&name).unwrap_or(0.0)),
+                                &field.and_then(|f| f.unit.clone())
+                            )
+                        ),
+                    },
+                    Some(Presentation::State) => match instance.state(&name) {
+                        Some(true) => "yes".to_string(),
+                        Some(false) => "no".to_string(),
+                        None => format_value_for_export(&point.value),
+                    },
+                    // A field with no declared kind that carries a number is
+                    // a reading too — bmc declares units and no kinds.
+                    Some(Presentation::Absolute) | Some(Presentation::Unknown) => {
+                        match instance.number(&name) {
+                            Some(v) => with_unit(fmt_num(v), &unit),
+                            None => format_value_for_export(&point.value),
+                        }
+                    }
+                    Some(Presentation::Label) | None => format_value_for_export(&point.value),
+                };
+                cells.push(FamilyCell { field: name, text });
+            }
+            let verdict = grading.as_ref().and_then(|g| {
+                let reading = instance.number(&family.fields[g.reading].name);
+                let warning = g
+                    .warning
+                    .and_then(|i| instance.number(&family.fields[i].name));
+                let critical = g
+                    .critical
+                    .and_then(|i| instance.number(&family.fields[i].name));
+                LimitRow::new("", reading, "")
+                    .with_limits(warning, critical)
+                    .verdict()
+            });
+            rows.push(FamilyRow {
+                instance: instance.id.clone(),
+                cells,
+                verdict,
+            });
+        }
+        panels.push(FamilyPanel {
+            title,
+            is_table: family.is_table(),
+            rows,
+        });
+    }
+    panels
+}
+
+/// A counter's rate from the last two points the view holds: the live
+/// history first, the store's seeded samples when the view has just opened.
+fn counter_rate(state: &DeviceDetailState, metric: &str) -> Option<f64> {
+    use crate::view::family::{rate_between, rate_between_samples};
+    if let Some(h) = state.history.get(metric)
+        && h.len() >= 2
+    {
+        let mut it = h.iter().rev();
+        let cur = it.next()?;
+        let prev = it.next()?;
+        return rate_between(prev, cur);
+    }
+    let seeded = state.seeded_history.get(metric)?;
+    if seeded.len() < 2 {
+        return None;
+    }
+    let cur = &seeded[seeded.len() - 1];
+    let prev = &seeded[seeded.len() - 2];
+    rate_between_samples((prev.ts, prev.value), (cur.ts, cur.value))
+}
+
+/// A number as a reading: integers without decimals, the rest to two.
+fn fmt_num(v: f64) -> String {
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        let s = format!("{v:.2}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+fn with_unit(value: String, unit: &Option<String>) -> String {
+    match unit {
+        Some(u) => format!("{value} {u}"),
+        None => value,
+    }
+}
+
+/// The family panels as widgets (#1258): a header per family, a header row
+/// of field names, a row per instance with its cells and, when graded, the
+/// verdict word in the verdict's colour — never a colour without the word.
+fn render_families(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    use crate::view::components::limit_table::LimitVerdict;
+    let panels = family_panels(state);
+    if panels.is_empty() {
+        return None;
+    }
+    let muted = |t: &Theme| text::Style {
+        color: Some(crate::view::theme::colors(t).text_muted()),
+    };
+    let mut col = column![].spacing(crate::view::tokens::space::MD);
+    for panel in panels {
+        let mut section = column![text(panel.title.clone()).size(font::EMPHASIS)]
+            .spacing(crate::view::tokens::space::XS);
+        if panel.is_table {
+            let header_fields: Vec<String> = panel
+                .rows
+                .first()
+                .map(|r| r.cells.iter().map(|c| c.field.clone()).collect())
+                .unwrap_or_default();
+            let mut header = row![
+                text("instance")
+                    .size(font::DENSE)
+                    .width(Length::FillPortion(2))
+                    .style(muted)
+            ]
+            .spacing(crate::view::tokens::space::SM);
+            for f in header_fields {
+                header = header.push(
+                    text(f)
+                        .size(font::DENSE)
+                        .width(Length::FillPortion(2))
+                        .style(muted),
+                );
+            }
+            section = section.push(header);
+        }
+        for r in panel.rows {
+            let verdict = r.verdict;
+            let mut line = row![].spacing(crate::view::tokens::space::SM);
+            if panel.is_table {
+                line = line.push(
+                    text(r.instance.clone())
+                        .size(font::CAPTION)
+                        .width(Length::FillPortion(2)),
+                );
+                for c in &r.cells {
+                    line = line.push(
+                        text(c.text.clone())
+                            .size(font::CAPTION)
+                            .width(Length::FillPortion(2)),
+                    );
+                }
+            } else {
+                // A facts family: one row per field.
+                for c in &r.cells {
+                    section = section.push(
+                        row![
+                            text(c.field.clone())
+                                .size(font::CAPTION)
+                                .width(Length::FillPortion(2))
+                                .style(muted),
+                            text(c.text.clone())
+                                .size(font::CAPTION)
+                                .width(Length::FillPortion(4)),
+                        ]
+                        .spacing(crate::view::tokens::space::SM),
+                    );
+                }
+                continue;
+            }
+            if let Some(v) = verdict {
+                let word = match v {
+                    LimitVerdict::Ok => "ok",
+                    LimitVerdict::Warning => "warning",
+                    LimitVerdict::Critical => "critical",
+                };
+                line = line.push(
+                    text(word)
+                        .size(font::CAPTION)
+                        .width(Length::FillPortion(1))
+                        .style(move |t: &Theme| text::Style {
+                            color: Some(v.color(t)),
+                        }),
+                );
+            }
+            section = section.push(line);
+        }
+        col = col.push(crate::view::components::card(section));
+    }
+    Some(col.into())
 }
 
 /// The exact words the "not declared" marker uses — one widget, one string,
@@ -2156,6 +2427,130 @@ mod tests {
             .is_ok(),
             "the verdict badge carries the shared label"
         );
+    }
+
+    /// The default renderer (#1258): a family with variables is a table
+    /// whose rows carry the reading with its declared unit and, where the
+    /// slice names a limit, the verdict word — and only there.
+    #[test]
+    fn a_family_table_renders_readings_units_and_verdicts() {
+        use crate::view::components::limit_table::LimitVerdict;
+        use iced_test::simulator;
+        let mut state = DeviceDetailState::new(DeviceId::fixture("bmc", "bmc01"));
+        for (metric, v) in [
+            ("bmc01/thermal/inlet/celsius", 41.0),
+            ("bmc01/thermal/inlet/upper_warning_c", 35.0),
+            ("bmc01/thermal/inlet/upper_critical_c", 89.0),
+            ("bmc01/thermal/exhaust/celsius", 70.0),
+            ("bmc01/psu/1/input_watts", 210.0),
+            ("bmc01/psu/1/present", 1.0),
+        ] {
+            state.metrics.insert(
+                metric.to_string(),
+                TelemetryPoint::new("bmc01", metric.to_string(), TelemetryValue::Gauge(v)),
+            );
+        }
+        state.family = crate::view::family::FamilyModel::for_producer("bmc");
+        let panels = family_panels(&state);
+        let thermal = panels
+            .iter()
+            .find(|p| p.title == "{chassis}/thermal/{sensor}")
+            .expect("thermal panel");
+        assert!(thermal.is_table);
+        let inlet = thermal
+            .rows
+            .iter()
+            .find(|r| r.instance == "bmc01/inlet")
+            .unwrap();
+        assert!(inlet.cells.iter().any(|c| c.text == "41 Cel"));
+        assert_eq!(
+            inlet.verdict,
+            Some(LimitVerdict::Warning),
+            "41 against warn 35 / crit 89"
+        );
+        let exhaust = thermal
+            .rows
+            .iter()
+            .find(|r| r.instance == "bmc01/exhaust")
+            .unwrap();
+        assert_eq!(exhaust.verdict, None, "no limit published — no verdict");
+        let psu = panels
+            .iter()
+            .find(|p| p.title == "{chassis}/psu/{psu}")
+            .unwrap();
+        assert_eq!(
+            psu.rows[0].verdict, None,
+            "capacity is a limit only when a definition says so"
+        );
+        // bmc declares no `kind` on `present`, so the model cannot call it a
+        // bool and the cell shows the number as read — `1`, not `yes`. A
+        // slice that says `kind = "bool"` gets the word; this one says nothing.
+        assert!(
+            psu.rows[0]
+                .cells
+                .iter()
+                .any(|c| c.field == "present" && c.text == "1")
+        );
+
+        let mut ui = simulator(generic_device_view(&state));
+        assert!(ui.find("41 Cel").is_ok());
+        assert!(ui.find("warning").is_ok());
+        assert!(ui.find("210 W").is_ok());
+    }
+
+    /// A counter is a rate once there are two points, and says so until then.
+    #[test]
+    fn a_counter_row_is_a_rate_or_says_it_is_not_yet() {
+        use iced_test::simulator;
+        let mut state = DeviceDetailState::new(DeviceId::fixture("fake-sensor", "rack7"));
+        state.family = Some(crate::view::family::FamilyModel::from_slice(
+            &zenkey::slice::parse_slice(crate::mock::fake_sensor::SLICE).unwrap(),
+        ));
+        let mut p1 = TelemetryPoint::new(
+            "rack7",
+            "rack7/uplink/rx_bytes",
+            TelemetryValue::Counter(1_000_000),
+        );
+        p1.timestamp = 1_700_000_000_000;
+        state.update(p1.clone());
+        let one = family_panels(&state);
+        let cell = &one[0].rows[0].cells[0];
+        assert_eq!(cell.field, "uplink/rx_bytes");
+        assert!(
+            cell.text.contains("rate after the next sample"),
+            "one point is not a rate: {}",
+            cell.text
+        );
+
+        let mut p2 = p1.clone();
+        p2.timestamp += 10_000;
+        p2.value = TelemetryValue::Counter(2_000_000);
+        state.update(p2);
+        let two = family_panels(&state);
+        assert_eq!(two[0].rows[0].cells[0].text, "100000 By/s");
+        let mut ui = simulator(generic_device_view(&state));
+        assert!(ui.find("100000 By/s").is_ok());
+    }
+
+    /// A var-less family is a facts panel, one row per field; a producer
+    /// with no model renders no panel and the flat list stands alone.
+    #[test]
+    fn facts_render_as_a_list_and_no_model_renders_no_panel() {
+        use iced_test::simulator;
+        let mut state = DeviceDetailState::new(DeviceId::fixture("pve", "pve01"));
+        state.metrics.insert(
+            "cluster/quorate".into(),
+            TelemetryPoint::new("pve01", "cluster/quorate", TelemetryValue::Gauge(1.0)),
+        );
+        assert!(family_panels(&state).is_empty(), "no model, no panels");
+        state.family = crate::view::family::FamilyModel::for_producer("pve");
+        let panels = family_panels(&state);
+        assert_eq!(panels.len(), 1);
+        assert_eq!(panels[0].title, "cluster");
+        assert!(!panels[0].is_table);
+        assert_eq!(panels[0].rows[0].cells[0].field, "quorate");
+        let mut ui = simulator(generic_device_view(&state));
+        assert!(ui.find("quorate").is_ok());
     }
 
     #[test]

@@ -8938,11 +8938,21 @@ impl ZenSight {
             .get(&id)
             .map(|d| (d.undeclared.clone(), d.slice_known))
             .unwrap_or_default();
+        // The family model (#1257): the slice the fleet served for this
+        // producer wins; the compiled-in one stands in when the sweep has not
+        // answered (or never will — a producer this build knows but the
+        // fleet no longer runs).
+        let family = self
+            .slices
+            .get(&id.producer)
+            .map(crate::view::family::FamilyModel::from_slice)
+            .or_else(|| crate::view::family::FamilyModel::for_producer(&id.producer));
         if let Some(selected) = self.selected_device.as_mut() {
             selected.documents = documents;
             selected.events = events;
             selected.undeclared = undeclared;
             selected.slice_known = slice_known;
+            selected.family = family;
         }
     }
 
@@ -10023,6 +10033,18 @@ impl ZenSight {
         // so the detail view will populate as new data arrives
         let max_history = self.settings.max_history_value();
         let mut detail_state = DeviceDetailState::with_max_history(device_id.clone(), max_history);
+        // Open populated (#1258): the latest point per metric the dashboard
+        // already holds, and the hot ring's samples for the rates. It used to
+        // open empty and "populate as new data arrives", which for a
+        // slow-polling producer was a minute of "No metrics received yet".
+        if let Some(seen) = self.dashboard.devices.get(&device_id) {
+            detail_state.metrics = seen.metrics.clone();
+        }
+        detail_state.seeded_history = self
+            .store
+            .device_hot_samples(&device_id.producer, &device_id.origin, &device_id.source)
+            .into_iter()
+            .collect();
         // Project this device's favorited metrics (#27) from the global set.
         detail_state.set_favorites(self.device_favorites(&device_id));
         // Focus state (#476): the origin rides on the device handle (#474), so
@@ -12321,10 +12343,12 @@ mod system_view_tests {
     /// 6/subscribe → #1262. Gate 1 passes since #1255 (the enum is off the
     /// wire) and #1256 (the device is a name; the state document is judged
     /// against the runtime slice); gate 2 since #1257 (the family model
-    /// derives rows and columns from the slice). Today it dies at gate 3:
-    /// no renderer reads the model. That failure is the finding.
+    /// derives rows and columns from the slice); gates 3 and 4 since #1258
+    /// (the default renderer reads the model, and says what is not
+    /// declared). Today it dies at gate 5: nothing loads a `views.toml`.
+    /// That failure is the finding.
     #[test]
-    #[should_panic(expected = "GATE 3/view")]
+    #[should_panic(expected = "GATE 5/definition")]
     fn a_fictional_producer_renders_from_its_introspect_slice() {
         let mut a = app();
 
@@ -12488,22 +12512,93 @@ mod system_view_tests {
             "GATE 2/model: the rate carries the declared unit per second"
         );
 
-        // (c) view — with no definition loaded, `simulator(a.view())` after
-        // `Message::SelectDevice(device)` finds a table per family, `41.5 Cel`
-        // beside the reading, `By/s` on the counter row, inlet graded critical,
-        // outlet not, and exhaust ungraded (hottest reading, no limit).
-        // Seam: #1258's default renderers.
-        #[allow(unreachable_code)]
+        // (c) view — with no definition loaded, the default renderer (#1258)
+        // shows a table per family: `41.5 Cel` beside the reading, `By/s` on
+        // the counter row, inlet graded critical, outlet not, and exhaust
+        // ungraded (the hottest reading, and no limit — so no verdict).
+        let _ = a.update(Message::SelectDevice(device.clone()));
         {
-            panic!(
-                "GATE 3/view: no seam yet — #1258 adds the default renderers and replaces this line"
+            let selected = a
+                .selected_device
+                .as_ref()
+                .expect("GATE 3/view: SelectDevice selected nothing");
+            assert!(
+                selected.family.is_some(),
+                "GATE 3/view: the selected device carries no family model"
+            );
+            let panels = crate::view::device::family_panels(selected);
+            let temps = panels
+                .iter()
+                .find(|p| p.title == "{unit}/temp/{sensor}")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "GATE 3/view: no temperature panel; panels: {:?}",
+                        panels.iter().map(|p| &p.title).collect::<Vec<_>>()
+                    )
+                });
+            assert!(
+                temps.is_table,
+                "GATE 3/view: a family with variables is a table"
+            );
+            let row = |id: &str| {
+                temps
+                    .rows
+                    .iter()
+                    .find(|r| r.instance == format!("{UNIT}/{id}"))
+                    .unwrap_or_else(|| panic!("GATE 3/view: no row for {id}"))
+            };
+            use crate::view::components::limit_table::LimitVerdict;
+            let inlet = row("inlet");
+            assert!(
+                inlet.cells.iter().any(|c| c.text == "41.5 Cel"),
+                "GATE 3/view: the inlet reading is not `41.5 Cel`: {:?}",
+                inlet.cells
+            );
+            assert_eq!(
+                inlet.verdict,
+                Some(LimitVerdict::Critical),
+                "GATE 3/view: inlet at 41.5 against its declared 40.0 limit is critical"
+            );
+            assert_eq!(
+                row("outlet").verdict,
+                Some(LimitVerdict::Ok),
+                "GATE 3/view: outlet at 35 against 60 is inside its limit"
+            );
+            assert_eq!(
+                row("exhaust").verdict,
+                None,
+                "GATE 3/view: exhaust declares no limit — no verdict, not `ok`"
+            );
+            let unit = panels
+                .iter()
+                .find(|p| p.title == "{unit}")
+                .expect("GATE 3/view: no {unit} panel");
+            assert!(
+                unit.rows[0]
+                    .cells
+                    .iter()
+                    .any(|c| c.field == "uplink/rx_bytes" && c.text.ends_with(" By/s")),
+                "GATE 3/view: the counter row is not a rate in By/s: {:?}",
+                unit.rows[0].cells
+            );
+            // And the rendered view, through the whole app, says the same.
+            let mut ui = iced_test::simulator(a.view());
+            assert!(
+                ui.find("41.5 Cel").is_ok(),
+                "GATE 3/view: the reading with its unit is not rendered"
+            );
+            assert!(
+                ui.find("critical").is_ok(),
+                "GATE 3/view: the verdict word is not rendered"
+            );
+            assert!(
+                ui.find("100000 By/s").is_ok(),
+                "GATE 3/view: the rate is not rendered"
             );
         }
 
         // (d) honesty — `humidity/pct` is visible with a "not declared"
-        // finding, not silently absent (#1256). Unreachable until gate 3
-        // passes, by the ratchet's contract; the companion pins it today.
-        #[allow(unreachable_code)]
+        // finding, not silently absent (#1256).
         {
             let state = a
                 .dashboard
