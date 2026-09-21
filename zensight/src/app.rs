@@ -8829,6 +8829,46 @@ impl ZenSight {
         })
     }
 
+    /// The link the stream runs on (#1262): the operator's link, with the
+    /// empty-scope firehose default replaced by what the visible view needs.
+    /// Focus mode and an operator-configured scope are explicit decisions
+    /// and stand; only the default is derived. A change restarts the stream,
+    /// as any change to this value does.
+    pub fn link_for_stream(&self) -> crate::subscription::LinkConfig {
+        let mut link = self.link.clone();
+        if link.focus.is_none() && link.scope.is_empty() {
+            link.scope = self.subscription_plan();
+        }
+        link
+    }
+
+    /// The key expressions the visible view needs (#1262) — the pure
+    /// derivation over what this app holds: the served definitions, the
+    /// fleet's slices, the current view and the producers it has heard from.
+    pub fn subscription_plan(&self) -> Vec<String> {
+        let visible = match (&self.current_view, &self.selected_device) {
+            (CurrentView::Device, Some(d)) => crate::view::plan::Visible::Device {
+                origin: d.device_id.origin.clone(),
+                producer: d.device_id.producer.clone(),
+            },
+            _ => crate::view::plan::Visible::Overview,
+        };
+        let mut alive: Vec<String> = self
+            .known_sensors
+            .values()
+            .map(|info| info.producer.clone())
+            .chain(self.dashboard.devices.keys().map(|d| d.producer.clone()))
+            .collect();
+        alive.sort();
+        alive.dedup();
+        crate::view::plan::derived_scope(&crate::view::plan::PlanInput {
+            visible,
+            served_views: &self.served_views,
+            slices: &self.slices,
+            alive_producers: &alive,
+        })
+    }
+
     /// Ask every producer for its view definition (#1259) — the same
     /// repeating querier the fleet sweep uses, so a producer that declares no
     /// `views` procedure simply does not answer.
@@ -9211,7 +9251,7 @@ impl ZenSight {
             ]
         } else {
             vec![
-                zenoh_subscription(self.link.clone()),
+                zenoh_subscription(self.link_for_stream()),
                 tick_subscription(),
                 keyboard_subscription(),
             ]
@@ -12437,11 +12477,12 @@ mod system_view_tests {
     /// derives rows and columns from the slice); gates 3 and 4 since #1258
     /// (the default renderer reads the model, and says what is not
     /// declared); gate 5 since #1259 (the producer's `views.toml` is loaded,
-    /// its scripts run under limits, and a runaway one is reported). Today
-    /// it dies at gate 6: nothing derives the subscription from the visible
-    /// view. That failure is the finding.
+    /// its scripts run under limits, and a runaway one is reported); gate 6
+    /// since #1262 (the subscription is derived from the visible view).
+    /// **Every gate passes**: the `should_panic` attribute the ratchet wore
+    /// through #1254–#1262 is gone, and this is an ordinary test now — a
+    /// producer this GUI was never compiled with renders from its slice.
     #[test]
-    #[should_panic(expected = "GATE 6/subscribe")]
     fn a_fictional_producer_renders_from_its_introspect_slice() {
         let mut a = app();
 
@@ -12808,15 +12849,56 @@ mod system_view_tests {
             );
         }
 
-        // (f) subscription — the derived key expressions for the visible
-        // overview are exactly the four the definition needs, not the
+        // (f) subscription (#1262) — the derived key expressions for the
+        // visible overview are exactly the four the definition needs, not the
         // firehose; the detail widens to this origin's `fake-sensor/**`; no
-        // definition → `<producer>/**`. Seam: #1262's pure derivation beside
-        // `effective_scopes`.
-        #[allow(unreachable_code)]
+        // definition → `<producer>/**`. Pure, beside `effective_scopes`.
         {
-            panic!(
-                "GATE 6/subscribe: no seam yet — #1262 adds the derived subscription and replaces this line"
+            let set = zensight_common::views::ViewSet::parse_toml(fake_sensor::VIEWS).unwrap();
+            let _ = a.update(Message::ViewsLoaded(vec![(PRODUCER.to_string(), set)]));
+            let _ = a.update(Message::ClearSelection);
+            a.current_view = CurrentView::Dashboard;
+            let overview = a.subscription_plan();
+            let ours: Vec<&str> = overview
+                .iter()
+                .filter(|k| k.contains(&format!("/{PRODUCER}/")))
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                ours,
+                vec![
+                    "v1/*/state/fake-sensor/*/status",
+                    "v1/*/telemetry/fake-sensor/*/temp/*/celsius",
+                    "v1/*/telemetry/fake-sensor/*/temp/*/upper_critical_c",
+                    "v1/*/telemetry/fake-sensor/*/uplink/rx_bytes",
+                ],
+                "GATE 6/subscribe: the overview fetches what the definition needs and nothing more"
+            );
+            assert!(
+                !overview.iter().any(|k| k == "v1/*/telemetry/**"),
+                "GATE 6/subscribe: the firehose is back"
+            );
+            let link = a.link_for_stream();
+            assert_eq!(
+                crate::subscription::effective_scopes(&link),
+                overview,
+                "GATE 6/subscribe: the stream does not run on the derived plan"
+            );
+
+            let _ = a.update(Message::SelectDevice(device.clone()));
+            let detail = a.subscription_plan();
+            assert!(
+                detail.contains(&format!("v1/{ORIGIN}/telemetry/{PRODUCER}/**")),
+                "GATE 6/subscribe: the detail does not widen to the origin's tree: {detail:?}"
+            );
+
+            a.served_views.remove(PRODUCER);
+            let _ = a.update(Message::ClearSelection);
+            a.current_view = CurrentView::Dashboard;
+            let undefined = a.subscription_plan();
+            assert!(
+                undefined.contains(&format!("v1/*/telemetry/{PRODUCER}/**")),
+                "GATE 6/subscribe: with no definition the producer's tree is fetched: {undefined:?}"
             );
         }
     }

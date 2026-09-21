@@ -12,6 +12,17 @@ use zensight::app::ZenSight;
 
 fn main() -> anyhow::Result<()> {
     // Check for --demo flag
+    // `--print-subscription` (#1262): the key expressions this build would
+    // subscribe to on its overview from its registries and bundled view
+    // definitions alone — one per line — and exit. No window, no session;
+    // what `scripts/demo-verify.sh` reads to say the GUI does not fetch the
+    // firehose.
+    if env::args().any(|arg| arg == "--print-subscription") {
+        for key in zensight::view::plan::bundled_plan() {
+            println!("{key}");
+        }
+        return Ok(());
+    }
     let demo_mode = env::args().any(|arg| arg == "--demo" || arg == "-d");
 
     // Initialize tracing

@@ -226,7 +226,7 @@ pub fn resolve_scope(model: &FamilyModel, scope: &str) -> Option<Resolved> {
 
 /// The field names a resolved scope exposes to a panel: the family's fields
 /// under the prefix, with the prefix stripped.
-fn scoped_fields<'a>(family: &'a Family, prefix: &str) -> Vec<(String, &'a str)> {
+pub(crate) fn scoped_fields<'a>(family: &'a Family, prefix: &str) -> Vec<(String, &'a str)> {
     family
         .fields
         .iter()
@@ -246,7 +246,7 @@ fn scoped_fields<'a>(family: &'a Family, prefix: &str) -> Vec<(String, &'a str)>
 /// The head of a join family: `backup/{vmid}` → `backup`; the name the
 /// partner's fields are reached under (`row.backup.age_secs`,
 /// `"backup.age_secs"`).
-fn join_head(path: &str) -> String {
+pub(crate) fn join_head(path: &str) -> String {
     path.split('/')
         .take_while(|c| !c.starts_with('{'))
         .collect::<Vec<_>>()

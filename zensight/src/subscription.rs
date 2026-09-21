@@ -53,7 +53,7 @@ pub struct LinkConfig {
 /// another origin would defeat that. Otherwise: the configured scope, or the
 /// full telemetry class selector. The state/entity subscribers are unaffected
 /// by `scope` — classes are disjoint (D3) — but they *are* narrowed by focus.
-fn effective_scopes(config: &LinkConfig) -> Vec<String> {
+pub(crate) fn effective_scopes(config: &LinkConfig) -> Vec<String> {
     match &config.focus {
         Some(origin) => vec![zensight_common::keyexpr::origin_telemetry_wildcard(origin)],
         None if config.scope.is_empty() => vec![all_telemetry_wildcard()],

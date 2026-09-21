@@ -73,9 +73,9 @@ device when `(origin, producer)` match and the subject is under the device's
 source, or when the device is the only one its producer has on that origin.
 Documents never create a device.
 
-One thing the intake does *not* do yet: derive the subscription from the
-visible view (gate 6, #1262 — the ratchet in `app::system_view_tests` stops
-there today).
+Every gate of the system-view ratchet in `app::system_view_tests` passes
+since #1262: a producer this GUI was never compiled with is seen, modelled,
+rendered, judged, defined and subscribed to from its slice alone.
 
 ### The family model (#1257)
 
@@ -174,6 +174,36 @@ producer's slice, every field named is declared, every script compiles, and
 every identifier a script uses is a declared field (`row.<field>`), a bound
 variable, `row`/`decl`, or a host function. It is lexical over the script
 text and names the file, the panel and the field in each message.
+
+### The subscription follows the definition (#1262)
+
+`view::plan::derived_scope` is a pure function — the served definitions, the
+fleet's slices, what is visible, who is alive → key expressions — and
+`ZenSight::link_for_stream` feeds it into `LinkConfig.scope` in place of the
+empty-scope firehose default; a change to the link restarts the stream, as
+it always did. Focus mode and an operator-configured scope are explicit
+decisions and still win. **No script runs to decide a subscription**: a
+panel's needs are its `fields` plus the fields its scripts and its grade
+name, which the #1259 lint extracts lexically.
+
+The **overview** subscribes to the union over every producer the GUI can
+name (the fleet's slices, this build's registries, whatever is alive) of what
+its definition needs — each field's declared path with variables as `*`
+(`v1/*/telemetry/fake-sensor/*/temp/*/celsius`), a `document` panel's subject
+on the state class — or, for a producer with a slice and no definition, that
+producer's `telemetry/<producer>/**`; the same for a producer known only from
+its liveliness token, which is then rendered with the "no slice" finding. The
+**device detail** widens to that origin's `telemetry/<producer>/**` on top,
+so an undeclared subject is seen there and wears the #1256 finding. The
+common families keep their own wildcards in `subscription.rs`.
+
+What narrowing costs, stated: an undeclared subject from a *defined*
+producer is not fetched on the overview. "Never drop what arrives" is the
+rule, not "fetch everything"; what a producer publishes beyond its slice is
+the bus explorer's and the conformance judges' job. `zensight
+--print-subscription` prints the overview's plan from this build's registries
+and bundled definitions alone, which is what `scripts/demo-verify.sh` reads
+to say the GUI does not fetch the firehose.
 
 ## Routing: `CurrentView`
 
