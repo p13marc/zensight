@@ -20,9 +20,9 @@ use crate::view::components::{
     section_header,
 };
 use crate::view::device::DeviceDetailState;
+use crate::view::device::Pivot;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
-use crate::view::specialized::sysinfo_detail::{PidVerdict, ProcessSort, pid_filter_verdict};
 use crate::view::specialized::systemd_detail::unit_from_cgroup;
 use crate::view::theme;
 use crate::view::tokens::font;
@@ -1153,22 +1153,127 @@ fn render_system_health_section(state: &DeviceDetailState) -> Element<'_, Messag
     .into()
 }
 
+/// How many processes the explorer asks the sensor for.
+const TOP_N: usize = 50;
+
+/// How to sort the process table (mirrors the sensor's `ProcessSort`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProcessSort {
+    #[default]
+    Cpu,
+    Mem,
+    Io,
+}
+
+impl ProcessSort {
+    /// The `sort=` selector token the sensor's `ProcessSelector::parse` expects.
+    pub fn token(&self) -> &'static str {
+        match self {
+            ProcessSort::Cpu => "cpu",
+            ProcessSort::Mem => "mem",
+            ProcessSort::Io => "io",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            ProcessSort::Cpu => "CPU",
+            ProcessSort::Mem => "Memory",
+            ProcessSort::Io => "I/O",
+        }
+    }
+
+    /// The `processes` call's params for this sort (#1261): what
+    /// [`crate::message::Message::Call`] carries and what the active toggle
+    /// is read back from.
+    pub fn params(&self) -> String {
+        format!("sort={}&top={TOP_N}", self.token())
+    }
+
+    /// The sort a `processes` call was made with, from its params; the
+    /// default when none was.
+    pub fn from_params(params: &str) -> Self {
+        params
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("sort="))
+            .and_then(|t| match t {
+                "cpu" => Some(ProcessSort::Cpu),
+                "mem" => Some(ProcessSort::Mem),
+                "io" => Some(ProcessSort::Io),
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// A pid pivot into the process explorer (#313), read from the device's
+/// [`Pivot`]: `start_time` is the `(pid, start_time)` identity pair from the
+/// pivot origin (unit MainPID, socket owner) — the stale-generation guard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PidFilter {
+    pub pid: i32,
+    pub start_time: Option<u64>,
+}
+
+/// The stale-generation verdict for a pid filter over the fetched table (#313).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PidVerdict {
+    /// The pid is present and (when known) the start_time matches — same process.
+    Live,
+    /// The pid exists but with a different start_time: the original process
+    /// exited and the kernel reused its pid. Never show the impostor as a match.
+    Reused,
+    /// The pid is not in the fetched table (exited, or below the top-N cut).
+    Gone,
+}
+
+/// Judge a pid filter against the fetched process table (#313). Pure.
+pub fn pid_filter_verdict(
+    procs: &[zensight_common::ProcessRecord],
+    filter: &PidFilter,
+) -> PidVerdict {
+    match procs.iter().find(|p| p.pid == filter.pid) {
+        Some(p) => match filter.start_time {
+            Some(want) if p.start_time != want => PidVerdict::Reused,
+            _ => PidVerdict::Live,
+        },
+        None => PidVerdict::Gone,
+    }
+}
+
 /// On-demand process explorer (#47): a sort toggle (CPU / Memory / I/O) that
 /// fetches the rich `@rpc/sysinfo/processes` table and renders it. Distinct from the
 /// streamed top-10 above — this carries rss/vsz/threads/io/state/uid and is
 /// pulled lazily (the per-pid firehose is never streamed, principle P2).
 fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
-    let detail = &state.sysinfo_detail;
-    let loading = detail.processes.is_loading();
+    let calls = &state.calls;
+    let loading = calls.is_loading("processes");
+    let current = ProcessSort::from_params(calls.params("processes"));
+    let decoded = calls.decoded::<Vec<zensight_common::ProcessRecord>>("processes");
+    let error: Option<String> = calls
+        .fetch("processes")
+        .error()
+        .map(str::to_string)
+        .or_else(|| decoded.as_ref().and_then(|r| r.as_ref().err().cloned()));
+    let procs: Option<&Vec<zensight_common::ProcessRecord>> = decoded.and_then(Result::ok);
+    let pid_filter = state.pivot.as_ref().map(|p| match p {
+        Pivot::Process { pid, start_time } => PidFilter {
+            pid: *pid,
+            start_time: *start_time,
+        },
+    });
 
     // One button per sort; the active sort is highlighted, and all are disabled
     // while a fetch is in flight.
     let sort_button = |sort: ProcessSort| {
-        let active = detail.sort == sort;
+        let active = current == sort;
         let label = format!("By {}", sort.label());
         let mut b = button(text(label).size(font::DENSE)).padding([4, 10]);
         if !loading {
-            b = b.on_press(Message::FetchSysinfoProcesses(sort));
+            b = b.on_press(Message::Call {
+                procedure: "processes".into(),
+                params: sort.params(),
+            });
         }
         if active {
             b = b.style(iced::widget::button::primary);
@@ -1194,12 +1299,12 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
 
     // Pid pivot banner (#313): the explorer was opened from a unit MainPID or a
     // socket owner — show the filter, its stale-generation verdict, and a way out.
-    if let Some(f) = &detail.pid_filter {
+    if let Some(f) = &pid_filter {
         let clear = button(text("Clear").size(font::DENSE))
             .padding([3, 9])
             .style(iced::widget::button::secondary)
-            .on_press(Message::ClearSysinfoPidFilter);
-        let verdict: Element<'_, Message> = match detail.processes.ready() {
+            .on_press(Message::ClearPivot);
+        let verdict: Element<'_, Message> = match procs {
             Some(procs) => match pid_filter_verdict(procs, f) {
                 PidVerdict::Live => text("").size(font::DENSE).into(),
                 PidVerdict::Reused => text("pid reused by another process — the original exited")
@@ -1228,11 +1333,11 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         );
     }
 
-    if let Some(err) = detail.processes.error() {
+    if let Some(err) = error {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(procs) = detail.processes.ready() {
+    } else if let Some(procs) = procs {
         // Apply the pid pivot; a reused pid is NOT shown as a match (#313).
-        let visible: Vec<&zensight_common::ProcessRecord> = match &detail.pid_filter {
+        let visible: Vec<&zensight_common::ProcessRecord> = match &pid_filter {
             Some(f) => match pid_filter_verdict(procs, f) {
                 PidVerdict::Live => procs.iter().filter(|p| p.pid == f.pid).collect(),
                 PidVerdict::Reused | PidVerdict::Gone => Vec::new(),
@@ -1241,7 +1346,7 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         };
         if visible.is_empty() {
             col = col.push(empty_state(
-                if detail.pid_filter.is_some() {
+                if pid_filter.is_some() {
                     "No matching live process."
                 } else {
                     "No processes returned"
@@ -1438,23 +1543,35 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
     let title = row![text("Saturation latency (eBPF)").size(font::EMPHASIS)].spacing(8);
     let mut col = Column::new().spacing(4).push(title);
 
-    let detail = &state.sysinfo_detail;
-    if detail.latency.is_loading() {
+    let calls = &state.calls;
+    if calls.is_loading("latency") {
         return col
             .push(empty_state("Fetching latency histograms…", None))
             .into();
     }
-    if let Some(err) = detail.latency.error() {
+    if let Some(err) = calls.fetch("latency").error() {
         return col
             .push(empty_state(format!("Fetch failed: {err}"), None))
             .into();
     }
-    let Some(report) = detail.latency.ready() else {
+    let latency = match calls.decoded::<zensight_common::LatencyReport>("latency") {
+        Some(Ok(report)) => Some(report),
+        Some(Err(err)) => {
+            return col
+                .push(empty_state(format!("Fetch failed: {err}"), None))
+                .into();
+        }
+        None => None,
+    };
+    let Some(report) = latency else {
         return col
             .push(
                 button(text("Fetch latency histograms").size(font::CAPTION))
                     .padding([4, 10])
-                    .on_press(Message::FetchSysinfoLatency),
+                    .on_press(Message::Call {
+                        procedure: "latency".into(),
+                        params: String::new(),
+                    }),
             )
             .into();
     };
@@ -1521,7 +1638,10 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
     col.push(
         button(text("Refresh").size(font::CAPTION))
             .padding([4, 10])
-            .on_press(Message::FetchSysinfoLatency),
+            .on_press(Message::Call {
+                procedure: "latency".into(),
+                params: String::new(),
+            }),
     )
     .into()
 }
@@ -1601,10 +1721,79 @@ mod tests {
 
     // ── Identity pivots (#313) ────────────────────────────────────────────────
 
-    use crate::view::specialized::fetch::Fetch;
-    use crate::view::specialized::sysinfo_detail::PidFilter;
     use iced_test::simulator;
     use zensight_common::ProcessRecord;
+
+    /// A fetched process table, as a `processes` reply (#1261).
+    fn set_procs(state: &mut DeviceDetailState, procs: Vec<ProcessRecord>) {
+        state.calls.set_ready(
+            "processes",
+            &ProcessSort::default().params(),
+            serde_json::to_value(procs).expect("records serialize"),
+        );
+    }
+
+    #[test]
+    fn sort_round_trips_through_the_call_params() {
+        for sort in [ProcessSort::Cpu, ProcessSort::Mem, ProcessSort::Io] {
+            assert_eq!(ProcessSort::from_params(&sort.params()), sort);
+        }
+        assert_eq!(ProcessSort::Io.params(), "sort=io&top=50");
+        assert_eq!(ProcessSort::from_params(""), ProcessSort::Cpu);
+        assert_eq!(
+            ProcessSort::from_params("top=50&sort=mem"),
+            ProcessSort::Mem
+        );
+    }
+
+    #[test]
+    fn pid_filter_verdict_guards_generations() {
+        let procs = vec![proc(42, 1000, None), proc(43, 2000, None)];
+        // Same pid + same start_time → the same process.
+        let f = PidFilter {
+            pid: 42,
+            start_time: Some(1000),
+        };
+        assert_eq!(pid_filter_verdict(&procs, &f), PidVerdict::Live);
+        // Same pid, different start_time → the kernel reused the pid.
+        let f = PidFilter {
+            pid: 42,
+            start_time: Some(999),
+        };
+        assert_eq!(pid_filter_verdict(&procs, &f), PidVerdict::Reused);
+        // Unknown start_time (origin didn't carry one) → best-effort match.
+        let f = PidFilter {
+            pid: 42,
+            start_time: None,
+        };
+        assert_eq!(pid_filter_verdict(&procs, &f), PidVerdict::Live);
+        // Absent pid → exited (or below the fetch cut).
+        let f = PidFilter {
+            pid: 99,
+            start_time: Some(1),
+        };
+        assert_eq!(pid_filter_verdict(&procs, &f), PidVerdict::Gone);
+    }
+
+    /// The explorer reads the active sort back from the call's params, and
+    /// a wrong-typed answer is a failure on screen, never an empty table.
+    #[test]
+    fn explorer_reads_the_sort_from_the_call_and_shows_a_bad_reply() {
+        let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
+        state.calls.loading("processes", &ProcessSort::Mem.params());
+        let mut ui = simulator(render_process_explorer(&state));
+        assert!(ui.find("Fetching…").is_ok());
+        drop(ui);
+
+        state
+            .calls
+            .set_ready("processes", "", serde_json::json!({ "not": "a list" }));
+        let mut ui = simulator(render_process_explorer(&state));
+        assert!(
+            ui.find("Fetch failed: invalid type: map, expected a sequence")
+                .is_ok()
+        );
+    }
 
     fn proc(pid: i32, start_time: u64, cgroup: Option<&str>) -> ProcessRecord {
         ProcessRecord {
@@ -1630,10 +1819,13 @@ mod tests {
     #[test]
     fn process_row_unit_chip_pivots_to_unit() {
         let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
-        state.sysinfo_detail.processes = Fetch::Ready(vec![
-            proc(42, 100, Some("/system.slice/redis.service")),
-            proc(43, 100, Some("/sys/fs/cgroup")), // non-unit cgroup → plain "—"
-        ]);
+        set_procs(
+            &mut state,
+            vec![
+                proc(42, 100, Some("/system.slice/redis.service")),
+                proc(43, 100, Some("/sys/fs/cgroup")), // non-unit cgroup → plain "—"
+            ],
+        );
         let mut ui = simulator(render_process_explorer(&state));
         assert!(ui.find("—").is_ok(), "non-unit cgroup renders inert text");
         let _ = ui.click("redis.service");
@@ -1648,9 +1840,9 @@ mod tests {
     #[test]
     fn pid_filter_banner_guards_stale_generations() {
         let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
-        state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 999, None)]);
+        set_procs(&mut state, vec![proc(42, 999, None)]);
         // The pivot expected start_time 100 but pid 42 now has 999 → reused.
-        state.sysinfo_detail.pid_filter = Some(PidFilter {
+        state.pivot = Some(Pivot::Process {
             pid: 42,
             start_time: Some(100),
         });
@@ -1665,17 +1857,14 @@ mod tests {
         // Clear emits the un-filter message.
         let _ = ui.click("Clear");
         let msgs: Vec<Message> = ui.into_messages().collect();
-        assert!(
-            msgs.iter()
-                .any(|m| matches!(m, Message::ClearSysinfoPidFilter))
-        );
+        assert!(msgs.iter().any(|m| matches!(m, Message::ClearPivot)));
     }
 
     #[test]
     fn pid_filter_live_match_shows_only_that_process() {
         let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
-        state.sysinfo_detail.processes = Fetch::Ready(vec![proc(42, 100, None), proc(7, 5, None)]);
-        state.sysinfo_detail.pid_filter = Some(PidFilter {
+        set_procs(&mut state, vec![proc(42, 100, None), proc(7, 5, None)]);
+        state.pivot = Some(Pivot::Process {
             pid: 42,
             start_time: Some(100),
         });

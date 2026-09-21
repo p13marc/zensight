@@ -208,11 +208,26 @@ pub struct FamilyInstances {
     pub instances: Vec<Instance>,
 }
 
+/// One declared procedure of a slice (#1261): what the GUI needs to offer
+/// a call and to name the reply's type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Procedure {
+    pub path: String,
+    /// `kind = read` (or undeclared, which the grammar reads as read).
+    pub read: bool,
+    pub reply: Option<String>,
+    pub request: Option<String>,
+    pub description: Option<String>,
+}
+
 /// A producer's telemetry, modelled from its slice.
 #[derive(Debug, Clone)]
 pub struct FamilyModel {
     pub producer: String,
     pub families: Vec<Family>,
+    /// The procedures the slice declares (#1261), so a view can offer a
+    /// read call without a message per procedure. Declaration order.
+    pub procedures: Vec<Procedure>,
     /// The private binder (see the module doc): one pattern per declared
     /// telemetry subject, with the family and field it belongs to.
     patterns: Vec<(SubjectPattern, usize, usize)>,
@@ -252,11 +267,42 @@ impl FamilyModel {
             fam.fields.push(Field::from_decl(tail, decl));
             patterns.push((pattern, family, fam.fields.len() - 1));
         }
+        let procedures = slice
+            .procedures
+            .iter()
+            .map(|p| Procedure {
+                path: p.path.clone(),
+                read: match &p.kind {
+                    Some(zenkey::slice::Declared::Known(k)) => {
+                        matches!(k, zenkey::slice::ProcedureKind::Read)
+                    }
+                    Some(zenkey::slice::Declared::Other(_)) => false,
+                    None => true,
+                },
+                reply: p.reply.clone(),
+                request: p.request.clone(),
+                description: p.description.clone(),
+            })
+            .collect();
         Self {
             producer: slice.name.clone(),
             families,
+            procedures,
             patterns,
         }
+    }
+
+    /// The read procedures a view can call with no request body: every
+    /// `kind = read` declaration without a `request` type, the framework's
+    /// own (`introspect`, `describe`, `views`, `artifact/*`) excluded — those
+    /// the GUI already calls for itself.
+    pub fn callable(&self) -> impl Iterator<Item = &Procedure> {
+        self.procedures.iter().filter(|p| {
+            p.read
+                && p.request.is_none()
+                && !matches!(p.path.as_str(), "introspect" | "describe" | "views")
+                && !p.path.starts_with("artifact/")
+        })
     }
 
     /// The compiled-in slice for a producer this build knows, when it has one.

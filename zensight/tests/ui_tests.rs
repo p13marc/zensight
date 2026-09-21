@@ -6772,20 +6772,25 @@ fn sysinfo_latency_panel_renders_percentiles() {
     use zensight_common::{Histogram, LatencyReport};
 
     let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
-    state.sysinfo_detail.apply_latency(Ok(LatencyReport {
-        available: true,
-        window_secs: 10,
-        runqlat: Histogram {
-            unit: "us".into(),
-            buckets: Vec::new(),
-            total: 500,
-            p50_us: 20,
-            p95_us: 8_000,
-            p99_us: 40_000,
-            max_us: 60_000,
-        },
-        biolatency: Histogram::default(),
-    }));
+    state.calls.set_ready(
+        "latency",
+        "",
+        serde_json::to_value(LatencyReport {
+            available: true,
+            window_secs: 10,
+            runqlat: Histogram {
+                unit: "us".into(),
+                buckets: Vec::new(),
+                total: 500,
+                p50_us: 20,
+                p95_us: 8_000,
+                p99_us: 40_000,
+                max_us: 60_000,
+            },
+            biolatency: Histogram::default(),
+        })
+        .unwrap(),
+    );
 
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &state, None,
@@ -6812,10 +6817,15 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
     use zensight_common::LatencyReport;
 
     let mut unavailable = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
-    unavailable.sysinfo_detail.apply_latency(Ok(LatencyReport {
-        available: false,
-        ..Default::default()
-    }));
+    unavailable.calls.set_ready(
+        "latency",
+        "",
+        serde_json::to_value(LatencyReport {
+            available: false,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &unavailable,
         None,
@@ -6832,8 +6842,8 @@ fn sysinfo_latency_panel_distinguishes_unavailable_from_no_answer() {
 
     let mut failed = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
     failed
-        .sysinfo_detail
-        .apply_latency(Err("No sysinfo sensor responded".into()));
+        .calls
+        .set_failed("latency", "No sysinfo sensor responded");
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &failed, None,
     ));
@@ -6849,11 +6859,16 @@ fn sysinfo_latency_panel_says_when_a_window_had_no_samples() {
     use zensight_common::LatencyReport;
 
     let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
-    state.sysinfo_detail.apply_latency(Ok(LatencyReport {
-        available: true,
-        window_secs: 5,
-        ..Default::default()
-    }));
+    state.calls.set_ready(
+        "latency",
+        "",
+        serde_json::to_value(LatencyReport {
+            available: true,
+            window_secs: 5,
+            ..Default::default()
+        })
+        .unwrap(),
+    );
 
     let mut ui = simulator(zensight::view::specialized::sysinfo::sysinfo_host_view(
         &state, None,

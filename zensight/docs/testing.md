@@ -383,6 +383,16 @@ cannot pass a test written for the hand-built view, the format is not ready
 — add the renderer feature, never a special case in the document. A new
 declarative producer adds its cases there.
 
+### A reply without a bus (#1261)
+
+A view that reads an on-demand answer reads it from
+`DeviceDetailState::calls`; a test puts the answer there with
+`state.calls.set_ready(procedure, params, serde_json::to_value(rows)?)`, a
+failure with `set_failed(procedure, error)`, an in-flight call with
+`loading(procedure, params)`. The value is what the wire would carry, so a
+test that serialises a typed record exercises the same decode the live path
+does.
+
 ### 1. Test view functions independently
 
 ```rust

@@ -223,6 +223,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **One `Message::Call` / `Message::Reply` pair replaces the per-producer
+  fetch pairs; sysinfo and netflow are the first producers retired**
+  (#1261, phase 4 of #1253, one producer per PR). A read procedure is a GET
+  on `@rpc/<producer>/<procedure>?<params>` and its answer a value the
+  producer's `describe` types, so the GUI asks with one message on the
+  selected device and lands the answer in `DeviceDetailState::calls`
+  (`call::Calls`, by procedure) as the JSON the producer sent plus the
+  RFC 05 §3.2 page signal. A reply carries the device and params it answers
+  and is kept only for the call still in flight — a slow answer to an old
+  sort no longer overwrites the new one. Bespoke views decode once and
+  borrow (`Reply::decoded`); the generic device view gains a **Procedures**
+  section offering every callable read procedure of the slice and drawing
+  the answer as its own shape (`reply_panel`: rows of objects as a table,
+  an object as facts, `partial` stated) — what a sensor the GUI was never
+  compiled with can be asked. Gone: `FetchSysinfoProcesses`,
+  `SysinfoProcessesReceived`, `FetchSysinfoLatency`,
+  `SysinfoLatencyReceived`, `ClearSysinfoPidFilter`, `FetchNetflowFlows`,
+  `NetflowFlowsReceived`, `NetflowTable{Sort,Filter,More}`,
+  `SysinfoDetailState`, `NetflowDetailState`, `specialized/{sysinfo,netflow}_detail.rs`
+  (`ProcessSort` lives in `specialized/sysinfo.rs` and round-trips through
+  the call's params). New: `Call`, `Reply`, `ClearPivot`,
+  `DetailTable{Sort,Filter,More} { table }`, `DeviceDetailState::{calls,
+  tables, pivot}`, `FamilyModel::{procedures, callable}`. The `Message` enum
+  is 433 variants (437 before).
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in
