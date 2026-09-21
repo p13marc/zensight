@@ -37,6 +37,13 @@ ignore = [
     # deny-fresh run resurfaces these so they cannot rot silently.
     "RUSTSEC-2026-0222", # type-index mixup
     "RUSTSEC-2026-0269", # fs sandbox escape on trailing-slash paths (2026-08-31)
+    # smartstring, via rhai (the GUI's view-script engine, #1259, 2026-09-21).
+    # Unmaintained (archived 2026-05-03), not a vulnerability; rhai 1.26.1 —
+    # the latest — still depends on it and offers no feature to drop it. The
+    # GUI is the only crate that links rhai; no sensor does. Re-check on the
+    # next rhai release (its tracker discusses moving to compact_str); the
+    # weekly deny-fresh run resurfaces this so it cannot rot silently.
+    "RUSTSEC-2026-0249", # smartstring unmaintained (rhai tree, GUI only)
 ]
 
 [licenses]
