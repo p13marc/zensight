@@ -74,6 +74,7 @@ pub mod telemetry;
 pub mod threshold;
 pub mod timesync;
 pub mod v1;
+pub mod views;
 
 // Re-export commonly used types at the crate root
 pub use action::{ActionCapability, ActionStatus, ServiceAction, UnitFileChange, Verb};

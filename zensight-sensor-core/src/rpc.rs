@@ -201,6 +201,21 @@ pub async fn serve_describe(
     .await
 }
 
+/// Serve `@rpc/<producer>/views` (#1259): the view definition this build
+/// bundles for the producer, as `ViewSet` JSON. Declared in the producer's
+/// registry like `introspect`; a producer with no document declares no
+/// procedure and the GUI renders its family model by default.
+pub async fn serve_views(
+    session: Arc<Session>,
+    ctx: &V1Context,
+    views_json: &'static str,
+) -> Result<tokio::task::JoinHandle<()>> {
+    serve(session, ctx, &["views"], move |_req| async move {
+        Ok(views_json.as_bytes().to_vec())
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -57,6 +57,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`views.toml` — a producer says how its families are shown, and its
+  scripts run under limits** (#1259, gate 5 of #1253). `zensight_common::views`
+  is the §6.1 vocabulary: closed and structural, no expressions — `label`,
+  `show`, `note`, `sort`, `format.*` take `{ rhai = "…" }` slots returning a
+  value; `[panel.grade]` takes field names only, or a `{ const, declared_by }`
+  literal whose verdict is labelled as the GUI's. Bundled documents live in
+  `zensight-common/registry/views/` (bmc per §6.2, pve per §6.3 with its
+  guest↔backup join, probe, and the four rest-var producers), are compiled
+  in, and are served by the runner at `@rpc/<producer>/views` — a `views`
+  read procedure declared in those seven registries, reply type `ViewSet`;
+  `registry.lock` +7 (additive). The GUI (`view::definition`) prefers a
+  served document over the bundled one, compiles its scripts once, and
+  renders them over the family model under design §6.4's limits — operation
+  budget, 20 ms wall-clock budget, call-level and size caps, three pure host
+  functions and no clock — so a `loop {}` terminates and renders as a visible
+  `view script failed: …` line beside the slot's fallback. The lint runs as
+  a GUI test over every bundled document and the fixture: scopes are
+  families, fields are declared, scripts compile and name only declared
+  identifiers, each message naming the file, the panel and the field. The
+  bundled bmc document renders the same verdicts as the Rust view on the same
+  fixture. The system-view ratchet advances to `GATE 6/subscribe`.
+
 - **The default renderers: a producer with no bespoke view renders its
   family model** (#1258, gates 3 and 4 of #1253). `generic_device_view` now
   derives one panel per family the device has instances of — a table for a

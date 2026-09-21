@@ -439,6 +439,96 @@ mod tests {
         );
     }
 
+    /// #1259's acceptance: the bundled bmc document (design §6.2) renders
+    /// what this Rust view renders on the same fixture — every thermal row
+    /// with the same verdict, the PSU rows with the same verdict and the
+    /// empty bay as "absent", the fans ungraded — so the declarative view
+    /// is a replacement, not an approximation (#1260 deletes this file).
+    #[test]
+    fn the_bundled_document_renders_the_same_verdicts_as_this_view() {
+        use crate::view::components::limit_table::LimitVerdict;
+        use crate::view::definition::{Definition, render};
+        use crate::view::family::FamilyModel;
+        let mut state = device(&[
+            ("bmc01/thermal/inlet/celsius", 41.0),
+            ("bmc01/thermal/inlet/upper_warning_c", 35.0),
+            ("bmc01/thermal/inlet/upper_critical_c", 89.0),
+            ("bmc01/thermal/outlet/celsius", 30.0),
+            ("bmc01/thermal/outlet/upper_warning_c", 50.0),
+            ("bmc01/thermal/outlet/upper_critical_c", 60.0),
+            ("bmc01/thermal/exhaust/celsius", 70.0),
+            ("bmc01/psu/1/input_watts", 800.0),
+            ("bmc01/psu/1/capacity_watts", 750.0),
+            ("bmc01/psu/1/present", 1.0),
+            ("bmc01/psu/2/capacity_watts", 750.0),
+            ("bmc01/psu/2/present", 0.0),
+            ("bmc01/fan/fan1/rpm", 4200.0),
+            ("bmc01/reachable", 1.0),
+        ]);
+        state.family = FamilyModel::for_producer("bmc");
+        let def = Definition::bundled("bmc").expect("bmc ships a document");
+        let r = render(&state, &def);
+        assert!(r.failures.is_empty(), "{:?}", r.failures);
+
+        let (thermal, fans, psus) = chassis_rows(&state, "bmc01");
+        let by_title = |t: &str| r.panels.iter().find(|p| p.title == t).unwrap();
+
+        let temps = by_title("Temperatures");
+        assert_eq!(temps.rows.len(), thermal.len());
+        for lr in &thermal {
+            let sensor = lr.label.rsplit('/').next().unwrap();
+            let row = temps
+                .rows
+                .iter()
+                .find(|r| r.instance == sensor)
+                .unwrap_or_else(|| panic!("no declarative row for {sensor}"));
+            assert_eq!(row.verdict, lr.verdict(), "{sensor}");
+        }
+        assert_eq!(
+            temps
+                .rows
+                .iter()
+                .filter(|r| r.verdict == Some(LimitVerdict::Warning))
+                .count(),
+            1,
+            "inlet is the one warning"
+        );
+
+        let fan_panel = by_title("Fans");
+        assert_eq!(fan_panel.rows.len(), fans.len());
+        assert!(
+            fan_panel.rows.iter().all(|r| r.verdict.is_none()),
+            "no fan threshold, no verdict"
+        );
+
+        let psu_panel = by_title("Power supplies");
+        assert_eq!(psu_panel.rows.len(), psus.len());
+        for lr in &psus {
+            let psu = lr.label.rsplit('/').next().unwrap();
+            let row = psu_panel.rows.iter().find(|r| r.instance == psu).unwrap();
+            assert_eq!(row.verdict, lr.verdict(), "psu {psu}");
+            if !lr.present {
+                assert!(
+                    row.cells
+                        .iter()
+                        .any(|c| c.field == "input_watts" && c.text == "absent"),
+                    "the empty bay says absent: {:?}",
+                    row.cells
+                );
+            }
+        }
+        assert_eq!(
+            psu_panel
+                .rows
+                .iter()
+                .find(|r| r.instance == "1")
+                .unwrap()
+                .verdict,
+            Some(LimitVerdict::Critical),
+            "800 W against a 750 W capacity"
+        );
+    }
+
     #[test]
     fn two_chassis_behind_one_endpoint_get_one_panel_each() {
         let state = device(&[

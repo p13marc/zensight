@@ -351,6 +351,10 @@ kind = "json-schema"
 [types.SchemaSet]
 kind = "json-schema"
 
+# The `views` reply (#1259): a producer's view definition, design §6.1.
+[types.ViewSet]
+kind = "json-schema"
+
 # The `introspect` raw-TOML reply sentinel (RFC 08 §6) — text, not a
 # schema'd payload.
 [types.toml]

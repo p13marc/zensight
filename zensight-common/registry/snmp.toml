@@ -1285,6 +1285,14 @@ since = "1.1"
 description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
 
 [[procedure]]
+path = "views"
+kind = "read"
+reply = "ViewSet"
+idempotent = true
+since = "1.0"
+description = "the view definition this producer ships for its family model (#1259, design §6): which families are panels, in what order, graded against which of its own limits — a `views.toml` v1 document as JSON"
+
+[[procedure]]
 path = "artifact/request"
 kind = "write"
 request = "ArtifactRequest"

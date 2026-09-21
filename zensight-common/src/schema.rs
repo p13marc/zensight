@@ -50,6 +50,7 @@ pub static SCHEMAS: LazyLock<SchemaSet> = LazyLock::new(|| {
     SchemaSet::builder("zensight")
         // ── framework payloads (this crate, fully derived) ────────────────
         .json::<crate::TelemetryPoint>("TelemetryPoint")
+        .json::<crate::views::ViewSet>("ViewSet")
         .json::<crate::Alert>("Alert")
         .json::<crate::HealthSnapshot>("HealthSnapshot")
         .json::<crate::ErrorReport>("ErrorReport")

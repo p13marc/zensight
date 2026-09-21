@@ -150,6 +150,10 @@ pub struct DeviceDetailState {
     /// knows the producer: then there is nothing to derive, and the flat
     /// metric list below is all the view can honestly show.
     pub family: Option<crate::view::family::FamilyModel>,
+    /// The producer's view definition (#1259): what it served at
+    /// `@rpc/<producer>/views`, else the bundled one, else `None` — and then
+    /// the default renderer over `family` is what the view shows.
+    pub definition: Option<crate::view::definition::Definition>,
 }
 
 impl DeviceDetailState {
@@ -192,6 +196,7 @@ impl DeviceDetailState {
             documents: std::collections::BTreeMap::new(),
             events: VecDeque::new(),
             family: None,
+            definition: None,
         }
     }
 
@@ -1151,8 +1156,41 @@ fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
         body = body.push(finding);
     }
     body = body.push(chart_section);
-    if let Some(families) = render_families(state) {
-        body = body.push(families);
+    // A definition (#1259) says how the family model is shown; without one
+    // the default renderer (#1258) shows every family it has instances of.
+    match &state.definition {
+        Some(def) => {
+            let rendered = crate::view::definition::render(state, def);
+            if let Some(panels) = render_panels(rendered.panels) {
+                body = body.push(panels);
+            }
+            // A broken view looks broken (#1259): the marker is its own
+            // widget, the detail beside it.
+            for failure in rendered.failures {
+                let detail = failure
+                    .strip_prefix(crate::view::definition::FAILURE_MARKER)
+                    .unwrap_or(&failure)
+                    .trim_start_matches(':')
+                    .trim()
+                    .to_string();
+                body = body.push(
+                    row![
+                        text(crate::view::definition::FAILURE_MARKER)
+                            .size(font::CAPTION)
+                            .style(|t: &Theme| text::Style {
+                                color: Some(crate::view::theme::colors(t).danger_text()),
+                            }),
+                        text(detail).size(font::CAPTION).style(muted_caption),
+                    ]
+                    .spacing(crate::view::tokens::space::SM),
+                );
+            }
+        }
+        None => {
+            if let Some(families) = render_panels(family_panels(state)) {
+                body = body.push(families);
+            }
+        }
     }
     body = body.push(metrics);
     if !state.documents.is_empty() {
@@ -1181,6 +1219,9 @@ pub struct FamilyRow {
     pub cells: Vec<FamilyCell>,
     /// `None` is "no limit declared, no verdict" — not "ok".
     pub verdict: Option<crate::view::components::limit_table::LimitVerdict>,
+    /// A definition's `note` for this row (#1259), or the provenance of a
+    /// literal limit; the default renderer sets none.
+    pub note: Option<String>,
 }
 
 /// One family panel: its title, whether it is a table (rows per instance)
@@ -1208,7 +1249,7 @@ pub struct FamilyPanel {
 /// [`render_families`] over it.
 pub fn family_panels(state: &DeviceDetailState) -> Vec<FamilyPanel> {
     use crate::view::components::limit_table::LimitRow;
-    use crate::view::family::{Presentation, default_grading};
+    use crate::view::family::default_grading;
     let Some(model) = state.family.as_ref() else {
         return Vec::new();
     };
@@ -1232,36 +1273,12 @@ pub fn family_panels(state: &DeviceDetailState) -> Vec<FamilyPanel> {
                 family.fields.iter().map(|f| f.name.clone()).collect()
             };
             for name in field_names {
-                let field = family.field(&name);
                 let Some(point) = instance.point(&name) else {
                     continue;
                 };
-                let unit = field.and_then(|f| f.display_unit());
-                let text = match field.map(|f| f.presentation()) {
-                    Some(Presentation::Rate) => match counter_rate(state, &point.metric) {
-                        Some(rate) => with_unit(fmt_num(rate), &unit),
-                        None => format!(
-                            "{} total · rate after the next sample",
-                            with_unit(
-                                fmt_num(instance.number(&name).unwrap_or(0.0)),
-                                &field.and_then(|f| f.unit.clone())
-                            )
-                        ),
-                    },
-                    Some(Presentation::State) => match instance.state(&name) {
-                        Some(true) => "yes".to_string(),
-                        Some(false) => "no".to_string(),
-                        None => format_value_for_export(&point.value),
-                    },
-                    // A field with no declared kind that carries a number is
-                    // a reading too — bmc declares units and no kinds.
-                    Some(Presentation::Absolute) | Some(Presentation::Unknown) => {
-                        match instance.number(&name) {
-                            Some(v) => with_unit(fmt_num(v), &unit),
-                            None => format_value_for_export(&point.value),
-                        }
-                    }
-                    Some(Presentation::Label) | None => format_value_for_export(&point.value),
+                let text = match family.field(&name) {
+                    Some(field) => cell_text(state, field, instance, &name),
+                    None => format_value_for_export(&point.value),
                 };
                 cells.push(FamilyCell { field: name, text });
             }
@@ -1281,6 +1298,7 @@ pub fn family_panels(state: &DeviceDetailState) -> Vec<FamilyPanel> {
                 instance: instance.id.clone(),
                 cells,
                 verdict,
+                note: None,
             });
         }
         panels.push(FamilyPanel {
@@ -1290,6 +1308,44 @@ pub fn family_panels(state: &DeviceDetailState) -> Vec<FamilyPanel> {
         });
     }
     panels
+}
+
+/// The cell a field shows by default (#1258): its declared presentation
+/// over the instance's point — a gauge with its unit, a counter as a rate
+/// (or the honest "rate after the next sample"), a bool as yes/no, text as
+/// itself, a kind-less number with its unit.
+pub fn cell_text(
+    state: &DeviceDetailState,
+    field: &crate::view::family::Field,
+    instance: &crate::view::family::Instance,
+    name: &str,
+) -> String {
+    use crate::view::family::Presentation;
+    let Some(point) = instance.point(name) else {
+        return String::new();
+    };
+    let unit = field.display_unit();
+    match field.presentation() {
+        Presentation::Rate => match counter_rate(state, &point.metric) {
+            Some(rate) => with_unit(fmt_num(rate), &unit),
+            None => format!(
+                "{} total · rate after the next sample",
+                with_unit(fmt_num(instance.number(name).unwrap_or(0.0)), &field.unit)
+            ),
+        },
+        Presentation::State => match instance.state(name) {
+            Some(true) => "yes".to_string(),
+            Some(false) => "no".to_string(),
+            None => format_value_for_export(&point.value),
+        },
+        // A field with no declared kind that carries a number is a reading
+        // too — bmc declares units and no kinds.
+        Presentation::Absolute | Presentation::Unknown => match instance.number(name) {
+            Some(v) => with_unit(fmt_num(v), &unit),
+            None => format_value_for_export(&point.value),
+        },
+        Presentation::Label => format_value_for_export(&point.value),
+    }
 }
 
 /// A counter's rate from the last two points the view holds: the live
@@ -1333,9 +1389,8 @@ fn with_unit(value: String, unit: &Option<String>) -> String {
 /// The family panels as widgets (#1258): a header per family, a header row
 /// of field names, a row per instance with its cells and, when graded, the
 /// verdict word in the verdict's colour — never a colour without the word.
-fn render_families(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+fn render_panels<'a>(panels: Vec<FamilyPanel>) -> Option<Element<'a, Message>> {
     use crate::view::components::limit_table::LimitVerdict;
-    let panels = family_panels(state);
     if panels.is_empty() {
         return None;
     }
@@ -1419,10 +1474,19 @@ fn render_families(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
                 );
             }
             section = section.push(line);
+            if let Some(note) = r.note {
+                section = section.push(text(note).size(font::DENSE).style(muted));
+            }
         }
         col = col.push(crate::view::components::card(section));
     }
     Some(col.into())
+}
+
+fn muted_caption(t: &Theme) -> text::Style {
+    text::Style {
+        color: Some(crate::view::theme::colors(t).text_muted()),
+    }
 }
 
 /// The exact words the "not declared" marker uses — one widget, one string,

@@ -145,6 +145,10 @@ serde_ignored = "0.1.14"
 # parallax test that pins the declared rate ceiling against the interval the
 # sensor enforces (#715) — a field zenkey-build 0.7 does not lint.
 toml = "1.1.3"
+# Presentation scripts in a producer's `views.toml` (#1259, design §6.4): the
+# GUI evaluates them under operation, wall-clock and size limits; nothing else
+# in the tree links the engine, and the `unchecked` feature stays off.
+rhai = "1.26"
 
 # Logging
 tracing = "0.1"

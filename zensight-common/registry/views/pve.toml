@@ -1,0 +1,42 @@
+# The pve view (#1259, design §6.3): backup freshness walks the GUESTS and
+# joins their backups — a guest with no backup row is the top row, not a
+# missing one — plus the cluster, node and storage tables the overview shows.
+[view]
+version  = "1"
+producer = "pve"
+title    = "Proxmox VE"
+
+[[panel]]
+kind   = "facts"
+title  = "Cluster"
+scope  = "cluster"
+note   = { rhai = "if row.quorate == 0 { \"quorum lost — every verdict below is one node's view\" }" }
+
+[[panel]]
+kind   = "table"
+title  = "Backup freshness"
+scope  = "guest/{vmid}"
+join   = "backup/{vmid}"
+fields = ["running", "backup.age_secs", "backup.ok", "backup.size_change_pct"]
+label  = { rhai = "`vmid ${vmid}`" }
+# never backed up sorts first, then oldest first
+sort   = { rhai = "if row.backup == () { -1.0e12 } else { -row.backup.age_secs }" }
+[panel.format]
+"backup.age_secs" = { rhai = "if row.backup == () { \"never\" } else { fmt_age(row.backup.age_secs) }" }
+[panel.grade]
+reading  = "backup.age_secs"
+critical = { const = 172800, declared_by = "gui" }
+
+[[panel]]
+kind  = "table"
+title = "Nodes"
+scope = "node/{node}"
+label = "$node"
+
+[[panel]]
+kind   = "table"
+title  = "Storage"
+scope  = "storage/{store}"
+label  = "$store"
+fields = ["used_ratio", "overcommit_ratio", "avail_bytes"]
+note   = { rhai = "if row.overcommit_ratio != () && row.overcommit_ratio > 1.0 { \"overcommitted\" }" }

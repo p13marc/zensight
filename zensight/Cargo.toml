@@ -21,6 +21,8 @@ zenkey = { workspace = true }
 # GUI judges a document from a producer it was not compiled with against
 # that producer's own served schema set.
 zenkey-fleet = { workspace = true, features = ["decode"] }
+# The view definitions' presentation scripts (#1259).
+rhai = { workspace = true }
 zensight-common.workspace = true
 # The tiered metric/log/event store, extracted from this binary in #904.
 # `blob` adds the zblob content-store adapter the debug-report download uses.
@@ -92,8 +94,8 @@ tempfile = { workspace = true }
 # Pre-main WGPU_BACKEND=gl guard in the test binaries (#687, #829): parallel
 # tests each creating a Vulkan/lavapipe device segfault on GPU-less hosts.
 ctor = "1.0"
-# The system-view fixture's `views.toml` (#1254) has no parser until #1259; the
-# test only asserts it is TOML.
+# The system-view fixture's `views.toml` (#1254) is parsed by
+# `zensight_common::views` since #1259; the test still reads it as TOML first.
 toml = { workspace = true }
 
 # =============================================================================
