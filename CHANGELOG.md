@@ -57,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The default renderers: a producer with no bespoke view renders its
+  family model** (#1258, gates 3 and 4 of #1253). `generic_device_view` now
+  derives one panel per family the device has instances of — a table for a
+  family with variables, a facts list for a var-less one — with kinds and
+  units from the slice: a gauge as `41.5 Cel`, a bool as `yes`/`no`, a counter
+  as a rate in `<unit>/s` from its last two points, and an honest cell until
+  there are two. Grading is only by the publisher's own limit-named siblings
+  (`upper_critical_*`/`upper_warning_*`, `default_grading`); a reading with
+  no limit carries no verdict, not `ok`. A detail view opens populated with
+  the dashboard's latest points and the hot ring's samples instead of "as new
+  data arrives". The system-view ratchet advances to `GATE 5/definition`:
+  the fictional producer renders its temperature table with inlet critical,
+  outlet inside its limit, exhaust ungraded, and its uplink counter as
+  `100000 By/s`, with no `views.toml` loaded — and its undeclared subject
+  wears the finding.
+
 - **The family model: rows and columns derived from a producer's slice, not
   written by hand** (#1257, gate 2 of #1253). `view::family::FamilyModel`
   turns a `RegistrySlice` into families (the longest common prefix of paths

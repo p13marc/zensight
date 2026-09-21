@@ -150,7 +150,7 @@ pub enum LimitVerdict {
 }
 
 impl LimitVerdict {
-    fn color(self, t: &Theme) -> iced::Color {
+    pub fn color(self, t: &Theme) -> iced::Color {
         let c = theme::colors(t);
         match self {
             LimitVerdict::Ok => c.success(),

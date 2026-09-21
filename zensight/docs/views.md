@@ -73,9 +73,8 @@ device when `(origin, producer)` match and the subject is under the device's
 source, or when the device is the only one its producer has on that origin.
 Documents never create a device.
 
-Two things the intake does *not* do yet: render the family model below with
-no bespoke view (gate 3, #1258 — the ratchet in `app::system_view_tests` stops
-there today) and render a producer's `views.toml` (gate 5, #1259).
+One thing the intake does *not* do yet: render a producer's `views.toml`
+(gate 5, #1259 — the ratchet in `app::system_view_tests` stops there today).
 
 ### The family model (#1257)
 
@@ -101,6 +100,34 @@ Two families may share a variable name and not a prefix — pve's
 by binding is the view definition's business (§6.3). The three hand-written
 folds (`bmc::fold`, `pve::backup_rows`, `probe::target_rows`) are each pinned
 against the derivation on their own fixture: same row set, same readings.
+
+### The default renderers (#1258)
+
+`generic_device_view` reads the model (design §5.4): above the flat metric
+list, `device::family_panels` derives one panel per family the device has
+instances of — a **table** for a family with variables (a row per instance, a
+cell per field) and a **facts** list for a var-less one — and `render_families`
+draws them. Kinds and units are formatted from the slice: a gauge as
+`41.5 Cel`, a bool as `yes`/`no`, a counter as a rate in `<unit>/s` from the
+last two points (the live history, or the hot ring's samples the view is
+seeded with on open — a detail view opens populated now, not "as new data
+arrives") and, with one point, a cell that says the rate comes after the next
+sample rather than a number.
+
+**Grading is the publisher's, or nothing.** With no definition loaded the only
+rule is `family::default_grading`: a sibling field named `upper_critical_*` /
+`critical_*` is a critical limit, `upper_warning_*` / `warning_*` a warning
+limit, and they grade the family's one remaining absolute reading — a row
+then carries the `LimitVerdict` word in its colour. Two candidate readings, or
+no limit-named sibling (bmc's `capacity_watts` beside `input_watts`), and
+there is no verdict: `None` is "no limit declared", never "ok" (#1126–#1128 by
+construction). A definition's `[panel.grade]` (#1259) says what names cannot.
+
+The panels are data first (`FamilyPanel`/`FamilyRow`/`FamilyCell`), so the
+ratchet's gate 3 asserts on them and on the rendered text; the common
+families (health, errors, alerts) stay on their hand-written views. The
+`family` on `DeviceDetailState` is the slice the fleet served for the
+producer, or this build's compiled-in one when the sweep has not answered.
 
 ## Routing: `CurrentView`
 

@@ -353,8 +353,9 @@ built from the missing fact (a `DeviceId` was the closed enum until #1256),
 proving nothing. Keep exactly one such test per architectural invariant.
 
 It is **red by design**, and it runs on every CI run as a ratchet rather than
-an `#[ignore]` nobody runs: `#[should_panic(expected = "GATE 3/view")]`
-(gate 1 passed with #1255 and #1256, gate 2 with #1257),
+an `#[ignore]` nobody runs: `#[should_panic(expected = "GATE 5/definition")]`
+(gate 1 passed with #1255 and #1256, gate 2 with #1257, gates 3 and 4 with
+#1258),
 where the body is the real requirement in six gates (intake, model, view,
 honesty, definition + scripts, subscription), each assertion prefixed with its
 gate label, and each seam that does not exist yet an honest
@@ -363,9 +364,9 @@ epic's status: a phase that lands moves the panic one gate on, the substring
 stops matching, the build goes red, and the implementer advances the string.
 When the last gate passes, `should_panic` reports "did not panic" and the
 attribute is deleted. Drift in either direction fails the build. A green
-companion in the same module pins what the ratchet cannot see past the
-current gate — gate 1's intake positively, and gate 4's honesty finding,
-which the ratchet only reaches once gate 3 passes. This is the `zensight`
+companion in the same module pins gate 1's intake and gate 4's honesty
+finding positively, so a regression in either names itself rather than
+moving the ratchet's panic. This is the `zensight`
 crate's first `should_panic`; the idiom is the workspace's (24 sites
 elsewhere).
 
