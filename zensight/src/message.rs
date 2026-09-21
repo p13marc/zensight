@@ -404,6 +404,12 @@ pub enum Message {
     /// what the fan-in's reply bound refused (#745).
     FleetLoaded(Result<crate::view::fleet::FleetSweep, String>),
 
+    /// The fleet's `views` replies, one definition per producer (#1259):
+    /// what each producer says about how its family model is best shown.
+    /// Fetched after every sweep for the producers that declare the
+    /// procedure; a producer-served definition wins over the bundled one.
+    ViewsLoaded(Vec<(String, zensight_common::views::ViewSet)>),
+
     /// The fleet's `describe` replies, one schema set per producer (#1256) —
     /// the schema half of the runtime registry, fetched after every sweep
     /// for the producers not yet described.

@@ -9,6 +9,7 @@ procedure	bmc	describe	read	-	SchemaSet
 procedure	bmc	introspect	read	-	RegistrySlice
 procedure	bmc	thresholds	read	-	ThresholdsConfig
 procedure	bmc	thresholds/set	write	ThresholdsConfig	Ack
+procedure	bmc	views	read	-	ViewSet
 procedure	catalog	ack	write	-	AlertAck
 procedure	catalog	describe	read	-	SchemaSet
 procedure	catalog	introspect	read	-	RegistrySlice
@@ -38,6 +39,7 @@ procedure	gnmi	describe	read	-	SchemaSet
 procedure	gnmi	introspect	read	-	RegistrySlice
 procedure	gnmi	thresholds	read	-	ThresholdsConfig
 procedure	gnmi	thresholds/set	write	ThresholdsConfig	Ack
+procedure	gnmi	views	read	-	ViewSet
 procedure	historian	describe	read	-	SchemaSet
 procedure	historian	introspect	read	-	RegistrySlice
 procedure	historian	range	read	-	RangeReply
@@ -71,6 +73,7 @@ procedure	modbus	describe	read	-	SchemaSet
 procedure	modbus	introspect	read	-	RegistrySlice
 procedure	modbus	thresholds	read	-	ThresholdsConfig
 procedure	modbus	thresholds/set	write	ThresholdsConfig	Ack
+procedure	modbus	views	read	-	ViewSet
 procedure	netflow	artifact/cancel	write	-	Ack
 procedure	netflow	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	netflow	artifact/status	read	-	ArtifactStatus
@@ -80,6 +83,7 @@ procedure	netflow	flows/page	read	-	Page<FlowRecord>
 procedure	netflow	introspect	read	-	RegistrySlice
 procedure	netflow	thresholds	read	-	ThresholdsConfig
 procedure	netflow	thresholds/set	write	ThresholdsConfig	Ack
+procedure	netflow	views	read	-	ViewSet
 procedure	netlink	addresses	read	-	Vec<AddressRecord>
 procedure	netlink	artifact/cancel	write	-	Ack
 procedure	netlink	artifact/request	write	ArtifactRequest	ArtifactAck
@@ -151,10 +155,12 @@ procedure	probe	targets	read	-	ProbeTargets
 procedure	probe	targets/set	write	ProbeTargets	Ack
 procedure	probe	thresholds	read	-	ThresholdsConfig
 procedure	probe	thresholds/set	write	ThresholdsConfig	Ack
+procedure	probe	views	read	-	ViewSet
 procedure	pve	describe	read	-	SchemaSet
 procedure	pve	introspect	read	-	RegistrySlice
 procedure	pve	thresholds	read	-	ThresholdsConfig
 procedure	pve	thresholds/set	write	ThresholdsConfig	Ack
+procedure	pve	views	read	-	ViewSet
 procedure	snmp	action	read	-	OutletStatus
 procedure	snmp	action/capability	read	-	OutletCapability
 procedure	snmp	action/set	write	OutletAction	OutletStatus
@@ -168,6 +174,7 @@ procedure	snmp	targets	read	-	SnmpTargets
 procedure	snmp	targets/set	write	SnmpTargets	Ack
 procedure	snmp	thresholds	read	-	ThresholdsConfig
 procedure	snmp	thresholds/set	write	ThresholdsConfig	Ack
+procedure	snmp	views	read	-	ViewSet
 procedure	sysinfo	artifact/cancel	write	-	Ack
 procedure	sysinfo	artifact/request	write	ArtifactRequest	ArtifactAck
 procedure	sysinfo	artifact/status	read	-	ArtifactStatus

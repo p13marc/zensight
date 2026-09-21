@@ -73,8 +73,9 @@ device when `(origin, producer)` match and the subject is under the device's
 source, or when the device is the only one its producer has on that origin.
 Documents never create a device.
 
-One thing the intake does *not* do yet: render a producer's `views.toml`
-(gate 5, #1259 — the ratchet in `app::system_view_tests` stops there today).
+One thing the intake does *not* do yet: derive the subscription from the
+visible view (gate 6, #1262 — the ratchet in `app::system_view_tests` stops
+there today).
 
 ### The family model (#1257)
 
@@ -128,6 +129,51 @@ ratchet's gate 3 asserts on them and on the rendered text; the common
 families (health, errors, alerts) stay on their hand-written views. The
 `family` on `DeviceDetailState` is the slice the fleet served for the
 producer, or this build's compiled-in one when the sweep has not answered.
+
+### View definitions — `views.toml` (#1259)
+
+A producer can say how its families are best shown. The vocabulary is
+`zensight_common::views::ViewSet` (design §6.1): `[view]` with the producer
+and a title, then `[[panel]]`s of kind `table` / `facts` / `document` (the
+rest of the vocabulary — `chart`, `reply`, `custom`, `link`, `action` — parses
+and renders a line saying it is not rendered yet), each with a `scope` (a
+family, optionally extended by literal chunks that select a field subtree:
+`{unit}/uplink`), a `join` (a second family sharing a variable, left-joined:
+pve's guests to their backups), `fields`/`hide`/`top_n`, and the
+presentation slots: `label`, `show`, `note`, `sort`, `format.<field>` — each
+a literal (`$var` substituted) or `{ rhai = "…" }`. **`[panel.grade]` names
+fields only** (`reading`, `warning`, `critical`, `absent`); the one literal
+allowed is `{ const = N, declared_by = "gui" }`, and a verdict from it carries
+"limit N is the gui's, not the producer's" on the row.
+
+`view::definition` compiles a document once (`Definition::compile`) and
+renders it over the family model (`definition::render` → the same
+`FamilyPanel` rows the default renderer uses, plus every script failure
+once). Scripts run under design §6.4's limits — an operation budget, a
+20 ms wall-clock budget through `on_progress` (a `loop {}` terminates and is
+reported), a call-level cap, string/array/map caps, the `unchecked` feature
+off — with `row` (the scoped fields, the join partner under its head or
+`()`), the bound variables and `decl` in scope, and three pure host functions
+(`fmt_age`, `fmt_bytes`, `fmt_unit`); no clock. **A broken view looks
+broken**: a script that fails to compile or run renders the slot's fallback
+and a `view script failed: …` line under the panels, never a silently empty
+cell.
+
+**Where a definition comes from**, in order: what the producer serves at
+`@rpc/<producer>/views` (`Message::ViewsLoaded`, fetched on the fleet
+sweep's repeating querier), the bundled copy compiled into `zensight-common`
+from `registry/views/<producer>.toml`, or nothing — then the default renderer
+above. A bespoke Rust view still wins at runtime when one exists; #1260
+deletes those once their documents render the same, which
+`bmc::tests::the_bundled_document_renders_the_same_verdicts_as_this_view`
+already holds bmc to.
+
+**The lint** (`definition::lint`) runs as a test over every bundled document
+and the system-view fixture: each `scope` and `join` is a family of the
+producer's slice, every field named is declared, every script compiles, and
+every identifier a script uses is a declared field (`row.<field>`), a bound
+variable, `row`/`decl`, or a host function. It is lexical over the script
+text and names the file, the panel and the field in each message.
 
 ## Routing: `CurrentView`
 

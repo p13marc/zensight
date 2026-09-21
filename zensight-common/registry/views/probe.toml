@@ -1,0 +1,27 @@
+# The probe view (#1259): one table per vantage point — every target with
+# its checks as columns. The outcome sentence the Rust view builds
+# ("timed out after 20.0s") is a note, not a threshold; the TLS expiry
+# window is the GUI's and says so.
+[view]
+version  = "1"
+producer = "probe"
+title    = "Synthetic checks"
+
+[[panel]]
+kind   = "facts"
+title  = "This vantage"
+scope  = "targets"
+
+[[panel]]
+kind   = "table"
+title  = "Targets"
+scope  = "{target}"
+label  = "$target"
+fields = ["up", "timeout", "duration_ms", "http_status", "rtt_p95_ms", "loss_pct", "tls_days_to_expiry", "ntp_offset_ms", "ntp_stratum"]
+sort   = { rhai = "if row.up == 0 { 0 } else { 1 }" }
+note   = { rhai = "if row.timeout == 1 { `timed out after ${fmt_age(row.duration_ms / 1000.0)}` } else if row.up == 0 && row.http_status != () { `refused with HTTP ${row.http_status}` }" }
+[panel.format]
+duration_ms = { rhai = "fmt_unit(row.duration_ms, \"ms\")" }
+[panel.grade]
+reading  = "tls_days_to_expiry"
+critical = { const = 0, declared_by = "gui" }

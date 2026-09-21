@@ -439,6 +439,12 @@ in a log.
   Every producer put also stamps the sample `Encoding`
   (`application/cbor`/`application/json` from `Format::encoding()`), so
   consumers resolve payloads from metadata before falling back to sniffing.
+- **A producer can ship its view** (#1259): a `views` read procedure beside
+  `introspect`/`describe`, declared in the registry of every producer that
+  bundles a `registry/views/<producer>.toml` (bmc, pve, probe, and the four
+  rest-var producers today), reply type `ViewSet` (`types.toml`, served as
+  JSON). The GUI prefers the served document, falls back to its bundled copy,
+  and renders the family model by default with neither.
 - **Fleet-wide writes are explicit** (RFC 05 amendment G2): a write procedure
   is origin-scoped unless its registry entry says `fanout = "allowed"`. The
   operator-console fleet pushes (logs filter + sentinel rules, systemd

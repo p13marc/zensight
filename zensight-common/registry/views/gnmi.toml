@@ -1,0 +1,16 @@
+# The gnmi view (#1259): a proxy producer keeps a rest-var family by design
+# (#468) — its metric tree belongs to the polled device, not to us — so the
+# document names the device table and the typed families the registry does
+# declare, and leaves the open family to the default renderer, bounded.
+[view]
+version  = "1"
+producer = "gnmi"
+title    = "gnmi"
+group_by = "{device}"
+
+[[panel]]
+kind  = "table"
+title = "Devices"
+scope = "{device}"
+label = "$device"
+top_n = 200

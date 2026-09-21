@@ -340,6 +340,9 @@ pub struct ZenSight {
     fleet_swept: bool,
     /// The fleet's served schema sets by producer, from `describe` (#1256).
     schemas: std::collections::HashMap<String, zensight_common::schema::SchemaSet>,
+    /// The fleet's served view definitions by producer, from `views`
+    /// (#1259). A served definition wins over the bundled one.
+    served_views: std::collections::HashMap<String, zensight_common::views::ViewSet>,
     /// State documents from the structural intake (#1256), per
     /// `(origin, producer)` and by subject; bounded per key.
     documents: std::collections::HashMap<
@@ -627,6 +630,7 @@ impl ZenSight {
             slices: zenkey_fleet::SliceSet::default(),
             fleet_swept: false,
             schemas: std::collections::HashMap::new(),
+            served_views: std::collections::HashMap::new(),
             documents: std::collections::HashMap::new(),
             events: std::collections::VecDeque::new(),
             has_connected: false,
@@ -3417,13 +3421,19 @@ impl ZenSight {
                 }
                 let alive = self.alive_producers();
                 self.fleet.apply(result, &alive);
-                return self.query_schemas();
+                return Task::batch([self.query_schemas(), self.query_views()]);
             }
             Message::SchemasLoaded(sets) => {
                 for (producer, set) in sets {
                     self.schemas.insert(producer, set);
                 }
                 self.rejudge_intake();
+            }
+            Message::ViewsLoaded(sets) => {
+                for (producer, set) in sets {
+                    self.served_views.insert(producer, set);
+                }
+                self.sync_selected_intake();
             }
             Message::Document {
                 origin,
@@ -8819,6 +8829,39 @@ impl ZenSight {
         })
     }
 
+    /// Ask every producer for its view definition (#1259) — the same
+    /// repeating querier the fleet sweep uses, so a producer that declares no
+    /// `views` procedure simply does not answer.
+    fn query_views(&self) -> Task<Message> {
+        if self.demo_mode {
+            return Task::none();
+        }
+        let Some(session) = self.session.clone() else {
+            return Task::none();
+        };
+        let queriers = self.fleet_queriers.clone();
+        Task::future(async move {
+            let fleet = zenkey_fleet::Fleet::new(&session, "");
+            let queriers = match queriers
+                .get_or_try_init(|| FleetQueriers::declare(&fleet))
+                .await
+            {
+                Ok(q) => q,
+                Err(e) => {
+                    tracing::warn!(error = %e, "could not declare the views querier");
+                    return Message::ViewsLoaded(Vec::new());
+                }
+            };
+            match queriers.views().await {
+                Ok(sets) => Message::ViewsLoaded(sets),
+                Err(e) => {
+                    tracing::warn!(error = %e, "views sweep failed");
+                    Message::ViewsLoaded(Vec::new())
+                }
+            }
+        })
+    }
+
     /// Re-judge everything the intake holds against the current slices and
     /// schemas (#1256): every held document's verdict, every device's
     /// undeclared set, and the selected device's projection of both.
@@ -8947,12 +8990,21 @@ impl ZenSight {
             .get(&id.producer)
             .map(crate::view::family::FamilyModel::from_slice)
             .or_else(|| crate::view::family::FamilyModel::for_producer(&id.producer));
+        // The definition (#1259): served → bundled → none. Compiled here,
+        // on selection and on arrival; a handful of one-line scripts.
+        let definition = self
+            .served_views
+            .get(&id.producer)
+            .cloned()
+            .or_else(|| zensight_common::views::ViewSet::bundled(&id.producer))
+            .map(crate::view::definition::Definition::compile);
         if let Some(selected) = self.selected_device.as_mut() {
             selected.documents = documents;
             selected.events = events;
             selected.undeclared = undeclared;
             selected.slice_known = slice_known;
             selected.family = family;
+            selected.definition = definition;
         }
     }
 
@@ -10533,6 +10585,9 @@ fn point_is_log_line(producer: &str, point: &TelemetryPoint) -> bool {
 struct FleetQueriers {
     wildcard: zenkey_fleet::RepeatingQuery,
     catalog: zenkey_fleet::RepeatingQuery,
+    /// `@rpc/*/views` (#1259): every producer's view definition, on the
+    /// same repeating querier the slices use.
+    views: zenkey_fleet::RepeatingQuery,
 }
 
 impl FleetQueriers {
@@ -10549,9 +10604,15 @@ impl FleetQueriers {
             &zenkey::ServiceOrigin::catalog(),
             &["introspect"],
         ));
+        let views = fleet.wire(zenkey::selector::rpc(
+            zenkey::selector::Scope::fleet(),
+            zenkey::selector::Producers::all(),
+            &["views"],
+        ));
         Ok(FleetQueriers {
             wildcard: zenkey_fleet::declare_repeating(fleet, &wildcard, timeout).await?,
             catalog: zenkey_fleet::declare_repeating(fleet, &catalog, timeout).await?,
+            views: zenkey_fleet::declare_repeating(fleet, &views, timeout).await?,
         })
     }
 
@@ -10613,6 +10674,36 @@ impl FleetQueriers {
 /// protocol is opened (#127), as the `Fetch*` messages that drive them. Pure
 /// (the unit of testing for the prefetch policy); empty for protocols whose
 /// detail is fully streamed (no queryable channels) or has no specialized view.
+impl FleetQueriers {
+    /// One `views` sweep (#1259): every producer's definition, parsed. A
+    /// reply that is not a `ViewSet` is skipped — and logged, since a
+    /// producer serving a broken document is a finding, not noise.
+    async fn views(&self) -> zenkey_fleet::Result<Vec<(String, zensight_common::views::ViewSet)>> {
+        let mut out = Vec::new();
+        for answer in self.views.fetch().await? {
+            let zenkey_fleet::Answer::Value(payload) = answer.answer else {
+                continue;
+            };
+            let Some(parsed) = zensight_common::keyexpr::parse_key(&answer.key) else {
+                continue;
+            };
+            let Some(producer) = parsed.producer().map(|p| p.name().to_string()) else {
+                continue;
+            };
+            match serde_json::from_slice::<zensight_common::views::ViewSet>(&payload.to_bytes()) {
+                Ok(set) => out.push((producer, set)),
+                Err(e) => tracing::warn!(
+                    producer = %producer,
+                    origin = %answer.origin,
+                    error = %e,
+                    "a served views document is not a ViewSet — ignoring it"
+                ),
+            }
+        }
+        Ok(out)
+    }
+}
+
 fn prefetch_channels(producer: &str) -> Vec<Message> {
     use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
     use crate::view::specialized::sysinfo_detail::ProcessSort;
@@ -12345,10 +12436,12 @@ mod system_view_tests {
     /// against the runtime slice); gate 2 since #1257 (the family model
     /// derives rows and columns from the slice); gates 3 and 4 since #1258
     /// (the default renderer reads the model, and says what is not
-    /// declared). Today it dies at gate 5: nothing loads a `views.toml`.
-    /// That failure is the finding.
+    /// declared); gate 5 since #1259 (the producer's `views.toml` is loaded,
+    /// its scripts run under limits, and a runaway one is reported). Today
+    /// it dies at gate 6: nothing derives the subscription from the visible
+    /// view. That failure is the finding.
     #[test]
-    #[should_panic(expected = "GATE 5/definition")]
+    #[should_panic(expected = "GATE 6/subscribe")]
     fn a_fictional_producer_renders_from_its_introspect_slice() {
         let mut a = app();
 
@@ -12622,15 +12715,96 @@ mod system_view_tests {
             );
         }
 
-        // (e) definition + scripts — the fixture `views.toml` loaded through
-        // `Message::ViewsLoaded`; Rhai labels, sort order, the note on exhaust
-        // only; then an inline `label = { rhai = "loop {}" }` renders the
-        // fallback plus a visible "view script failed" note in bounded time.
-        // Seam: #1259.
-        #[allow(unreachable_code)]
+        // (e) definition + scripts (#1259) — the fixture `views.toml` loaded
+        // through `Message::ViewsLoaded`: Rhai labels, the sort order, the
+        // note on exhaust only; then an inline `label = { rhai = "loop {}" }`
+        // renders the fallback plus a visible "view script failed" note in
+        // bounded time.
         {
-            panic!(
-                "GATE 5/definition: no seam yet — #1259 adds views.toml + Rhai and replaces this line"
+            let set = zensight_common::views::ViewSet::parse_toml(fake_sensor::VIEWS)
+                .unwrap_or_else(|e| {
+                    panic!("GATE 5/definition: the fixture views.toml does not parse: {e}")
+                });
+            let _ = a.update(Message::ViewsLoaded(vec![(PRODUCER.to_string(), set)]));
+            let selected = a.selected_device.as_ref().unwrap();
+            let def = selected.definition.as_ref().unwrap_or_else(|| {
+                panic!("GATE 5/definition: the served definition did not reach the selected device")
+            });
+            let rendered = crate::view::definition::render(selected, def);
+            assert!(
+                rendered.failures.is_empty(),
+                "GATE 5/definition: the fixture's scripts failed: {:?}",
+                rendered.failures
+            );
+            let temps = rendered
+                .panels
+                .iter()
+                .find(|p| p.title == "Temperatures")
+                .unwrap_or_else(|| panic!("GATE 5/definition: no Temperatures panel"));
+            assert_eq!(
+                temps
+                    .rows
+                    .iter()
+                    .map(|r| r.instance.as_str())
+                    .collect::<Vec<_>>(),
+                vec![
+                    format!("exhaust @ {UNIT}"),
+                    format!("inlet @ {UNIT}"),
+                    format!("outlet @ {UNIT}")
+                ],
+                "GATE 5/definition: Rhai labels, hottest first"
+            );
+            assert_eq!(
+                temps.rows[0].note.as_deref(),
+                Some("no limit published — not graded"),
+                "GATE 5/definition: the honesty note on exhaust"
+            );
+            assert!(
+                temps.rows[1].note.is_none() && temps.rows[2].note.is_none(),
+                "GATE 5/definition: the note is on exhaust only"
+            );
+            let mut ui = iced_test::simulator(a.view());
+            assert!(
+                ui.find(format!("exhaust @ {UNIT}").as_str()).is_ok(),
+                "GATE 5/definition: the scripted label is not rendered"
+            );
+            assert!(
+                ui.find("no limit published — not graded").is_ok(),
+                "GATE 5/definition: the note is not rendered"
+            );
+        }
+        {
+            let runaway = fake_sensor::VIEWS.replace(
+                "label  = { rhai = \"`${sensor} @ ${unit}`\" }",
+                "label  = { rhai = \"loop {}\" }",
+            );
+            assert_ne!(
+                runaway,
+                fake_sensor::VIEWS,
+                "GATE 5/definition: the fixture's label slot moved"
+            );
+            let set = zensight_common::views::ViewSet::parse_toml(&runaway).unwrap();
+            let started = std::time::Instant::now();
+            let _ = a.update(Message::ViewsLoaded(vec![(PRODUCER.to_string(), set)]));
+            let mut ui = iced_test::simulator(a.view());
+            assert!(
+                started.elapsed() < std::time::Duration::from_secs(2),
+                "GATE 5/definition: a runaway script stalled the frame for {:?}",
+                started.elapsed()
+            );
+            assert!(
+                ui.find(crate::view::definition::FAILURE_MARKER).is_ok(),
+                "GATE 5/definition: the runaway script is not visibly reported"
+            );
+            let selected = a.selected_device.as_ref().unwrap();
+            let r =
+                crate::view::definition::render(selected, selected.definition.as_ref().unwrap());
+            assert!(
+                r.failures
+                    .iter()
+                    .any(|f| f.starts_with("view script failed: panel[0].label")),
+                "GATE 5/definition: the failure names its slot: {:?}",
+                r.failures
             );
         }
 

@@ -542,6 +542,15 @@ impl<C: SensorConfig> SensorRunner<C> {
                     Ok(task) => self.adopt_named("describe", task),
                     Err(e) => tracing::warn!(error = %e, "failed to serve describe"),
                 }
+                // `views` (#1259) only where this build bundles a document —
+                // and then the registry declares it, which the coverage
+                // check below holds the two to.
+                if let Some(json) = zensight_common::views::views_json(&producer_name) {
+                    match crate::rpc::serve_views(self.session.clone(), &ctx, json).await {
+                        Ok(task) => self.adopt_named("views", task),
+                        Err(e) => tracing::warn!(error = %e, "failed to serve views"),
+                    }
+                }
             } else {
                 tracing::debug!(producer = %producer_name, "no registry slice; introspect not served");
             }
