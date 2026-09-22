@@ -263,6 +263,14 @@ pub struct ArtifactChannel {
     /// opted in.
     snapshot_publisher: Option<SnapshotPublisher>,
     state: Arc<Mutex<HashMap<&'static str, KindRuntime>>>,
+    /// The blob / tree serve loops (#1156): kept, so a shutdown can stop
+    /// them and let their in-flight replies complete, instead of cutting a
+    /// transfer at `session.close()`.
+    servers: Arc<Mutex<Vec<zblob::ServerHandle>>>,
+    /// Publishes each kind's state document (`state/<producer>/artifact/<kind>`)
+    /// for the producers whose registry declares it — RFC 05's observable
+    /// ideal beside the `artifact/status` read procedure (#1156).
+    states: Arc<zensight_common::PublisherRegistry>,
 }
 
 /// Declare the three `artifact/*` procedures and answer `error/gated` on all
@@ -412,6 +420,7 @@ impl ArtifactChannel {
                 .expect("a writable temp dir for artifact production"),
         );
 
+        let states_session = session.clone();
         Some(ArtifactChannel {
             session,
             producer,
@@ -427,7 +436,111 @@ impl ArtifactChannel {
             tree_server,
             snapshot_publisher,
             state: Arc::new(Mutex::new(HashMap::new())),
+            servers: Arc::new(Mutex::new(Vec::new())),
+            states: Arc::new(zensight_common::PublisherRegistry::new(states_session)),
         })
+    }
+
+    /// A handle on this channel for the runner (#1156): the shutdown call,
+    /// while the serve loop itself is spawned from the channel by value.
+    pub fn handle(&self) -> ArtifactChannel {
+        self.clone_handle()
+    }
+
+    /// Wind the channel down (#1156), in the order that leaves a consumer a
+    /// terminal state to read instead of a silence to time out on:
+    ///
+    /// 1. every in-flight production is told to stop, and its kind's state
+    ///    says `Failed { reason: "sensor shutting down" }` — in memory, where
+    ///    `artifact/status` keeps answering until the runner aborts the
+    ///    loop, and on the kind's state document for the producers that
+    ///    declare one;
+    /// 2. the blob and tree serve loops stop taking queries; a reply already
+    ///    in flight completes on its own (zblob's contract).
+    ///
+    /// Bounded by the runner, not here: a producer that ignores its token
+    /// is not waited for.
+    pub async fn shutdown(&self) {
+        let interrupted: Vec<&'static str> = {
+            let mut rt = self.state.lock().await;
+            let mut out = Vec::new();
+            for (slug, kr) in rt.iter_mut() {
+                let Some((id, token)) = kr.in_flight.take() else {
+                    continue;
+                };
+                token.cancel();
+                kr.busy = false;
+                kr.current = Some(ArtifactState::Failed {
+                    id,
+                    kind: slug.to_string(),
+                    reason: "sensor shutting down".to_string(),
+                });
+                out.push(*slug);
+            }
+            out
+        };
+        for slug in interrupted {
+            tracing::info!(kind = slug, "artifact production interrupted by shutdown");
+            self.publish_state(slug).await;
+        }
+        let handles: Vec<zblob::ServerHandle> = std::mem::take(&mut *self.servers.lock().await);
+        for handle in handles {
+            if let Err(e) = handle.shutdown().await {
+                tracing::warn!(error = %e, "artifact blob server did not stop cleanly");
+            }
+        }
+    }
+
+    /// One kind's status, as `artifact/status` reports it.
+    async fn kind_status(&self, slug: &str) -> Option<KindStatus> {
+        let producer = self.producers.get(slug)?;
+        let rt = self.state.lock().await;
+        let kr = rt.get(slug);
+        let common = producer.common();
+        Some(KindStatus {
+            kind: slug.to_string(),
+            busy: kr.map(|r| r.busy).unwrap_or(false),
+            current: kr.and_then(|r| r.current.clone()),
+            max_bytes: common.max_bytes,
+            cooldown_secs: common.cooldown_secs,
+            advert: producer.advert(),
+        })
+    }
+
+    /// Publish a kind's state document (#1156) — `state/<producer>/artifact/<kind>`,
+    /// the `ArtifactStatus` its registry declares, narrowed to that kind.
+    /// Nothing for a producer whose registry does not declare the subject:
+    /// an undeclared document is what the conformance judges call
+    /// unregistered traffic, and the read procedure still answers.
+    async fn publish_state(&self, slug: &str) {
+        use zenkey::grammar::Class;
+        let tail = ["artifact", slug];
+        if zensight_common::registry::parse_subject(&self.producer, Class::State, &tail).is_none() {
+            return;
+        }
+        let key = match zensight_common::v1::for_producer(&self.producer).state_key(&tail) {
+            Ok(key) => key,
+            Err(e) => {
+                tracing::warn!(kind = slug, error = %e, "artifact state key does not mint");
+                return;
+            }
+        };
+        let Some(kind) = self.kind_status(slug).await else {
+            return;
+        };
+        let doc = ArtifactStatus { kinds: vec![kind] };
+        if let Err(e) = self
+            .states
+            .put_serializable(
+                key.as_str(),
+                &doc,
+                zensight_common::Format::Json,
+                zensight_common::QosClass::Command,
+            )
+            .await
+        {
+            tracing::warn!(kind = slug, error = %e, "artifact state document not published");
+        }
     }
 
     /// Serve forever. Spawned as a worker by `SensorRunner::with_artifacts`.
@@ -460,22 +573,24 @@ impl ArtifactChannel {
         // this channel starts answering `artifact/request` its blob endpoints
         // are already live — a request cannot race ahead of the server that
         // must serve its bytes. (0.1's `run()` declared inside the spawned
-        // task, which left that window open.) The handles are detached
-        // deliberately: the servers live as long as the session, and dropping
-        // a `ServerHandle` does not stop the loop.
+        // task, which left that window open.) The handles are kept (#1156):
+        // dropping one does not stop the loop, and `shutdown` asks each to
+        // stop and lets its in-flight replies complete.
         if let Some(blob) = &self.blob {
-            let _ = blob
+            let handle = blob
                 .clone()
                 .spawn()
                 .await
                 .map_err(|e| anyhow::anyhow!("spawn blob server: {e}"))?;
+            self.servers.lock().await.push(handle);
         }
         if let Some(tree_server) = &self.tree_server {
-            let _ = tree_server
+            let handle = tree_server
                 .clone()
                 .spawn()
                 .await
                 .map_err(|e| anyhow::anyhow!("spawn tree server: {e}"))?;
+            self.servers.lock().await.push(handle);
         }
 
         // Reclaim crash leftovers: a durable store reopened after an unclean
@@ -675,6 +790,8 @@ impl ArtifactChannel {
             });
         }
 
+        self.publish_state(slug).await;
+
         // Produce off the loop so status stays responsive.
         let this = self.clone_handle();
         let id = req.id;
@@ -783,6 +900,8 @@ impl ArtifactChannel {
                 self.sweep_store().await;
             }
         }
+        drop(rt);
+        self.publish_state(slug).await;
     }
 
     /// Turn a produced file/dir into a published `Ready` state + a live-artifact
@@ -1084,15 +1203,17 @@ impl ArtifactChannel {
             if let Some(active) = &kr.active
                 && active.id == id
             {
+                let slug: &'static str = slug;
                 let cleanup = kr.active.take().map(|a| a.cleanup);
                 kr.current = Some(ArtifactState::Expired {
                     id,
                     kind: slug.to_string(),
                 });
+                drop(rt);
                 if let Some(cleanup) = cleanup {
-                    drop(rt);
                     self.release(cleanup).await;
                 }
+                self.publish_state(slug).await;
                 return true;
             }
         }
@@ -1103,6 +1224,7 @@ impl ArtifactChannel {
     async fn reap_expired(&self) {
         let now = Instant::now();
         let mut to_release = Vec::new();
+        let mut expired: Vec<&'static str> = Vec::new();
         {
             let mut rt = self.state.lock().await;
             for (slug, kr) in rt.iter_mut() {
@@ -1113,11 +1235,15 @@ impl ArtifactChannel {
                         kind: slug.to_string(),
                     });
                     to_release.push(active.cleanup);
+                    expired.push(slug);
                 }
             }
         }
         for cleanup in to_release {
             self.release(cleanup).await;
+        }
+        for slug in expired {
+            self.publish_state(slug).await;
         }
     }
 
@@ -1206,6 +1332,8 @@ impl ArtifactChannel {
             tree_server: self.tree_server.clone(),
             snapshot_publisher: self.snapshot_publisher.clone(),
             state: self.state.clone(),
+            servers: self.servers.clone(),
+            states: self.states.clone(),
         }
     }
 }

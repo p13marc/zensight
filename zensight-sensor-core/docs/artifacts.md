@@ -86,6 +86,27 @@ stateDiagram-v2
   for, permitted, **and achieved**", and that is what `ausearch --success`
   selects on. It used to journal every such cancel as a successful operator
   action.
+- **Every transition is also a document** (#1156):
+  `state/<producer>/artifact/<kind>` carries the kind's `ArtifactStatus`
+  (narrowed to that kind) on `Generating`, `Ready`, `Failed` and `Expired`
+  — for the producers whose registry declares the subject (ten do; a
+  test-only producer does not, and publishes nothing). The `artifact/status`
+  read procedure remains the poll; the document is what RFC 05 calls the
+  observable ideal, and what a consumer that was not polling at the instant
+  reads. Progress ticks stay on the procedure: they are not a transition.
+- **A sensor stopping mid-production leaves a terminal state, not a
+  silence** (#1156). The runner winds the channel down *first*, before any
+  worker is aborted and bounded by two seconds: every in-flight production
+  is told to stop through its token, its kind's state becomes
+  `Failed { reason: "sensor shutting down" }` (in memory and on the
+  document), and the blob and tree serve loops are asked to stop — a reply
+  already in flight completes, a new query is not taken. The channel's own
+  serve loop is a *late* worker: it keeps answering `artifact/status` with
+  that state through the alert drain and is aborted only as the session
+  closes, so a consumer polling every half second reads `Failed` instead of
+  timing out on a silence it cannot tell from a hung sensor. A producer that
+  ignores its token past the budget is abandoned to the abort, and says so
+  in the log.
 - A producer that had to leave something out calls `ctx.note("…")` (#602); the
   channel carries it onto `ArtifactState::Ready { note }` and the GUI shows it
   with the download result. The transfer manifest describes the *bytes* — this

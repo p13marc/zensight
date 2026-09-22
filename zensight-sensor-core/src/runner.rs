@@ -111,7 +111,20 @@ pub struct SensorRunner<C: SensorConfig> {
     aborts: Vec<tokio::task::AbortHandle>,
     /// The supervisors watching those workers (#1082), aborted after them.
     supervisors: Vec<JoinHandle<()>>,
+    /// Workers that must outlive the alert drain (#1156): the artifact
+    /// channel, whose `artifact/status` keeps answering with the terminal
+    /// state its shutdown wrote until the session is about to close.
+    late_aborts: Vec<tokio::task::AbortHandle>,
+    /// The artifact channel's handle (#1156), for the wind-down that runs
+    /// before anything is aborted.
+    artifact: Option<crate::artifact::ArtifactChannel>,
 }
+
+/// How long the artifact channel gets to wind down (#1156): tell every
+/// in-flight production to stop, write each kind's terminal state, stop the
+/// blob servers. A producer that ignores its token is not waited for past
+/// this.
+const ARTIFACT_WIND_DOWN: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// The self-report this sensor publishes on `state/<producer>/evidence/self`.
 ///
@@ -270,6 +283,8 @@ impl<C: SensorConfig> SensorRunner<C> {
             alert_reporter: None,
             aborts: Vec::new(),
             supervisors: Vec::new(),
+            late_aborts: Vec::new(),
+            artifact: None,
         })
     }
 
@@ -329,7 +344,15 @@ impl<C: SensorConfig> SensorRunner<C> {
             self.source.clone(),
             producers,
         ) {
-            self.spawn(channel.run());
+            // Spawned as a *late* worker (#1156): its status queryable
+            // answers through the alert drain, so a consumer polling an
+            // interrupted production reads `Failed` rather than timing out on
+            // a silence.
+            self.artifact = Some(channel.handle());
+            let handle = tokio::spawn(channel.run());
+            self.late_aborts.push(handle.abort_handle());
+            self.supervisors
+                .push(supervise(self.health.clone(), "artifact-channel", handle));
             tracing::info!("artifact channel enabled");
         } else {
             let session = self.session.clone();
@@ -793,19 +816,33 @@ impl<C: SensorConfig> SensorRunner<C> {
 
         tracing::info!(sensor = %self.name, "Received shutdown signal");
 
+        // The artifact channel winds down first (#1156), while everything
+        // still runs: every in-flight production is told to stop and its
+        // kind's state says why, the blob servers stop taking queries and
+        // finish the replies they owe. Bounded — a producer that ignores its
+        // token is abandoned to the abort below, not waited for.
+        if let Some(artifact) = &self.artifact
+            && tokio::time::timeout(ARTIFACT_WIND_DOWN, artifact.shutdown())
+                .await
+                .is_err()
+        {
+            tracing::warn!(
+                budget_ms = ARTIFACT_WIND_DOWN.as_millis() as u64,
+                "artifact channel did not wind down in time; aborting it"
+            );
+        }
+
         // Abort the workers first, then the supervisors watching them (#1082).
         // In this order every supervisor observes `is_cancelled()` and reports
         // nothing; the other order would abort the watchers and leave the
-        // workers running through the alert drain below.
+        // workers running through the alert drain below. The late workers
+        // (the artifact channel's serve loop) stay up through the drain.
         for task in &self.aborts {
             task.abort();
         }
         for sup in &self.supervisors {
             sup.abort();
         }
-
-        // Wait briefly for tasks to clean up
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Retract every alert this sensor is still asserting, and tombstone
         // its key (#882). A stopped sensor asserts nothing; leaving the
@@ -829,6 +866,13 @@ impl<C: SensorConfig> SensorRunner<C> {
                     "timed out retracting firing alerts; some may be left firing on the bus"
                 ),
             }
+        }
+
+        // The late workers go last (#1156): the artifact channel answered
+        // `artifact/status` with its terminal states through the drain;
+        // nothing answers after the session closes anyway.
+        for task in &self.late_aborts {
+            task.abort();
         }
 
         // Close Zenoh session

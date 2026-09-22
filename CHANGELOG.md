@@ -491,6 +491,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A sensor stopping mid-artifact leaves a terminal state, not a silence**
+  (#1156, its last bullet). Shutdown was abort-every-worker, sleep 100 ms,
+  drain alerts, close: an in-flight production was cut with nothing written,
+  the zblob serve loops were detached handles nothing could stop, and a
+  consumer polling `artifact/status` saw silence it could not tell from a
+  hung sensor until its own timeout. The runner now winds the artifact
+  channel down first, bounded by two seconds: every in-flight production's
+  token is fired, its kind's state becomes `Failed { reason: "sensor shutting
+  down" }`, the blob and tree servers are asked to stop and finish the
+  replies they owe, and the channel's serve loop stays up through the alert
+  drain (a *late* worker, aborted only as the session closes) so the poll
+  reads `Failed`. And every transition — `Generating`, `Ready`, `Failed`,
+  `Expired` — now also lands on the declared `state/<producer>/artifact/<kind>`
+  document, which the registry had declared and nothing had ever published.
+  The 100 ms sleep is gone.
+
 - **Seven more units carry the full sandbox block, and a unit must now argue
   each line it cannot take** (#1204, closing it). `hostspec`, `logs`,
   `netlink`, `netring`, `parallax`, `systemd` and `sysinfo` went from
