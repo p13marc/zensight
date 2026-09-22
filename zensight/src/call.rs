@@ -444,7 +444,8 @@ pub async fn call(
     }
 }
 
-fn now_ms() -> i64 {
+/// Epoch millis now — when an answer landed.
+pub fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)

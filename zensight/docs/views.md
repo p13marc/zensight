@@ -324,9 +324,18 @@ tab prefetch the view's `tab_procedures`, the matrix→flows pivot a filter on
 the `flows` table plus one `call_now`. `NetringDetailState` keeps what is
 not an answer to a call: the anomalies projected onto the device and the
 flow↔process join slot; the `fetch_*` helpers stay for the fleet-wide
-topology and Security joins, which land elsewhere than a device. The rest
-go one producer per PR; a view's `Fetch<T>` field is the sign it has not
-moved.
+topology and Security joins, which land elsewhere than a device.
+**parallax**: the stream catalogue is the `streams` call's answer
+(`parallax_detail::catalogue(state)`, empty until it lands); the tier
+resolver and the controller take it as an argument instead of reading a
+field, and demo mode answers it from `mock::demo_reply` — the app's generic
+call path asks the mock instead of a session, so demo keeps mirroring the
+wire contract without a per-producer arm. **snmp**: the outlet probe is the
+`action/capability` call and the gate takes its answer; the interface table
+is `tables["interfaces"]`. Every fetch pair is gone; what remains
+per-producer is navigation, the write paths and their state machines
+(systemd's action, snmp's outlet, netring's captures and tuning, parallax's
+tiles), and the projections that are not answers to a call.
 
 ## Routing: `CurrentView`
 

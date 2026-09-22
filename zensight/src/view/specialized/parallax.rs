@@ -14,10 +14,10 @@
 use iced::widget::{Space, button, column, container, image, mouse_area, row, text, tooltip};
 use iced::{ContentFit, Element, Length, Theme};
 
+use crate::call::Answer;
 use crate::message::Message;
 use crate::view::device::DeviceDetailState;
 use crate::view::icons::{self, IconSize};
-use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::parallax_detail::{ParallaxDetailState, TileEnd, TileState};
 use crate::view::specialized::parallax_h264;
 use crate::view::specialized::parallax_health;
@@ -426,28 +426,33 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
                 .style(muted),
         );
     }
-    match &detail.catalogue {
-        Fetch::Idle => {
+    match state
+        .calls
+        .answer::<Vec<zensight_common::StreamDescriptor>>("streams")
+    {
+        Answer::Idle => {
             content = content.push(
                 row![
                     text("Stream catalogue not loaded.")
                         .size(font::CAPTION)
                         .style(muted),
-                    button(text("Load streams").size(font::CAPTION))
-                        .on_press(Message::FetchParallaxStreams),
+                    button(text("Load streams").size(font::CAPTION)).on_press(Message::Call {
+                        procedure: "streams".to_string(),
+                        params: String::new(),
+                    }),
                 ]
                 .spacing(space::SM)
                 .align_y(iced::Alignment::Center),
             );
         }
-        Fetch::Loading => {
+        Answer::Loading => {
             content = content.push(
                 text("Loading stream catalogue…")
                     .size(font::CAPTION)
                     .style(muted),
             );
         }
-        Fetch::Error(message) => {
+        Answer::Error(message) => {
             content = content.push(
                 row![
                     text(format!("Catalogue unavailable: {message}"))
@@ -455,21 +460,23 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
                         .style(|t: &Theme| text::Style {
                             color: Some(theme::colors(t).danger_text()),
                         }),
-                    button(text("Retry").size(font::CAPTION))
-                        .on_press(Message::FetchParallaxStreams),
+                    button(text("Retry").size(font::CAPTION)).on_press(Message::Call {
+                        procedure: "streams".to_string(),
+                        params: String::new(),
+                    }),
                 ]
                 .spacing(space::SM)
                 .align_y(iced::Alignment::Center),
             );
         }
-        Fetch::Ready(streams) if streams.is_empty() => {
+        Answer::Ready(streams) if streams.is_empty() => {
             content = content.push(
                 text("This sensor advertises no streams.")
                     .size(font::CAPTION)
                     .style(muted),
             );
         }
-        Fetch::Ready(streams) => {
+        Answer::Ready(streams) => {
             let mut list = column![].spacing(space::XS);
             for stream in streams {
                 list = list.push(catalogue_row(detail, stream));
@@ -642,8 +649,7 @@ mod tests {
         if !parallax_h264::AVAILABLE {
             return;
         }
-        let mut detail = ParallaxDetailState::default();
-        detail.apply(Ok(vec![two_tier_descriptor()]));
+        let detail = ParallaxDetailState::default();
         let descriptor = two_tier_descriptor();
 
         let mut ui = simulator(catalogue_row(&detail, &descriptor));

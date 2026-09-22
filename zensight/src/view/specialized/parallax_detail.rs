@@ -18,7 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use iced::futures::Stream;
 use iced::widget::image;
 use zenoh::Session;
-use zensight_common::keyexpr::{media_preview_key, origin_rpc_key};
+use zensight_common::keyexpr::media_preview_key;
 use zensight_common::media::observed_frame_age_ms;
 use zensight_common::stream::{
     FrameMeta, MediaReceiverReport, StreamControl, StreamDescriptor, StreamEndReason, StreamStatus,
@@ -26,7 +26,6 @@ use zensight_common::stream::{
 };
 use zensight_common::{Format, decode};
 
-use super::fetch::Fetch;
 use super::parallax::preview_handle_from_jpeg;
 use super::parallax_receiver;
 use super::parallax_receiver::{DecodeLoss, REPORT_INTERVAL, ReceiverStats, Shed};
@@ -45,11 +44,20 @@ const FPS_EMA_ALPHA: f32 = 0.2;
 /// reorder window, so the guard re-anchors instead of freezing the tile.
 pub(crate) const SEQ_RESTART_GAP: u64 = 300;
 
-/// Per-device parallax state: the stream catalogue + open preview tiles.
+/// The stream catalogue the `streams` call answered with (#1261), empty
+/// until it has — what the tier resolver and the controller read.
+pub fn catalogue(state: &crate::view::device::DeviceDetailState) -> &[StreamDescriptor] {
+    state
+        .calls
+        .answer::<Vec<StreamDescriptor>>("streams")
+        .ready()
+        .map_or(&[], Vec::as_slice)
+}
+
+/// Per-device parallax state: the open preview tiles and their controllers;
+/// the catalogue is the `streams` call's answer (#1261).
 #[derive(Debug, Default)]
 pub struct ParallaxDetailState {
-    /// The advertised streams (`@rpc/parallax/streams`).
-    pub catalogue: Fetch<Vec<StreamDescriptor>>,
     /// Open preview tiles, keyed by stream name (BTreeMap: stable grid order).
     pub tiles: BTreeMap<String, TileState>,
     /// Latest per-stream `StreamStatus` (`state/parallax/stream/<stream>`),
@@ -219,16 +227,6 @@ impl TileState {
 }
 
 impl ParallaxDetailState {
-    /// Mark the catalogue as loading (a fetch is in flight).
-    pub fn loading(&mut self) {
-        self.catalogue = Fetch::Loading;
-    }
-
-    /// Fold a catalogue reply in.
-    pub fn apply(&mut self, result: Result<Vec<StreamDescriptor>, String>) {
-        self.catalogue = Fetch::from_result(result);
-    }
-
     /// Whether a tile for `stream` is open.
     pub fn is_open(&self, stream: &str) -> bool {
         self.tiles.contains_key(stream)
@@ -261,10 +259,10 @@ impl ParallaxDetailState {
     }
 
     /// The tiers `stream` offers, per the catalogue (empty if unknown).
-    pub fn offered_tiers(&self, stream: &str) -> &[TierSpec] {
-        self.catalogue
-            .ready()
-            .and_then(|streams| streams.iter().find(|s| s.stream == stream))
+    pub fn offered_tiers<'a>(catalogue: &'a [StreamDescriptor], stream: &str) -> &'a [TierSpec] {
+        catalogue
+            .iter()
+            .find(|s| s.stream == stream)
             .map(|s| s.tiers.as_slice())
             .unwrap_or(&[])
     }
@@ -273,8 +271,8 @@ impl ParallaxDetailState {
     /// path, which has no explicit tier — the per-tier buttons pass one): the
     /// `medium` tier if offered, else the highest-quality offered tier (the
     /// ladder's tail). `None` only when the catalogue lists no tiers.
-    pub fn resolve_tier(&self, stream: &str) -> Option<String> {
-        let tiers = self.offered_tiers(stream);
+    pub fn resolve_tier(catalogue: &[StreamDescriptor], stream: &str) -> Option<String> {
+        let tiers = Self::offered_tiers(catalogue, stream);
         if tiers.is_empty() {
             return None;
         }
@@ -395,6 +393,7 @@ impl ParallaxDetailState {
     /// the bottom rung starves itself of the recovery window it is waiting for.
     pub fn tier_decision(
         &mut self,
+        catalogue: &[StreamDescriptor],
         stream: &str,
         deadline: Option<Duration>,
         now: Instant,
@@ -407,13 +406,7 @@ impl ParallaxDetailState {
                 parallax_tier::signals(tile.prev_report.as_ref()?, tile.last_report.as_ref()?)?;
             (current, signals)
         };
-        let tiers = self
-            .catalogue
-            .ready()?
-            .iter()
-            .find(|d| d.stream == stream)?
-            .tiers
-            .clone();
+        let tiers = catalogue.iter().find(|d| d.stream == stream)?.tiers.clone();
         let decision = self.controller(stream, now).observe(
             &signals,
             deadline,
@@ -556,23 +549,6 @@ impl ParallaxDetailState {
         }
         closes
     }
-}
-
-/// Query the stream catalogue (the `streams` procedure): the host's concrete
-/// @rpc key when its origin is known, else the fleet selector (first reply —
-/// right on a single-host mesh, and the origin map fills within ~5 s).
-pub async fn fetch_streams(
-    session: Arc<Session>,
-    origin: Option<zenkey::RemoteOrigin>,
-) -> Option<Vec<StreamDescriptor>> {
-    let key = match origin {
-        Some(o) => origin_rpc_key(&o, "parallax", "streams"),
-        None => zensight_common::fleet_rpc_key("parallax", "streams"),
-    };
-    let replies = session.get(key).await.ok()?;
-    let reply = replies.recv_async().await.ok()?;
-    let sample = reply.result().ok()?;
-    serde_json::from_slice(&sample.payload().to_bytes()).ok()
 }
 
 /// The `FrameMeta` on a preview sample, or `None` when the attachment is
@@ -744,8 +720,9 @@ mod tests {
             media_preview_key(&test_origin(), "cam0"),
             "v1/h-3fa9c2d41b7e/@media/parallax/cam0/preview/jpeg"
         );
+        // The catalogue call (#1261) asks the same concrete key.
         assert_eq!(
-            origin_rpc_key(&test_origin(), "parallax", "streams"),
+            crate::call::procedure_key(Some(&test_origin()), "parallax", "streams", ""),
             "v1/h-3fa9c2d41b7e/@rpc/parallax/streams"
         );
     }
@@ -1104,32 +1081,6 @@ mod tests {
         assert!(state.expanded_tile().is_none());
     }
 
-    #[test]
-    fn catalogue_fetch_lifecycle() {
-        let mut state = ParallaxDetailState::default();
-        assert!(matches!(state.catalogue, Fetch::Idle));
-        state.loading();
-        assert!(state.catalogue.is_loading());
-        state.apply(Ok(vec![StreamDescriptor {
-            stream: "cam0".into(),
-            codecs: vec!["h264".into(), "mjpeg".into()],
-            active: false,
-            width: Some(640),
-            height: Some(480),
-            fps: Some(30.0),
-            tiers: vec![TierSpec {
-                name: "high".into(),
-                max_height: None,
-                fps: 30,
-                bitrate_kbps: 4000,
-            }],
-            description: None,
-        }]));
-        assert_eq!(state.catalogue.ready().map(|v| v.len()), Some(1));
-        state.apply(Err("no sensor".into()));
-        assert_eq!(state.catalogue.error(), Some("no sensor"));
-    }
-
     fn spec(name: &str, max_height: Option<u32>) -> TierSpec {
         TierSpec {
             name: name.into(),
@@ -1176,13 +1127,15 @@ mod tests {
 
     #[test]
     fn resolve_tier_picks_medium_then_the_ladder_tail() {
-        let mut state = ParallaxDetailState::default();
         // No catalogue yet → nothing to resolve.
-        assert_eq!(state.resolve_tier("cam0"), None);
+        assert_eq!(ParallaxDetailState::resolve_tier(&[], "cam0"), None);
 
-        state.apply(Ok(vec![ladder_descriptor()]));
+        let catalogue = vec![ladder_descriptor()];
         // The default-tier resolver (expand-upgrade path) prefers `medium` when
         // offered, else the highest tier the camera can feed.
-        assert_eq!(state.resolve_tier("cam0").as_deref(), Some("medium"));
+        assert_eq!(
+            ParallaxDetailState::resolve_tier(&catalogue, "cam0").as_deref(),
+            Some("medium")
+        );
     }
 }

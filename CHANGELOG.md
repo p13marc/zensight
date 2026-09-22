@@ -291,6 +291,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `query_netring_*` wrappers and the `Fetch` fields. The `fetch_*` helpers
   stay for the fleet-wide topology and Security joins. `Message` is 382
   variants.
+- **parallax and snmp retired onto `Call`/`Reply` — the last fetch pairs**
+  (#1261). The parallax stream catalogue is the `streams` call's answer
+  (`parallax_detail::catalogue`), taken as an argument by the tier resolver
+  and the controller; demo mode answers a call from `mock::demo_reply`
+  through the generic path, so the mock catalogue needs no arm of its own.
+  The snmp outlet probe is the `action/capability` call
+  (`outlet_gate(capability, device, outlet)`), and the interface table is
+  `tables["interfaces"]`. Gone: `FetchParallaxStreams`,
+  `ParallaxStreamsReceived`, `FetchSnmpOutletCapability`,
+  `SnmpOutletCapabilityReceived`, `SnmpTable{Sort,Filter,More}`,
+  `ParallaxDetailState::{catalogue, loading, apply}`,
+  `SnmpDetailState::{outlet_capability, table}`, `fetch_streams`,
+  `query_parallax_streams`, `query_snmp_outlet_capability`. `Message` is
+  375 variants — 62 fewer than before #1261 began, every `Fetch*`/`*Received`
+  pair gone.
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in
