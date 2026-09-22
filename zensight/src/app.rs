@@ -977,31 +977,13 @@ impl ZenSight {
         ControlFlow::Break(Task::none())
     }
 
-    /// #132: syslog/journald filter panel and its apply-to-sensor command.
-    ///
-    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
-    /// can fall through to the next handler.
-    fn update_syslog(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
-        match message {
-            // Syslog filter messages
-            Message::ToggleSyslogFilterPanel => {
-                self.syslog_filter.panel_open = !self.syslog_filter.panel_open;
-            }
-
-            Message::ToggleLogStatsPanel => {
-                self.syslog_filter.stats_open = !self.syslog_filter.stats_open;
-            }
-
-            Message::ToggleLogStatsAllUnits => {
-                self.syslog_filter.stats_all_units = !self.syslog_filter.stats_all_units;
-            }
-
-            Message::SetSyslogMinSeverity(severity) => {
-                self.syslog_filter.set_min_severity(severity);
-            }
-
-            Message::SetLogTimeRange(range) => {
-                self.syslog_filter.set_time_range(range, now_ms());
+    /// Act on what a logs-feed action reported (#1306): the fetch gates and
+    /// the paging cursor are the app's, the filter is the view's.
+    fn logs_effect(&mut self, effect: crate::view::specialized::syslog::Effect) -> Task<Message> {
+        use crate::view::specialized::syslog::Effect;
+        match effect {
+            Effect::None => Task::none(),
+            Effect::RefreshHistory => {
                 // Re-query so the feed's history depth reflects the new lower
                 // bound — from the durable store, since a widened range is
                 // exactly a request for history the ring no longer holds
@@ -1010,45 +992,36 @@ impl ZenSight {
                 if !self.log_fetch_inflight {
                     self.log_fetch_inflight = true;
                     self.last_log_fetch_ms = Some(now_ms());
-                    return ControlFlow::Break(self.query_log_history());
+                    return self.query_log_history();
                 }
+                Task::none()
             }
-
-            Message::ToggleSyslogFacility(facility) => {
-                self.syslog_filter.toggle_facility(facility);
+            Effect::LoadOlder => {
+                // The cursor is the oldest line the buffer holds: the sensor
+                // returns records strictly older than it, so pages abut
+                // without overlapping.
+                let Some(cursor) = self
+                    .recent_logs
+                    .iter()
+                    .map(|m| m.uid())
+                    .filter(|uid| !uid.is_empty())
+                    .min()
+                    .map(str::to_string)
+                else {
+                    // Nothing buffered (or nothing with a uid — pre-#556
+                    // lines): a plain history fetch is the right fallback.
+                    self.syslog_filter.loading_older = true;
+                    return self.query_log_history();
+                };
+                // Never stack page fetches: a second click while one is in
+                // flight would race two merges into the same buffer.
+                if !self.syslog_filter.loading_older {
+                    self.syslog_filter.loading_older = true;
+                    return self.query_older_logs(cursor);
+                }
+                Task::none()
             }
-
-            Message::ToggleSyslogUnit(unit) => {
-                self.syslog_filter.toggle_unit(unit);
-            }
-
-            Message::ToggleSyslogBoot(boot) => {
-                self.syslog_filter.toggle_boot(boot);
-            }
-
-            Message::ToggleLogRow(key) => {
-                self.syslog_filter.toggle_row(key);
-            }
-
-            Message::ToggleLogFollow => {
-                self.syslog_filter.toggle_follow(now_ms());
-            }
-
-            Message::LogsJumpToNow => {
-                self.syslog_filter.resume();
-            }
-
-            Message::SetSyslogAppFilter(filter) => {
-                self.syslog_filter.set_app_filter(filter);
-            }
-
-            Message::SetSyslogMessageFilter(filter) => {
-                self.syslog_filter.set_message_filter(filter);
-            }
-
-            other => return ControlFlow::Continue(other),
         }
-        ControlFlow::Break(Task::none())
     }
 
     /// #132: per-device specialized detail fetch/apply (netlink / netring / sysinfo).
@@ -1383,33 +1356,6 @@ impl ZenSight {
             Message::SetSnmpEventSearch(search) => {
                 self.dashboard.snmp_event_filter.search = search;
             }
-            Message::ShowMoreLogs => {
-                self.syslog_filter.extra_rows += crate::view::specialized::syslog::LOG_PAGE_STEP;
-            }
-            Message::LoadOlderLogs => {
-                // The cursor is the oldest line the buffer holds: the sensor
-                // returns records strictly older than it, so pages abut
-                // without overlapping.
-                let Some(cursor) = self
-                    .recent_logs
-                    .iter()
-                    .map(|m| m.uid())
-                    .filter(|uid| !uid.is_empty())
-                    .min()
-                    .map(str::to_string)
-                else {
-                    // Nothing buffered (or nothing with a uid — pre-#556
-                    // lines): a plain history fetch is the right fallback.
-                    self.syslog_filter.loading_older = true;
-                    return ControlFlow::Break(self.query_log_history());
-                };
-                // Never stack page fetches: a second click while one is in
-                // flight would race two merges into the same buffer.
-                if !self.syslog_filter.loading_older {
-                    self.syslog_filter.loading_older = true;
-                    return ControlFlow::Break(self.query_older_logs(cursor));
-                }
-            }
             Message::LogOlderPageLoaded(result) => {
                 self.syslog_filter.loading_older = false;
                 match result {
@@ -1452,17 +1398,6 @@ impl ZenSight {
                         self.log_fetch_error = Some(e);
                     }
                 }
-            }
-            Message::ToggleLogExportFormat => {
-                let fmt = &mut self.syslog_filter.export_format;
-                *fmt = match fmt {
-                    zensight_common::LogBundleFormat::Jsonl => {
-                        zensight_common::LogBundleFormat::Text
-                    }
-                    zensight_common::LogBundleFormat::Text => {
-                        zensight_common::LogBundleFormat::Jsonl
-                    }
-                };
             }
             Message::ClearSnmpEventFilters => {
                 self.dashboard.snmp_event_filter.clear();
@@ -1578,10 +1513,6 @@ impl ZenSight {
             ControlFlow::Break(t) => return t,
             ControlFlow::Continue(m) => m,
         };
-        let message = match self.update_syslog(message) {
-            ControlFlow::Break(t) => return t,
-            ControlFlow::Continue(m) => m,
-        };
         let message = match self.update_detail(message) {
             ControlFlow::Break(t) => return t,
             ControlFlow::Continue(m) => m,
@@ -1600,6 +1531,11 @@ impl ZenSight {
                 if self.groups.update(action) == crate::view::groups::Effect::Persist {
                     self.save_groups();
                 }
+            }
+
+            Message::Logs(action) => {
+                let effect = self.syslog_filter.update(action, now_ms());
+                return self.logs_effect(effect);
             }
 
             Message::PromoteMetricToAlert {
@@ -3903,10 +3839,6 @@ impl ZenSight {
                     Ok(records) => crate::view::specialized::fetch::Fetch::Ready(records),
                     Err(_) => crate::view::specialized::fetch::Fetch::Ready(Vec::new()),
                 };
-            }
-
-            Message::ClearSyslogFilters => {
-                self.syslog_filter.clear();
             }
 
             Message::SyslogFilterStatusReceived(status) => {
@@ -9830,11 +9762,11 @@ mod update_routing_tests {
         // for nothing (#1306).
         let _ = a.update(Message::Chart(crate::view::chart::Action::ZoomIn));
         assert!(a.selected_device.is_none());
-        // Syslog panel toggle is owned by update_syslog.
-        assert!(matches!(
-            a.update_syslog(Message::ToggleSyslogFilterPanel),
-            ControlFlow::Break(_)
+        // A logs action lands on the filter state (#1306).
+        let _ = a.update(Message::Logs(
+            crate::view::specialized::syslog::Action::TogglePanel,
         ));
+        assert!(a.syslog_filter.panel_open);
         // A detail filter is owned by update_detail.
         assert!(matches!(
             a.update_detail(Message::SetDetailFilter {

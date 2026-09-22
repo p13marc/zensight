@@ -55,6 +55,7 @@ a `Task`, the session or another view's state; a clock-needing action takes
 |------|----------|-------------------|
 | chart (on `DeviceDetailState::apply_chart`) | `chart::Action` — select/add/remove/toggle series, windows, ranges, zoom/pan/drag, the filter | `Favorite { metric, now_fav }`, `LoadRange { from, to }`, `InvalidRange` |
 | groups (`GroupsState::update`) | `groups::Action` — panel, filter, the two forms, delete, membership | `Persist` |
+| logs (`SyslogFilterState::update`, takes `now_ms`) | `syslog::Action` — the panel and stats toggles, severity, time range, the facility/unit/boot lenses, row drill-down, follow/pause, the text filters, export format, paging | `RefreshHistory` (under the app's in-flight gate), `LoadOlder` (the app holds the cursor) |
 
 Kept as top-level variants by design: navigation (`Open*`/`Close*`), wire
 ingress, `Call`/`Reply`/`Batch`/`Arm`/`Confirm`/`Written`, and the few

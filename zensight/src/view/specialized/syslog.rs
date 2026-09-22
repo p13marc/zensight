@@ -19,6 +19,54 @@ use crate::view::device::DeviceDetailState;
 use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
 use crate::view::theme;
+
+/// One interaction with the logs feed and its filter panel (#1306).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// Expand/collapse the filter panel.
+    TogglePanel,
+    /// Expand/collapse the "Log statistics" block (#350).
+    ToggleStats,
+    /// The by-unit rollup: top-3 ⇄ every unit (#350).
+    ToggleStatsAllUnits,
+    /// Minimum severity (`None` = all).
+    MinSeverity(Option<u8>),
+    /// The relative time window (#554); re-queries with the new depth.
+    TimeRange(crate::view::time_range::TimeRange),
+    ToggleFacility(String),
+    /// The journald unit lens (#64).
+    ToggleUnit(String),
+    /// The boot lens (#93).
+    ToggleBoot(String),
+    /// The structured drill-down for one row, keyed by content (#93).
+    ToggleRow(String),
+    /// Live-tail follow/pause (#93).
+    ToggleFollow,
+    /// Resume live tail — jump back to now (#93).
+    JumpToNow,
+    AppFilter(String),
+    MessageFilter(String),
+    /// Reset every filter.
+    Clear,
+    /// The log-bundle export format: JSONL ⇄ text (#602).
+    ToggleExportFormat,
+    /// Reveal more of the already-buffered matching lines (#601).
+    ShowMore,
+    /// Fetch the next older page from the sensors' durable stores (#601).
+    LoadOlder,
+}
+
+/// What the app has to do after a logs action.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    /// The history depth changed: re-query the durable store (under the
+    /// app's in-flight gate, #601).
+    RefreshHistory,
+    /// Page older, from the oldest buffered uid the app holds (#601).
+    LoadOlder,
+}
 use crate::view::time_range::TimeRange;
 use crate::view::tokens::font;
 use crate::view::tokens::space;
@@ -248,6 +296,39 @@ impl SyslogFilterState {
 
     /// Select a relative time window and resolve its absolute lower bound against
     /// `now_ms` (epoch ms). `TimeRange::All` clears the bound.
+    /// One feed interaction (#1306): the filter changes here; whether the
+    /// app must fetch comes back as the [`Effect`].
+    pub fn update(&mut self, action: Action, now_ms: i64) -> Effect {
+        match action {
+            Action::TogglePanel => self.panel_open = !self.panel_open,
+            Action::ToggleStats => self.stats_open = !self.stats_open,
+            Action::ToggleStatsAllUnits => self.stats_all_units = !self.stats_all_units,
+            Action::MinSeverity(severity) => self.set_min_severity(severity),
+            Action::TimeRange(range) => {
+                self.set_time_range(range, now_ms);
+                return Effect::RefreshHistory;
+            }
+            Action::ToggleFacility(facility) => self.toggle_facility(facility),
+            Action::ToggleUnit(unit) => self.toggle_unit(unit),
+            Action::ToggleBoot(boot) => self.toggle_boot(boot),
+            Action::ToggleRow(key) => self.toggle_row(key),
+            Action::ToggleFollow => self.toggle_follow(now_ms),
+            Action::JumpToNow => self.resume(),
+            Action::AppFilter(filter) => self.set_app_filter(filter),
+            Action::MessageFilter(filter) => self.set_message_filter(filter),
+            Action::Clear => self.clear(),
+            Action::ToggleExportFormat => {
+                self.export_format = match self.export_format {
+                    LogBundleFormat::Jsonl => LogBundleFormat::Text,
+                    LogBundleFormat::Text => LogBundleFormat::Jsonl,
+                };
+            }
+            Action::ShowMore => self.extra_rows += LOG_PAGE_STEP,
+            Action::LoadOlder => return Effect::LoadOlder,
+        }
+        Effect::None
+    }
+
     pub fn set_time_range(&mut self, range: TimeRange, now_ms: i64) {
         self.time_range = range;
         self.range_from = range.window_ms().map(|w| now_ms - w);
@@ -483,7 +564,7 @@ pub fn syslog_event_view<'a>(
         })
         .size(font::CAPTION),
     )
-    .on_press(Message::ToggleLogStatsPanel)
+    .on_press(Message::Logs(Action::ToggleStats))
     .padding([2, 8])
     .style(iced::widget::button::text);
     let mut stats = column![crate::view::components::section_header(
@@ -612,7 +693,7 @@ fn render_logs_rollup<'a>(
             };
             col = col.push(
                 button(text(label).size(font::CAPTION))
-                    .on_press(Message::ToggleLogStatsAllUnits)
+                    .on_press(Message::Logs(Action::ToggleStatsAllUnits))
                     .padding([2, 8])
                     .style(iced::widget::button::text),
             );
@@ -712,7 +793,7 @@ pub fn logs_view<'a>(
         .spacing(6)
         .align_y(Alignment::Center),
     )
-    .on_press(Message::ToggleSyslogFilterPanel)
+    .on_press(Message::Logs(Action::TogglePanel))
     .style(if has_filters {
         iced::widget::button::primary
     } else {
@@ -822,7 +903,7 @@ fn render_header<'a>(
                 .spacing(6)
                 .align_y(Alignment::Center),
         )
-        .on_press(Message::ToggleSyslogFilterPanel)
+        .on_press(Message::Logs(Action::TogglePanel))
         .style(if has_filters {
             iced::widget::button::primary
         } else {
@@ -862,7 +943,7 @@ fn render_filter_panel<'a>(
         pick_list(
             SEVERITY_OPTIONS.as_slice(),
             Some(current_severity),
-            |opt: SeverityOption| Message::SetSyslogMinSeverity(opt.value)
+            |opt: SeverityOption| Message::Logs(Action::MinSeverity(opt.value))
         )
         .width(Length::Fixed(150.0))
     ]
@@ -877,7 +958,7 @@ fn render_filter_panel<'a>(
         pick_list(
             TimeRange::ALL.as_slice(),
             Some(filter_state.time_range),
-            Message::SetLogTimeRange,
+            |range| Message::Logs(Action::TimeRange(range)),
         )
         .width(Length::Fixed(150.0))
     ]
@@ -910,7 +991,7 @@ fn render_filter_panel<'a>(
             let facility_msg = facility.clone();
             // Use a button as a toggle instead of checkbox
             let btn = button(text(facility_label).size(font::CAPTION))
-                .on_press(Message::ToggleSyslogFacility(facility_msg))
+                .on_press(Message::Logs(Action::ToggleFacility(facility_msg)))
                 .style(if is_selected {
                     iced::widget::button::primary
                 } else {
@@ -943,7 +1024,7 @@ fn render_filter_panel<'a>(
             let label = unit.clone();
             chips.push(
                 button(text(label).size(font::CAPTION))
-                    .on_press(Message::ToggleSyslogUnit(unit))
+                    .on_press(Message::Logs(Action::ToggleUnit(unit)))
                     .style(if is_selected {
                         iced::widget::button::primary
                     } else {
@@ -977,7 +1058,7 @@ fn render_filter_panel<'a>(
             let short: String = boot.chars().take(8).collect();
             chips.push(
                 button(text(short).size(font::CAPTION))
-                    .on_press(Message::ToggleSyslogBoot(boot))
+                    .on_press(Message::Logs(Action::ToggleBoot(boot)))
                     .style(if is_selected {
                         iced::widget::button::primary
                     } else {
@@ -996,7 +1077,7 @@ fn render_filter_panel<'a>(
     let app_filter_row = row![
         text("App Pattern:").size(font::BODY),
         text_input("e.g., systemd-*", &filter_state.app_filter)
-            .on_input(Message::SetSyslogAppFilter)
+            .on_input(|v| Message::Logs(Action::AppFilter(v)))
             .size(font::BODY)
             .padding(6)
             .width(Length::Fixed(200.0))
@@ -1009,7 +1090,7 @@ fn render_filter_panel<'a>(
     let mut msg_filter_row = row![
         text("Message Pattern:").size(font::BODY),
         text_input("e.g., error|failed", &filter_state.message_filter)
-            .on_input(Message::SetSyslogMessageFilter)
+            .on_input(|v| Message::Logs(Action::MessageFilter(v)))
             .size(font::BODY)
             .padding(6)
             .width(Length::Fixed(200.0))
@@ -1074,7 +1155,7 @@ fn render_filter_panel<'a>(
     };
 
     let clear_button = button(row![text("Clear").size(font::BODY)].align_y(Alignment::Center))
-        .on_press(Message::ClearSyslogFilters)
+        .on_press(Message::Logs(Action::Clear))
         .style(iced::widget::button::secondary);
 
     let mut buttons_row = row![apply_button, clear_button].spacing(10);
@@ -1106,7 +1187,7 @@ fn render_filter_panel<'a>(
             })
             .size(font::CAPTION),
         )
-        .on_press(Message::ToggleLogExportFormat)
+        .on_press(Message::Logs(Action::ToggleExportFormat))
         .style(iced::widget::button::text);
         buttons_row = buttons_row.push(export_button).push(format_toggle);
     }
@@ -1324,7 +1405,7 @@ fn render_log_stream<'a>(
         })
         .size(font::CAPTION),
     )
-    .on_press(Message::ToggleLogFollow)
+    .on_press(Message::Logs(Action::ToggleFollow))
     .style(if filter_state.paused {
         iced::widget::button::secondary
     } else {
@@ -1340,7 +1421,7 @@ fn render_log_stream<'a>(
     if filter_state.paused {
         header_bar = header_bar.push(
             button(text("Jump to now ⤓").size(font::CAPTION))
-                .on_press(Message::LogsJumpToNow)
+                .on_press(Message::Logs(Action::JumpToNow))
                 .style(iced::widget::button::secondary),
         );
     }
@@ -1440,7 +1521,7 @@ fn render_log_stream<'a>(
 
         list = list.push(
             button(cells)
-                .on_press(Message::ToggleLogRow(key))
+                .on_press(Message::Logs(Action::ToggleRow(key)))
                 .padding([3, 6])
                 .width(Length::Fill)
                 .style(iced::widget::button::text),
@@ -1471,7 +1552,7 @@ fn render_log_stream<'a>(
     if shown < matched {
         footer = footer.push(
             button(text(format!("Show {LOG_PAGE_STEP} more")).size(font::DENSE))
-                .on_press(Message::ShowMoreLogs)
+                .on_press(Message::Logs(Action::ShowMore))
                 .padding([3, 9])
                 .style(iced::widget::button::secondary),
         );
@@ -1493,7 +1574,7 @@ fn render_log_stream<'a>(
     } else {
         footer = footer.push(
             button(text("Load older").size(font::DENSE))
-                .on_press(Message::LoadOlderLogs)
+                .on_press(Message::Logs(Action::LoadOlder))
                 .padding([3, 9])
                 .style(iced::widget::button::secondary),
         );
@@ -2284,5 +2365,50 @@ mod tests {
         let state = DeviceDetailState::new(device_id);
         let filter_state = SyslogFilterState::default();
         let _view = syslog_event_view(&state, &filter_state, &[]);
+    }
+}
+
+#[cfg(test)]
+mod actions {
+    use super::*;
+
+    const NOW: i64 = 1_700_000_000_000;
+
+    /// Only the two fetching actions ask the app for anything.
+    #[test]
+    fn only_fetching_actions_have_effects() {
+        let mut f = SyslogFilterState::default();
+        assert_eq!(f.update(Action::TogglePanel, NOW), Effect::None);
+        assert!(f.panel_open);
+        assert_eq!(
+            f.update(Action::ToggleUnit("nginx.service".into()), NOW),
+            Effect::None
+        );
+        assert!(f.selected_units.contains("nginx.service"));
+        assert_eq!(f.update(Action::ToggleExportFormat, NOW), Effect::None);
+        assert_eq!(f.export_format, LogBundleFormat::Text);
+        assert_eq!(f.update(Action::ShowMore, NOW), Effect::None);
+        assert_eq!(f.extra_rows, LOG_PAGE_STEP);
+        assert_eq!(
+            f.update(
+                Action::TimeRange(crate::view::time_range::TimeRange::default()),
+                NOW
+            ),
+            Effect::RefreshHistory
+        );
+        assert_eq!(f.update(Action::LoadOlder, NOW), Effect::LoadOlder);
+        assert_eq!(f.update(Action::Clear, NOW), Effect::None);
+        assert!(f.selected_units.is_empty());
+    }
+
+    /// The clock is the caller's: pausing freezes at the given instant.
+    #[test]
+    fn toggle_follow_uses_the_given_clock() {
+        let mut f = SyslogFilterState::default();
+        assert_eq!(f.update(Action::ToggleFollow, NOW), Effect::None);
+        assert!(f.paused);
+        assert_eq!(f.frozen_at, Some(NOW));
+        assert_eq!(f.update(Action::JumpToNow, NOW + 1), Effect::None);
+        assert!(!f.paused);
     }
 }

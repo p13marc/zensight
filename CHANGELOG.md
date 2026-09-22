@@ -331,6 +331,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Effect::Persist` is the one thing the app acts on. The `update_chart` and
   `update_groups` handler stages are gone; `PromoteMetricToAlert` stays
   top-level (it navigates and queries). `Message` is 317 variants (351 before).
+  **The logs feed follows**: `Message::Logs(syslog::Action)` replaces the
+  17 filter, follow, paging and export variants; `SyslogFilterState::update`
+  takes the clock and hands back `RefreshHistory` or `LoadOlder`, the two
+  things the app still gates (the in-flight fetch, the paging cursor). The
+  `update_syslog` stage is gone. `Message` is 301 variants.
 
 - **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
   writes — netring's detector toggles, thresholds, allowlist, capture filter,

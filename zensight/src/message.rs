@@ -672,13 +672,6 @@ pub enum Message {
     SetSnmpEventSearch(String),
     /// Reset every trap-feed facet (#578).
     ClearSnmpEventFilters,
-    /// Flip the log-bundle export format between JSONL and text (#602).
-    ToggleLogExportFormat,
-    /// Reveal more of the already-buffered matching lines (#601).
-    ShowMoreLogs,
-    /// Fetch the next older page from the sensors' durable stores (#601),
-    /// using the oldest buffered uid as the cursor.
-    LoadOlderLogs,
     /// An older-page fetch finished (#601). Kept separate from
     /// `LogEventsLoaded` so a page merge never advances the live-tail
     /// watermark — an older page must not make the tail skip forward.
@@ -1301,38 +1294,9 @@ pub enum Message {
     /// Set topology search query.
     TopologySetSearch(String),
 
-    // Syslog filter messages
-    /// Toggle syslog filter panel visibility.
-    ToggleSyslogFilterPanel,
-
-    /// Collapse/expand the "Log statistics" block on the logs facet (#350).
-    ToggleLogStatsPanel,
-
-    /// Toggle the by-unit list between top-3 and all units (#350).
-    ToggleLogStatsAllUnits,
-
     /// Collapse/expand the host identity details (facts + resolution group) in
     /// the merged host nav bar (#350). Persisted.
     ToggleIdentityDetails,
-
-    /// Set minimum severity filter (None = all severities).
-    SetSyslogMinSeverity(Option<u8>),
-
-    /// Set the Logs-feed relative time window (#554); resolved to a `from=` bound
-    /// against `now` and re-queries the sensor with the new depth.
-    SetLogTimeRange(crate::view::time_range::TimeRange),
-
-    /// Toggle inclusion of a facility in the filter.
-    ToggleSyslogFacility(String),
-
-    /// Toggle inclusion of a systemd unit in the filter (journald lens, #64).
-    ToggleSyslogUnit(String),
-
-    /// Toggle inclusion of a journald boot in the filter (boot lens, #93).
-    ToggleSyslogBoot(String),
-
-    /// Toggle the structured drill-down for a log row, keyed by content (#93).
-    ToggleLogRow(String),
 
     /// Open the global bandwidth monitor pre-scoped to one host (#351).
     OpenBandwidthForHost(String),
@@ -1340,20 +1304,9 @@ pub enum Message {
     /// Clear the bandwidth monitor's host scope (#351).
     ClearBandwidthHostFilter,
 
-    /// Toggle live-tail follow/pause on the log stream (#93).
-    ToggleLogFollow,
-
-    /// Resume live tail — jump the log stream back to now (#93).
-    LogsJumpToNow,
-
-    /// Set syslog app name filter pattern.
-    SetSyslogAppFilter(String),
-
-    /// Set syslog message content filter pattern.
-    SetSyslogMessageFilter(String),
-
-    /// Clear all syslog filters.
-    ClearSyslogFilters,
+    /// One logs-feed interaction (#1306): `SyslogFilterState::update` applies
+    /// it and says whether the app must fetch history or an older page.
+    Logs(crate::view::specialized::syslog::Action),
 
     /// Syslog filter status received from sensor.
     SyslogFilterStatusReceived(SyslogFilterStatus),
