@@ -35,6 +35,198 @@ pub use model::{
 
 use crate::view::tokens::font;
 use model::{entity_node_label, is_node_protocol, ordered_pair, primary_protocol};
+
+/// One interaction with the topology view (#1306): the canvas, the toolbar,
+/// the info panel, the two animation ticks and the data batch — one enum,
+/// applied by [`TopologyState::update`]. (No `PartialEq`: the batch carries
+/// records that do not compare; the tests assert on the `Effect`.)
+#[derive(Debug, Clone)]
+pub enum Action {
+    // ── canvas and toolbar ──
+    SelectNode(NodeId),
+    SelectEdge(usize),
+    ClearSelection,
+    /// Expand a collapsed group by clicking its meta-node (#392).
+    ExpandGroup(String),
+    DragNode {
+        id: NodeId,
+        x: f32,
+        y: f32,
+    },
+    /// The node stays pinned where it was dropped (#394).
+    DragEnd(NodeId),
+    Pan(f32, f32),
+    /// Hover moved onto (or off) a node (#394); emitted on change only.
+    Hover(Option<NodeId>),
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    /// A canvas-computed zoom-to-fit (#394).
+    FitApplied {
+        zoom: f32,
+        pan: (f32, f32),
+    },
+    // ── toolbar ──
+    SetLens(Lens),
+    SetEdgeLabel(EdgeLabelMode),
+    SetGrouping(GroupingMode),
+    /// Re-collapse every expanded group (#392).
+    Regroup,
+    FocusNode(NodeId),
+    SetFocusHops(u8),
+    ExitFocus,
+    ToggleHideIdle,
+    ToggleHidePassive,
+    ToggleHideExternal,
+    /// Cap the number of flow edges shown (0 = unlimited, #392).
+    SetTopN(usize),
+    SetLayout(LayoutMode),
+    TogglePin(NodeId),
+    ToggleAutoLayout,
+    ToggleLegend,
+    SetSearch(String),
+    /// Leave the view.
+    Close,
+    // ── info panel ──
+    /// Open the device detail behind a node.
+    ViewDeviceDetail(NodeId),
+    /// Pivot to the netring flow table (#393).
+    OpenFlows,
+    /// Copy a string (community_id etc.) to the clipboard (#393).
+    CopyText(String),
+    // ── subscriptions and data ──
+    /// Advance the flow-dash animation (#394).
+    AnimTick,
+    /// ~30 fps layout tick (#441) while the simulation settles or a tween
+    /// is in flight.
+    LayoutFrame,
+    /// One data-refresh batch — flows + matrix + assets, landed together so
+    /// the edge set rebuilds once (#440).
+    BatchReceived(TopologyBatch),
+}
+
+/// What the app has to do after a topology action, in the view's terms.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    None,
+    /// A presentation pref changed: the app's debounced flush picks it up.
+    PersistPrefs,
+    /// The view is closing: flush the prefs, go back to the dashboard.
+    Close,
+    /// A netlink node was selected: call `netlink/sockets?state=listen`
+    /// fleet-wide, keyed `listen:<node>` on this surface.
+    AskListenSockets(NodeId),
+    /// A flow edge was selected: call `netring/flows` fleet-wide, keyed
+    /// `edge_flows:<index>` on this surface.
+    AskEdgeFlows(usize),
+    /// Open the device detail the node resolves to.
+    OpenDevice(NodeId),
+    /// Pivot to the flow table.
+    OpenFlows,
+    /// Put this on the clipboard.
+    Copy(String),
+}
+
+/// The key a node's listening-sockets call is filed under (#393).
+pub fn listen_key(node_id: &str) -> String {
+    format!("listen:{node_id}")
+}
+
+/// The key an edge's recent-flows call is filed under (#393).
+pub fn edge_flows_key(edge_index: usize) -> String {
+    format!("edge_flows:{edge_index}")
+}
+
+/// Map from IP address to topology node id (#306): a node whose id looks
+/// like an IP maps to itself, and each correlator entity's identifying IPs
+/// map to that entity's node (or a member device's node) — bridging
+/// wire-level flow edges to hostname nodes.
+pub fn ip_to_node(
+    state: &TopologyState,
+    entities: &crate::entity::EntityStore,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for node_id in state.nodes.keys() {
+        map.insert(node_id.clone(), node_id.clone());
+    }
+    for entity in entities.hosts.values() {
+        let node_id = if state.nodes.contains_key(&entity.entity_id) {
+            Some(entity.entity_id.clone())
+        } else {
+            entity.members.iter().find_map(|m| {
+                let src = &m.source;
+                state.nodes.contains_key(src).then(|| src.clone())
+            })
+        };
+        if let Some(node_id) = node_id {
+            for ip in &entity.ips {
+                map.entry(ip.clone()).or_insert_with(|| node_id.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Map from normalized MAC to topology node id (#391), mirroring
+/// [`ip_to_node`] — the join key for the MAC-keyed netring asset inventory.
+pub fn mac_to_node(
+    state: &TopologyState,
+    entities: &crate::entity::EntityStore,
+) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for entity in entities.hosts.values() {
+        let node_id = if state.nodes.contains_key(&entity.entity_id) {
+            Some(entity.entity_id.clone())
+        } else {
+            entity.members.iter().find_map(|m| {
+                let src = &m.source;
+                state.nodes.contains_key(src).then(|| src.clone())
+            })
+        };
+        if let Some(node_id) = node_id {
+            for mac in &entity.macs {
+                map.entry(crate::entity::normalize_mac(mac))
+                    .or_insert_with(|| node_id.clone());
+            }
+        }
+    }
+    map
+}
+
+/// Keep only the flows that run between the edge's endpoints (#393). An
+/// Internet endpoint matches any unmapped public address.
+pub fn flows_for_edge(
+    edge: &Edge,
+    flows: &mut Vec<zensight_common::FlowRecord>,
+    ip_to_node: &HashMap<String, String>,
+) {
+    use model::{INTERNET_NODE_ID, endpoint_ip, is_public_ip};
+    let side = |node_id: &str, ip: &str| -> bool {
+        if node_id == INTERNET_NODE_ID {
+            is_public_ip(ip) && !ip_to_node.contains_key(ip)
+        } else {
+            ip_to_node.get(ip).map(String::as_str) == Some(node_id)
+        }
+    };
+    flows.retain(|f| {
+        let src = endpoint_ip(&f.src);
+        let dst = endpoint_ip(&f.dst);
+        (side(&edge.from, src) && side(&edge.to, dst))
+            || (side(&edge.to, src) && side(&edge.from, dst))
+    });
+}
+
+/// Keep the listening sockets bound to the node's addresses, plus wildcard
+/// listeners (0.0.0.0 / [::]) — usually what you are looking for, though on
+/// a multi-host mesh they may belong to any netlink host; the panel says so.
+pub fn listen_rows_for_node(node: &Node, rows: &mut Vec<zensight_common::SocketRecord>) {
+    let node_ips: std::collections::HashSet<&str> = node.ips.iter().map(String::as_str).collect();
+    rows.retain(|s| {
+        let ip = model::endpoint_ip(&s.local);
+        node_ips.contains(ip) || ip == "0.0.0.0" || ip == "::" || ip == "*"
+    });
+}
 pub use tiered::{PositionTween, TierBand, TieredLayout, tiered_layout, tween_at};
 
 /// Flow edges slower than this (bytes/sec) don't animate (#394).
@@ -136,16 +328,13 @@ pub struct TopologyBatch {
     pub assets: Option<Vec<zensight_common::AssetRecord>>,
 }
 
-/// On-demand side-panel data (#393).
+/// The selected node's or edge's on-demand detail (#393, #1261): every
+/// pull is a keyed call on `CallSurface::Topology` — `listen:<node>` for the
+/// node's listening sockets, `edge_flows:<index>` for the edge's recent
+/// flows, `attribution:*` for the flow↔process joins — and a selection that
+/// moves on clears its keys, which is the staleness guard.
 #[derive(Debug, Default)]
 pub struct PanelData {
-    /// Listen sockets for the selected node.
-    pub listen: crate::view::specialized::fetch::Fetch<Vec<zensight_common::SocketRecord>>,
-    /// Recent flows between the selected edge's endpoints.
-    pub edge_flows: crate::view::specialized::fetch::Fetch<Vec<zensight_common::FlowRecord>>,
-    /// The calls this surface has made (#1261): the edge panel's
-    /// flow→process joins (#309 reuse), `netlink/sockets` per endpoint,
-    /// keyed by flow.
     pub calls: crate::call::Calls,
 }
 
@@ -753,6 +942,124 @@ impl TopologyState {
 
     /// Select a node by ID. Panel data resets; the app triggers the
     /// on-demand fetches (#393).
+    /// One view interaction (#1306): the state changes here; what the app
+    /// must do about it comes back as the [`Effect`]. The entity store is
+    /// the batch's join key; the clock is the tween's.
+    pub fn update(
+        &mut self,
+        action: Action,
+        entities: &crate::entity::EntityStore,
+        now_ms: i64,
+    ) -> Effect {
+        match action {
+            Action::SelectNode(node_id) => {
+                // A selection that moves on forgets the old one's calls, so
+                // a late answer for it never lands (#393).
+                self.panel.calls.clear_prefix("listen:");
+                let asks = self
+                    .nodes
+                    .get(&node_id)
+                    .is_some_and(|n| n.protocols.contains("netlink"));
+                self.select_node(node_id.clone());
+                if asks {
+                    return Effect::AskListenSockets(node_id);
+                }
+            }
+            Action::SelectEdge(index) => {
+                self.panel.calls.clear_prefix("edge_flows:");
+                let asks = self
+                    .edges
+                    .get(index)
+                    .is_some_and(|e| e.kind == EdgeKind::Flow);
+                self.select_edge(index);
+                if asks {
+                    return Effect::AskEdgeFlows(index);
+                }
+            }
+            Action::ClearSelection => self.clear_selection(),
+            Action::ExpandGroup(group_id) => self.expand_group(group_id),
+            Action::DragNode { id, x, y } => self.update_node_drag(&id, x, y),
+            Action::DragEnd(id) => {
+                self.end_node_drag(&id);
+                return Effect::PersistPrefs;
+            }
+            Action::Pan(dx, dy) => self.update_pan(dx, dy),
+            Action::Hover(node_id) => self.set_hover(node_id),
+            Action::ZoomIn => self.zoom_in(),
+            Action::ZoomOut => self.zoom_out(),
+            Action::ZoomReset => self.reset_zoom(),
+            Action::FitApplied { zoom, pan } => self.apply_fit(zoom, pan),
+            Action::SetLens(lens) => {
+                self.set_lens(lens);
+                return Effect::PersistPrefs;
+            }
+            Action::SetEdgeLabel(mode) => {
+                self.set_edge_label(mode);
+                return Effect::PersistPrefs;
+            }
+            Action::SetGrouping(mode) => {
+                self.set_grouping(mode);
+                return Effect::PersistPrefs;
+            }
+            Action::Regroup => self.regroup(),
+            Action::FocusNode(node_id) => self.focus_node(node_id),
+            Action::SetFocusHops(hops) => self.set_focus_hops(hops),
+            Action::ExitFocus => self.exit_focus(),
+            Action::ToggleHideIdle => {
+                self.toggle_hide_idle();
+                return Effect::PersistPrefs;
+            }
+            Action::ToggleHidePassive => {
+                self.toggle_hide_passive();
+                return Effect::PersistPrefs;
+            }
+            Action::ToggleHideExternal => {
+                self.toggle_hide_external();
+                return Effect::PersistPrefs;
+            }
+            Action::SetTopN(n) => {
+                self.set_top_n(n);
+                return Effect::PersistPrefs;
+            }
+            Action::SetLayout(mode) => {
+                self.set_layout(mode);
+                return Effect::PersistPrefs;
+            }
+            Action::TogglePin(node_id) => {
+                self.toggle_pin(&node_id);
+                return Effect::PersistPrefs;
+            }
+            Action::ToggleAutoLayout => self.toggle_auto_layout(),
+            Action::ToggleLegend => self.toggle_legend(),
+            Action::SetSearch(query) => self.set_search(query),
+            Action::Close => return Effect::Close,
+            Action::ViewDeviceDetail(node_id) => return Effect::OpenDevice(node_id),
+            Action::OpenFlows => return Effect::OpenFlows,
+            Action::CopyText(text) => return Effect::Copy(text),
+            Action::AnimTick => self.advance_animation(),
+            Action::LayoutFrame => {
+                if self.tween_active() {
+                    self.step_tween(now_ms);
+                } else {
+                    self.run_layout_step();
+                }
+            }
+            Action::BatchReceived(batch) => {
+                // One reply set → one edge rebuild + one redraw (#440).
+                tracing::debug!(
+                    flows = batch.flows.is_some(),
+                    matrix = batch.matrix.is_some(),
+                    assets = batch.assets.is_some(),
+                    "Topology batch received"
+                );
+                let ips = ip_to_node(self, entities);
+                let macs = mac_to_node(self, entities);
+                self.apply_batch(batch, &macs, &ips, now_ms);
+            }
+        }
+        Effect::None
+    }
+
     pub fn select_node(&mut self, node_id: NodeId) {
         if self.selected_node.as_ref() != Some(&node_id) {
             self.panel = PanelData::default();
@@ -1184,7 +1491,7 @@ pub fn topology_view<'a>(
             graph
         }
     } else if let Some(edge) = state.selected_edge.and_then(|i| state.edges.get(i)) {
-        let panel = panel::edge_panel(state, edge);
+        let panel = panel::edge_panel(state, entities, edge);
         row![graph, panel].spacing(10).into()
     } else {
         graph
@@ -1208,7 +1515,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .spacing(6)
         .align_y(Alignment::Center),
     )
-    .on_press(Message::CloseTopology)
+    .on_press(Message::Topology(Action::Close))
     .style(iced::widget::button::secondary);
 
     let title = text("Network Topology").size(font::TITLE);
@@ -1246,15 +1553,15 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     let zoom_label = text(format!("{}%", (state.zoom * 100.0) as i32)).size(font::CAPTION);
 
     let zoom_out_btn = button(text("-").size(font::BODY))
-        .on_press(Message::TopologyZoomOut)
+        .on_press(Message::Topology(Action::ZoomOut))
         .style(iced::widget::button::secondary);
 
     let zoom_in_btn = button(text("+").size(font::BODY))
-        .on_press(Message::TopologyZoomIn)
+        .on_press(Message::Topology(Action::ZoomIn))
         .style(iced::widget::button::secondary);
 
     let reset_btn = button(text("Reset").size(font::CAPTION))
-        .on_press(Message::TopologyZoomReset)
+        .on_press(Message::Topology(Action::ZoomReset))
         .style(iced::widget::button::secondary);
 
     // Auto-layout only governs the force simulation (#442): hidden for the
@@ -1268,7 +1575,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
             })
             .size(font::CAPTION),
         )
-        .on_press(Message::TopologyToggleAutoLayout)
+        .on_press(Message::Topology(Action::ToggleAutoLayout))
         .style(if state.auto_layout {
             iced::widget::button::primary
         } else {
@@ -1278,7 +1585,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
 
     // Search input
     let search_input = text_input("Search nodes...", &state.search_query)
-        .on_input(Message::TopologySetSearch)
+        .on_input(|q| Message::Topology(Action::SetSearch(q)))
         .padding(6)
         .width(Length::Fixed(150.0));
 
@@ -1324,24 +1631,23 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         let btn = if state.prefs.lens == lens {
             btn
         } else {
-            btn.on_press(Message::TopologySetLens(lens))
+            btn.on_press(Message::Topology(Action::SetLens(lens)))
         };
         lens_row = lens_row.push(btn);
     }
 
-    let label_picker = iced::widget::pick_list(
-        EdgeLabelMode::ALL,
-        Some(state.prefs.edge_label),
-        Message::TopologySetEdgeLabel,
-    )
-    .text_size(12)
-    .padding(4);
+    let label_picker =
+        iced::widget::pick_list(EdgeLabelMode::ALL, Some(state.prefs.edge_label), |m| {
+            Message::Topology(Action::SetEdgeLabel(m))
+        })
+        .text_size(12)
+        .padding(4);
     lens_row = lens_row
         .push(text("Edge labels:").size(font::CAPTION))
         .push(label_picker);
     lens_row = lens_row.push(
         button(text("Legend").size(font::CAPTION))
-            .on_press(Message::TopologyToggleLegend)
+            .on_press(Message::Topology(Action::ToggleLegend))
             .style(if state.show_legend {
                 iced::widget::button::primary
             } else {
@@ -1350,26 +1656,23 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     );
 
     // Grouping + filters (#392).
-    let grouping_picker = iced::widget::pick_list(
-        GroupingMode::ALL,
-        Some(state.prefs.grouping),
-        Message::TopologySetGrouping,
-    )
-    .text_size(12)
-    .padding(4);
+    let grouping_picker =
+        iced::widget::pick_list(GroupingMode::ALL, Some(state.prefs.grouping), |m| {
+            Message::Topology(Action::SetGrouping(m))
+        })
+        .text_size(12)
+        .padding(4);
     lens_row = lens_row.push(grouping_picker);
-    let layout_picker = iced::widget::pick_list(
-        LayoutMode::ALL,
-        Some(state.prefs.layout),
-        Message::TopologySetLayout,
-    )
+    let layout_picker = iced::widget::pick_list(LayoutMode::ALL, Some(state.prefs.layout), |m| {
+        Message::Topology(Action::SetLayout(m))
+    })
     .text_size(12)
     .padding(4);
     lens_row = lens_row.push(layout_picker);
     if !state.prefs.expanded_groups.is_empty() {
         lens_row = lens_row.push(
             button(text("Regroup").size(font::CAPTION))
-                .on_press(Message::TopologyRegroup)
+                .on_press(Message::Topology(Action::Regroup))
                 .style(iced::widget::button::secondary),
         );
     }
@@ -1378,21 +1681,21 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
         .push(
             iced::widget::checkbox(state.prefs.filters.hide_idle)
                 .label("Hide idle")
-                .on_toggle(|_| Message::TopologyToggleHideIdle)
+                .on_toggle(|_| Message::Topology(Action::ToggleHideIdle))
                 .size(font::BODY)
                 .text_size(12),
         )
         .push(
             iced::widget::checkbox(state.prefs.filters.hide_passive)
                 .label("Hide passive")
-                .on_toggle(|_| Message::TopologyToggleHidePassive)
+                .on_toggle(|_| Message::Topology(Action::ToggleHidePassive))
                 .size(font::BODY)
                 .text_size(12),
         )
         .push(
             iced::widget::checkbox(state.prefs.filters.hide_external)
                 .label("Hide external")
-                .on_toggle(|_| Message::TopologyToggleHideExternal)
+                .on_toggle(|_| Message::Topology(Action::ToggleHideExternal))
                 .size(font::BODY)
                 .text_size(12),
         );
@@ -1402,7 +1705,7 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
     let top_n_picker = iced::widget::pick_list(
         TopNChoice::ALL,
         Some(TopNChoice::from_value(state.prefs.filters.top_n)),
-        |choice: TopNChoice| Message::TopologySetTopN(choice.value()),
+        |choice: TopNChoice| Message::Topology(Action::SetTopN(choice.value())),
     )
     .text_size(12)
     .padding(4);
@@ -1455,13 +1758,13 @@ fn render_header(state: &TopologyState) -> Element<'_, Message> {
             let btn = if focus.hops == hops {
                 btn
             } else {
-                btn.on_press(Message::TopologySetFocusHops(hops))
+                btn.on_press(Message::Topology(Action::SetFocusHops(hops)))
             };
             focus_row = focus_row.push(btn);
         }
         focus_row = focus_row.push(
             button(text("Exit focus").size(font::DENSE))
-                .on_press(Message::TopologyExitFocus)
+                .on_press(Message::Topology(Action::ExitFocus))
                 .style(iced::widget::button::secondary),
         );
         rows = rows.push(focus_row);
@@ -2283,5 +2586,128 @@ mod tests {
         // Clearing removes the per-node list.
         state.apply_alerts(&HashMap::new());
         assert!(state.nodes["host1"].alerts.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod actions {
+    use super::*;
+
+    const NOW: i64 = 1_700_000_000_000;
+
+    fn state_with_netlink_node() -> TopologyState {
+        let mut state = TopologyState::default();
+        let mut node = Node {
+            id: "web1".to_string(),
+            label: "web1".to_string(),
+            ips: vec!["10.0.0.11".to_string()],
+            ..Default::default()
+        };
+        node.protocols.insert("netlink".to_string());
+        state.nodes.insert("web1".to_string(), node);
+        state.nodes.insert(
+            "printer".to_string(),
+            Node {
+                id: "printer".to_string(),
+                label: "printer".to_string(),
+                ..Default::default()
+            },
+        );
+        state
+    }
+
+    /// Selecting a netlink node asks for its sockets and forgets the old
+    /// selection's answer; a node without netlink asks nothing.
+    #[test]
+    fn select_node_asks_listen_sockets_and_clears_old_key() {
+        let mut state = state_with_netlink_node();
+        let entities = crate::entity::EntityStore::default();
+        state
+            .panel
+            .calls
+            .set_ready(&listen_key("old"), "", serde_json::json!([]));
+        assert_eq!(
+            state.update(Action::SelectNode("web1".into()), &entities, NOW),
+            Effect::AskListenSockets("web1".into())
+        );
+        assert!(state.panel.calls.get(&listen_key("old")).is_none());
+        assert_eq!(state.selected_node.as_deref(), Some("web1"));
+        assert_eq!(
+            state.update(Action::SelectNode("printer".into()), &entities, NOW),
+            Effect::None
+        );
+    }
+
+    /// Only a flow edge has flows behind it.
+    #[test]
+    fn select_edge_asks_flows_only_for_flow_edges() {
+        let mut state = state_with_netlink_node();
+        let entities = crate::entity::EntityStore::default();
+        state.edges.push(Edge {
+            from: "web1".into(),
+            to: "printer".into(),
+            kind: EdgeKind::Flow,
+            ..Default::default()
+        });
+        state.edges.push(Edge {
+            from: "web1".into(),
+            to: "printer".into(),
+            kind: EdgeKind::Hosts,
+            ..Default::default()
+        });
+        assert_eq!(
+            state.update(Action::SelectEdge(0), &entities, NOW),
+            Effect::AskEdgeFlows(0)
+        );
+        assert_eq!(
+            state.update(Action::SelectEdge(1), &entities, NOW),
+            Effect::None
+        );
+        assert_eq!(state.selected_edge, Some(1));
+    }
+
+    /// A presentation pref asks to be persisted; a transient one does not.
+    #[test]
+    fn prefs_persist_transients_do_not() {
+        let mut state = state_with_netlink_node();
+        let entities = crate::entity::EntityStore::default();
+        assert_eq!(
+            state.update(Action::SetLens(Lens::Security), &entities, NOW),
+            Effect::PersistPrefs
+        );
+        assert_eq!(
+            state.update(Action::ToggleHideIdle, &entities, NOW),
+            Effect::PersistPrefs
+        );
+        assert_eq!(state.update(Action::ZoomIn, &entities, NOW), Effect::None);
+        assert_eq!(
+            state.update(Action::FocusNode("web1".into()), &entities, NOW),
+            Effect::None
+        );
+        assert_eq!(state.update(Action::Close, &entities, NOW), Effect::Close);
+        assert_eq!(
+            state.update(Action::CopyText("1:abc".into()), &entities, NOW),
+            Effect::Copy("1:abc".into())
+        );
+    }
+
+    /// The listen filter keeps the node's own addresses and the wildcards.
+    #[test]
+    fn listen_rows_are_bound_to_the_node() {
+        let state = state_with_netlink_node();
+        let node = &state.nodes["web1"];
+        let sock = |local: &str| zensight_common::SocketRecord {
+            local: local.to_string(),
+            state: "listen".to_string(),
+            ..Default::default()
+        };
+        let mut rows = vec![
+            sock("10.0.0.11:22"),
+            sock("0.0.0.0:80"),
+            sock("10.0.0.99:443"),
+        ];
+        listen_rows_for_node(node, &mut rows);
+        let locals: Vec<_> = rows.iter().map(|r| r.local.as_str()).collect();
+        assert_eq!(locals, ["10.0.0.11:22", "0.0.0.0:80"]);
     }
 }

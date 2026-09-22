@@ -431,62 +431,12 @@ pub enum Message {
         hostname: Option<String>,
     },
 
-    /// One topology data-refresh reply set (#440): flows (#25) + neighbors
-    /// (#49) + matrix + assets (#391), fetched concurrently and landed as a
-    /// single message so the edge set rebuilds once per batch instead of
-    /// four times back-to-back. `None` = that queryable didn't answer.
-    TopologyBatchReceived(crate::view::topology::TopologyBatch),
-    /// Switch the topology presentation lens (#392).
-    TopologySetLens(crate::view::topology::Lens),
-    /// Switch what topology edge labels show (#392).
-    TopologySetEdgeLabel(crate::view::topology::EdgeLabelMode),
-    /// Switch the topology grouping mode (#392).
-    TopologySetGrouping(crate::view::topology::GroupingMode),
-    /// Expand a collapsed topology group (clicking its meta-node, #392).
-    TopologyExpandGroup(String),
-    /// Re-collapse all expanded topology groups (#392).
-    TopologyRegroup,
-    /// Enter topology focus mode on a node (#392).
-    TopologyFocusNode(String),
-    /// Change the topology focus radius (#392).
-    TopologySetFocusHops(u8),
-    /// Leave topology focus mode (#392).
-    TopologyExitFocus,
-    /// Toggle the topology idle-edge filter (#392).
-    TopologyToggleHideIdle,
-    /// Toggle the topology passive-node filter (#392).
-    TopologyToggleHidePassive,
-    /// Toggle the topology external-aggregate filter (#392).
-    TopologyToggleHideExternal,
-    /// Cap the number of topology flow edges shown (0 = unlimited, #392).
-    TopologySetTopN(usize),
-    /// Listen sockets fetched for the selected topology node (#393). Carries
-    /// the node id so stale replies (selection moved on) are dropped.
-    TopologyListenSocketsReceived(String, Result<Vec<zensight_common::SocketRecord>, String>),
-    /// Recent flows fetched for the selected topology edge (#393). Carries
-    /// the edge index for the same staleness guard.
-    TopologyEdgeFlowsReceived(usize, Result<Vec<zensight_common::FlowRecord>, String>),
-    /// Copy a string (community_id etc.) to the clipboard (#393).
-    TopologyCopyText(String),
-    /// Pivot from the topology to the netring flow table (#393).
-    TopologyOpenFlows,
-    /// Switch the topology layout mode (#394).
-    TopologySetLayout(crate::view::topology::LayoutMode),
-    /// Toggle a topology node's pin (#394).
-    TopologyTogglePin(String),
-    /// Apply a canvas-computed zoom-to-fit (#394).
-    TopologyFitApplied { zoom: f32, pan: (f32, f32) },
-    /// Hover moved onto (or off) a topology node (#394); emitted on change
-    /// only.
-    TopologyHover(Option<String>),
-    /// Advance the topology flow-dash animation (#394); gated subscription.
-    TopologyAnimTick,
-    /// ~30 fps layout tick (#441): advances the force simulation while it's
-    /// unstable. The subscription is gated (view open, Force mode, auto
-    /// layout, not stable) so a settled graph burns no frames.
-    TopologyLayoutFrame,
-    /// Toggle the topology lens legend (#394).
-    TopologyToggleLegend,
+    /// One topology interaction (#1306): the canvas, the toolbar, the info
+    /// panel, the animation ticks and the data batch; `TopologyState::update`
+    /// applies it and names what the app must do (`topology::Effect`). The
+    /// node's listening sockets and the edge's flows are keyed `Call`s on
+    /// `CallSurface::Topology`, no longer variants of their own.
+    Topology(crate::view::topology::Action),
     /// Download a finished triggered capture by its blob id (#327). Unlike
     /// `StartArtifact` there is no request/produce phase — the file is already
     /// registered on the sensor's `@blob/artifact` server.
@@ -1080,48 +1030,6 @@ pub enum Message {
     // Topology messages
     /// Open the topology view.
     OpenTopology,
-
-    /// Close the topology view.
-    CloseTopology,
-
-    /// Select a node in the topology.
-    TopologySelectNode(String),
-
-    /// Navigate to device detail for a topology node.
-    TopologyViewDeviceDetail(String),
-
-    /// Select an edge in the topology.
-    TopologySelectEdge(usize),
-
-    /// Clear topology selection.
-    TopologyClearSelection,
-
-    /// Start dragging a node.
-    TopologyDragNodeStart(String, f32, f32),
-
-    /// Update node position during drag.
-    TopologyDragNodeUpdate(String, f32, f32),
-
-    /// End node drag.
-    TopologyDragNodeEnd(String),
-
-    /// Update pan offset.
-    TopologyPanUpdate(f32, f32),
-
-    /// Zoom in on topology.
-    TopologyZoomIn,
-
-    /// Zoom out on topology.
-    TopologyZoomOut,
-
-    /// Reset topology zoom.
-    TopologyZoomReset,
-
-    /// Toggle auto-layout.
-    TopologyToggleAutoLayout,
-
-    /// Set topology search query.
-    TopologySetSearch(String),
 
     /// Collapse/expand the host identity details (facts + resolution group) in
     /// the merged host nav bar (#350). Persisted.

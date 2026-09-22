@@ -718,265 +718,6 @@ impl ZenSight {
         }
     }
 
-    /// #132: topology canvas interactions plus flow / neighbor edge replies.
-    ///
-    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
-    /// can fall through to the next handler.
-    fn update_topology_msg(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
-        match message {
-            Message::TopologyBatchReceived(batch) => {
-                // One reply set → one edge rebuild + one redraw (#440); the
-                // four sources used to land as separate messages, each
-                // clearing the canvas cache in turn.
-                tracing::debug!(
-                    flows = batch.flows.is_some(),
-                    matrix = batch.matrix.is_some(),
-                    assets = batch.assets.is_some(),
-                    "Topology batch received"
-                );
-                let ip_to_node = self.topology_ip_to_node();
-                let mac_to_node = self.topology_mac_to_node();
-                self.topology
-                    .apply_batch(batch, &mac_to_node, &ip_to_node, now_ms());
-            }
-
-            Message::CloseTopology => {
-                // Leaving the view: land any debounced pref changes now (#440).
-                self.flush_topology_prefs();
-                self.set_view(CurrentView::Dashboard);
-                self.save_current_view();
-            }
-
-            Message::TopologySelectNode(node_id) => {
-                // Select the node to show its info panel (don't navigate away)
-                self.topology.select_node(node_id.clone());
-                return ControlFlow::Break(self.query_topology_listen_sockets(node_id));
-            }
-
-            Message::TopologyViewDeviceDetail(node_id) => {
-                // A topology node is a *host name*. Resolve it to a device
-                // handle instead of building one (#474) — the node knows which
-                // protocol to open, not which origin published it.
-                if let Some(producer) = self.topology.node_primary_protocol(&node_id)
-                    && let Some(device_id) = self.dashboard.resolve_device(&producer, &node_id)
-                {
-                    return ControlFlow::Break(self.select_device(device_id));
-                }
-            }
-
-            Message::TopologySelectEdge(edge_index) => {
-                self.topology.select_edge(edge_index);
-                return ControlFlow::Break(self.query_topology_edge_flows(edge_index));
-            }
-
-            Message::TopologyClearSelection => {
-                self.topology.clear_selection();
-            }
-
-            Message::TopologyDragNodeStart(node_id, _x, _y) => {
-                self.topology.start_node_drag(&node_id);
-            }
-
-            Message::TopologyDragNodeUpdate(node_id, x, y) => {
-                self.topology.update_node_drag(&node_id, x, y);
-            }
-
-            Message::TopologyDragNodeEnd(_node_id) => {
-                // Node stays pinned after drag; persist the arrangement (#394).
-                self.save_topology_prefs();
-            }
-
-            Message::TopologyPanUpdate(dx, dy) => {
-                self.topology.update_pan(dx, dy);
-            }
-
-            Message::TopologyZoomIn => {
-                self.topology.zoom_in();
-            }
-
-            Message::TopologyZoomOut => {
-                self.topology.zoom_out();
-            }
-
-            Message::TopologyZoomReset => {
-                self.topology.reset_zoom();
-            }
-
-            Message::TopologyToggleAutoLayout => {
-                self.topology.toggle_auto_layout();
-            }
-
-            Message::TopologySetSearch(query) => {
-                self.topology.set_search(query);
-            }
-
-            Message::TopologySetLens(lens) => {
-                self.topology.set_lens(lens);
-                self.save_topology_prefs();
-            }
-
-            Message::TopologySetEdgeLabel(mode) => {
-                self.topology.set_edge_label(mode);
-                self.save_topology_prefs();
-            }
-
-            Message::TopologySetGrouping(mode) => {
-                self.topology.set_grouping(mode);
-                self.save_topology_prefs();
-            }
-
-            Message::TopologyExpandGroup(group_id) => {
-                self.topology.expand_group(group_id);
-            }
-
-            Message::TopologyRegroup => {
-                self.topology.regroup();
-            }
-
-            Message::TopologyFocusNode(node_id) => {
-                self.topology.focus_node(node_id);
-            }
-
-            Message::TopologySetFocusHops(hops) => {
-                self.topology.set_focus_hops(hops);
-            }
-
-            Message::TopologyExitFocus => {
-                self.topology.exit_focus();
-            }
-
-            Message::TopologyToggleHideIdle => {
-                self.topology.toggle_hide_idle();
-                self.save_topology_prefs();
-            }
-
-            Message::TopologyToggleHidePassive => {
-                self.topology.toggle_hide_passive();
-                self.save_topology_prefs();
-            }
-
-            Message::TopologyToggleHideExternal => {
-                self.topology.toggle_hide_external();
-                self.save_topology_prefs();
-            }
-
-            Message::TopologySetTopN(n) => {
-                self.topology.set_top_n(n);
-                self.save_topology_prefs();
-            }
-
-            Message::TopologyListenSocketsReceived(node_id, result) => {
-                use crate::view::specialized::fetch::Fetch;
-                // Staleness guard (#393): drop replies for a stale selection.
-                if self.topology.selected_node.as_ref() == Some(&node_id) {
-                    self.topology.panel.listen = match result {
-                        Ok(rows) => {
-                            let node_ips: std::collections::HashSet<&str> = self
-                                .topology
-                                .nodes
-                                .get(&node_id)
-                                .map(|n| n.ips.iter().map(String::as_str).collect())
-                                .unwrap_or_default();
-                            // Keep rows bound to this host's addresses, plus
-                            // wildcard listeners (0.0.0.0 / [::]) — those are
-                            // usually what you're looking for, but on a
-                            // multi-host mesh they may belong to any netlink
-                            // host; the panel says so.
-                            let filtered: Vec<_> = rows
-                                .into_iter()
-                                .filter(|s| {
-                                    let ip =
-                                        crate::view::topology::endpoint_ip(&s.local).to_string();
-                                    node_ips.contains(ip.as_str())
-                                        || ip == "0.0.0.0"
-                                        || ip == "::"
-                                        || ip == "*"
-                                })
-                                .collect();
-                            Fetch::Ready(filtered)
-                        }
-                        Err(e) => Fetch::Error(e),
-                    };
-                }
-            }
-
-            Message::TopologyEdgeFlowsReceived(edge_index, result) => {
-                use crate::view::specialized::fetch::Fetch;
-                if self.topology.selected_edge == Some(edge_index) {
-                    self.topology.panel.edge_flows = match result {
-                        Ok(flows) => {
-                            let filtered = self.filter_flows_to_edge(edge_index, flows);
-                            Fetch::Ready(filtered)
-                        }
-                        Err(e) => Fetch::Error(e),
-                    };
-                }
-            }
-
-            Message::TopologyCopyText(text) => {
-                return ControlFlow::Break(iced::clipboard::write(text));
-            }
-
-            Message::TopologySetLayout(mode) => {
-                self.topology.set_layout(mode);
-                self.save_topology_prefs();
-            }
-
-            Message::TopologyTogglePin(node_id) => {
-                self.topology.toggle_pin(&node_id);
-                self.save_topology_prefs();
-            }
-
-            Message::TopologyFitApplied { zoom, pan } => {
-                self.topology.apply_fit(zoom, pan);
-            }
-
-            Message::TopologyHover(node_id) => {
-                self.topology.set_hover(node_id);
-            }
-
-            Message::TopologyAnimTick => {
-                self.topology.advance_animation();
-            }
-
-            Message::TopologyLayoutFrame => {
-                if self.topology.tween_active() {
-                    self.topology.step_tween(now_ms());
-                } else {
-                    self.topology.run_layout_step();
-                }
-            }
-
-            Message::TopologyToggleLegend => {
-                self.topology.toggle_legend();
-            }
-
-            Message::TopologyOpenFlows => {
-                // Pivot to the netring flow table (#393): the first netring
-                // device's detail view, Flows tab.
-                let netring_device = self
-                    .dashboard
-                    .devices
-                    .keys()
-                    .find(|d| d.is(zensight_common::Protocol::Netring))
-                    .cloned();
-                if let Some(device_id) = netring_device {
-                    let task = self.select_device(device_id);
-                    if let Some(ref mut device) = self.selected_device {
-                        device.specialized_tab = crate::view::specialized::SpecializedTab::Flows;
-                    }
-                    return ControlFlow::Break(task);
-                }
-                self.toasts.push(
-                    crate::view::toast::ToastSeverity::Info,
-                    "No netring sensor available for the flow table",
-                );
-            }
-            other => return ControlFlow::Continue(other),
-        }
-        ControlFlow::Break(Task::none())
-    }
-
     /// Act on what a logs-feed action reported (#1306): the fetch gates and
     /// the paging cursor are the app's, the filter is the view's.
     fn logs_effect(&mut self, effect: crate::view::specialized::syslog::Effect) -> Task<Message> {
@@ -1021,6 +762,78 @@ impl ZenSight {
                 }
                 Task::none()
             }
+        }
+    }
+
+    /// Act on what a topology action reported (#1306): the two keyed calls,
+    /// the pivots, the clipboard and the pref flush are the app's.
+    fn topology_effect(&mut self, effect: crate::view::topology::Effect) -> Task<Message> {
+        use crate::call::{CallSurface, Request};
+        use crate::view::topology::{Effect, edge_flows_key, listen_key};
+        match effect {
+            Effect::None => Task::none(),
+            Effect::PersistPrefs => {
+                self.save_topology_prefs();
+                Task::none()
+            }
+            Effect::Close => {
+                // Leaving the view: land any debounced pref changes now (#440).
+                self.flush_topology_prefs();
+                self.set_view(CurrentView::Dashboard);
+                self.save_current_view();
+                Task::none()
+            }
+            // The mesh-wide listen-socket table for the node (#393): every
+            // netlink sensor replies, folded; the panel binds the rows to the
+            // node's addresses at decode.
+            Effect::AskListenSockets(node_id) => self.call_now(
+                Request::new("sockets", "state=listen")
+                    .of("netlink")
+                    .on(CallSurface::Topology)
+                    .keyed(listen_key(&node_id)),
+            ),
+            // Recent flows for the edge (#393), fleet-wide; the panel filters
+            // them to the edge's endpoints at decode.
+            Effect::AskEdgeFlows(index) => self.call_now(
+                Request::new("flows", "")
+                    .of("netring")
+                    .on(CallSurface::Topology)
+                    .keyed(edge_flows_key(index)),
+            ),
+            Effect::OpenDevice(node_id) => {
+                // A topology node is a *host name*. Resolve it to a device
+                // handle instead of building one (#474) — the node knows which
+                // protocol to open, not which origin published it.
+                if let Some(producer) = self.topology.node_primary_protocol(&node_id)
+                    && let Some(device_id) = self.dashboard.resolve_device(&producer, &node_id)
+                {
+                    return self.select_device(device_id);
+                }
+                Task::none()
+            }
+            Effect::OpenFlows => {
+                // Pivot to the netring flow table (#393): the first netring
+                // device's detail view, Flows tab.
+                let netring_device = self
+                    .dashboard
+                    .devices
+                    .keys()
+                    .find(|d| d.is(zensight_common::Protocol::Netring))
+                    .cloned();
+                if let Some(device_id) = netring_device {
+                    let task = self.select_device(device_id);
+                    if let Some(ref mut device) = self.selected_device {
+                        device.specialized_tab = crate::view::specialized::SpecializedTab::Flows;
+                    }
+                    return task;
+                }
+                self.toasts.push(
+                    crate::view::toast::ToastSeverity::Info,
+                    "No netring sensor available for the flow table",
+                );
+                Task::none()
+            }
+            Effect::Copy(text) => iced::clipboard::write(text),
         }
     }
 
@@ -1481,10 +1294,6 @@ impl ZenSight {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         // #132: per-domain handlers — each consumes the message and returns a
         // Task, or hands the message back (Err) for the next handler / the match.
-        let message = match self.update_topology_msg(message) {
-            ControlFlow::Break(t) => return t,
-            ControlFlow::Continue(m) => m,
-        };
         let message = match self.update_detail(message) {
             ControlFlow::Break(t) => return t,
             ControlFlow::Continue(m) => m,
@@ -1559,6 +1368,11 @@ impl ZenSight {
 
             Message::Fleet(action) => {
                 self.fleet.update(action);
+            }
+
+            Message::Topology(action) => {
+                let effect = self.topology.update(action, &self.entities, now_ms());
+                return self.topology_effect(effect);
             }
 
             Message::Security(action) => {
@@ -5543,98 +5357,6 @@ impl ZenSight {
         })))
     }
 
-    /// Fetch the mesh-wide listen-socket table for the selected topology node
-    /// (#393): every netlink sensor replies; rows are filtered to the node's
-    /// addresses (plus wildcard listeners) on receipt. Fetched on selection,
-    /// never on tick.
-    fn query_topology_listen_sockets(&mut self, node_id: String) -> Task<Message> {
-        use crate::view::specialized::fetch::Fetch;
-        use crate::view::specialized::netlink_detail::fetch_records_all;
-        // Only monitored netlink hosts can answer; skip the noise otherwise.
-        let has_netlink = self
-            .topology
-            .nodes
-            .get(&node_id)
-            .map(|n| n.protocols.contains("netlink"))
-            .unwrap_or(false);
-        if !has_netlink {
-            return Task::none();
-        }
-        let Some(session) = self.session.clone() else {
-            self.topology.panel.listen = Fetch::Error("Not connected to Zenoh".to_string());
-            return Task::none();
-        };
-        self.topology.panel.listen = Fetch::Loading;
-        let key = format!(
-            "{}?state=listen",
-            zensight_common::fleet_rpc_key("netlink", "sockets")
-        );
-        Task::future(async move {
-            let result = fetch_records_all::<zensight_common::SocketRecord>(session, key)
-                .await
-                .ok_or_else(|| "No netlink sensor responded".to_string());
-            Message::TopologyListenSocketsReceived(node_id, result)
-        })
-    }
-
-    /// Fetch recent flows for the selected topology edge (#393); filtered to
-    /// the edge's endpoints on receipt. Fetched on selection, never on tick.
-    fn query_topology_edge_flows(&mut self, edge_index: usize) -> Task<Message> {
-        use crate::view::specialized::fetch::Fetch;
-        use crate::view::specialized::netring_detail::fetch_flows;
-        // Only flow edges have flow detail behind them.
-        let is_flow = self
-            .topology
-            .edges
-            .get(edge_index)
-            .map(|e| e.kind == crate::view::topology::EdgeKind::Flow)
-            .unwrap_or(false);
-        if !is_flow {
-            return Task::none();
-        }
-        let Some(session) = self.session.clone() else {
-            self.topology.panel.edge_flows = Fetch::Error("Not connected to Zenoh".to_string());
-            return Task::none();
-        };
-        self.topology.panel.edge_flows = Fetch::Loading;
-        Task::future(async move {
-            let result = fetch_flows(session, None)
-                .await
-                .ok_or_else(|| "No netring sensor responded".to_string());
-            Message::TopologyEdgeFlowsReceived(edge_index, result)
-        })
-    }
-
-    /// Keep only the flows that run between the selected edge's endpoints
-    /// (#393). An Internet endpoint matches any unmapped public address.
-    fn filter_flows_to_edge(
-        &self,
-        edge_index: usize,
-        flows: Vec<zensight_common::FlowRecord>,
-    ) -> Vec<zensight_common::FlowRecord> {
-        use crate::view::topology::{INTERNET_NODE_ID, endpoint_ip, is_public_ip};
-        let Some(edge) = self.topology.edges.get(edge_index) else {
-            return Vec::new();
-        };
-        let ip_to_node = self.topology_ip_to_node();
-        let side = |node_id: &str, ip: &str| -> bool {
-            if node_id == INTERNET_NODE_ID {
-                is_public_ip(ip) && !ip_to_node.contains_key(ip)
-            } else {
-                ip_to_node.get(ip).map(String::as_str) == Some(node_id)
-            }
-        };
-        flows
-            .into_iter()
-            .filter(|f| {
-                let src = endpoint_ip(&f.src);
-                let dst = endpoint_ip(&f.dst);
-                (side(&edge.from, src) && side(&edge.to, dst))
-                    || (side(&edge.to, src) && side(&edge.from, dst))
-            })
-            .collect()
-    }
-
     /// The full topology data-refresh batch: flows + matrix + assets, fetched
     /// concurrently and landed as ONE
     /// `TopologyBatchReceived` so the edge set rebuilds once per batch
@@ -5645,7 +5367,7 @@ impl ZenSight {
     fn query_topology_batch(&self) -> Task<Message> {
         use crate::view::topology::TopologyBatch;
         if self.demo_mode {
-            return Task::done(Message::TopologyBatchReceived(TopologyBatch {
+            return Task::done(topology_batch(TopologyBatch {
                 matrix: Some(crate::mock::netring::matrix()),
                 assets: Some(crate::mock::netring::assets()),
                 ..Default::default()
@@ -5666,7 +5388,7 @@ impl ZenSight {
                 fetch_matrix(session.clone(), None),
                 fetch_assets(session, None),
             );
-            Message::TopologyBatchReceived(TopologyBatch {
+            topology_batch(TopologyBatch {
                 flows,
                 matrix,
                 assets,
@@ -5690,58 +5412,10 @@ impl ZenSight {
         Some(self.query_topology_batch())
     }
 
-    /// Build a map from endpoint IP to topology node id (#25/#306). A node whose
-    /// `source` is itself an IP maps directly; and each correlator entity's
-    /// identifying IPs map to that entity's node (or a member device's node),
-    /// bridging wire-level flow edges to hostname nodes.
+    /// Map from endpoint IP to topology node id (#25/#306) — see
+    /// [`crate::view::topology::ip_to_node`].
     fn topology_ip_to_node(&self) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        // Direct: a node whose id looks like an IP maps that IP to itself.
-        for node_id in self.topology.nodes.keys() {
-            map.insert(node_id.clone(), node_id.clone());
-        }
-        // Entity IPs (#306): an identifying IP resolves to the entity node when
-        // present, else to a member device's node — feeds apply_flow_edges.
-        for entity in self.entities.hosts.values() {
-            let node_id = if self.topology.nodes.contains_key(&entity.entity_id) {
-                Some(entity.entity_id.clone())
-            } else {
-                entity.members.iter().find_map(|m| {
-                    let src = &m.source;
-                    self.topology.nodes.contains_key(src).then(|| src.clone())
-                })
-            };
-            if let Some(node_id) = node_id {
-                for ip in &entity.ips {
-                    map.entry(ip.clone()).or_insert_with(|| node_id.clone());
-                }
-            }
-        }
-        map
-    }
-
-    /// Build a map from normalized MAC to topology node id (#391), mirroring
-    /// [`Self::topology_ip_to_node`] — the join key for the MAC-keyed netring
-    /// asset inventory.
-    fn topology_mac_to_node(&self) -> std::collections::HashMap<String, String> {
-        let mut map = std::collections::HashMap::new();
-        for entity in self.entities.hosts.values() {
-            let node_id = if self.topology.nodes.contains_key(&entity.entity_id) {
-                Some(entity.entity_id.clone())
-            } else {
-                entity.members.iter().find_map(|m| {
-                    let src = &m.source;
-                    self.topology.nodes.contains_key(src).then(|| src.clone())
-                })
-            };
-            if let Some(node_id) = node_id {
-                for mac in &entity.macs {
-                    map.entry(crate::entity::normalize_mac(mac))
-                        .or_insert_with(|| node_id.clone());
-                }
-            }
-        }
-        map
+        crate::view::topology::ip_to_node(&self.topology, &self.entities)
     }
 
     /// Re-derive entity-dependent view models after the [`EntityStore`] changes
@@ -7433,7 +7107,7 @@ impl ZenSight {
         if self.current_view == CurrentView::Topology && self.topology.has_animated_edges() {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(100))
-                    .map(|_| Message::TopologyAnimTick),
+                    .map(|_| Message::Topology(crate::view::topology::Action::AnimTick)),
             );
         }
         // Layout animation (#441/#442): ~30 fps while the force simulation
@@ -7448,7 +7122,7 @@ impl ZenSight {
         {
             subs.push(
                 iced::time::every(std::time::Duration::from_millis(33))
-                    .map(|_| Message::TopologyLayoutFrame),
+                    .map(|_| Message::Topology(crate::view::topology::Action::LayoutFrame)),
             );
         }
         Subscription::batch(subs)
@@ -8978,6 +8652,11 @@ fn fav_prefix(device_id: &DeviceId) -> String {
 }
 
 /// The global favorites key for `metric` on `device_id` (#27).
+/// The message a topology data-refresh lands as (#1306).
+fn topology_batch(batch: crate::view::topology::TopologyBatch) -> Message {
+    Message::Topology(crate::view::topology::Action::BatchReceived(batch))
+}
+
 fn fav_key(device_id: &DeviceId, metric: &str) -> String {
     format!("{}{}", fav_prefix(device_id), metric)
 }
@@ -9592,10 +9271,6 @@ mod update_routing_tests {
         // later stage (here, the main match) gets a chance.
         assert!(matches!(
             a.update_detail(Message::ToggleTheme),
-            ControlFlow::Continue(_)
-        ));
-        assert!(matches!(
-            a.update_topology_msg(Message::ToggleTheme),
             ControlFlow::Continue(_)
         ));
     }

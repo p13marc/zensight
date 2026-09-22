@@ -37,7 +37,7 @@ use zensight::view::overview::snmp::{EventFilterState, Filter as TrapFilter, Snm
 use zensight::view::settings::{SettingsState, settings_view};
 use zensight::view::specialized::syslog::Action as LogsAction;
 use zensight::view::specialized::{SyslogFilterState, specialized_view};
-use zensight::view::topology::{TopologyState, topology_view};
+use zensight::view::topology::{Action as TopoAction, TopologyState, topology_view};
 
 /// A `DeviceId` for an SNMP device polled by one origin (#1118). The fleet
 /// interface map is keyed on the triple now, because two pollers polling one
@@ -1549,7 +1549,11 @@ fn test_topology_back_button() {
 
     // Should have produced CloseTopology message
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(messages.iter().any(|m| matches!(m, Message::CloseTopology)));
+    assert!(
+        messages
+            .iter()
+            .any(|m| matches!(m, Message::Topology(TopoAction::Close)))
+    );
 }
 
 /// Test topology zoom buttons.
@@ -1565,7 +1569,7 @@ fn test_topology_zoom_controls() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::TopologyZoomIn))
+            .any(|m| matches!(m, Message::Topology(TopoAction::ZoomIn)))
     );
 }
 
@@ -1607,7 +1611,7 @@ fn test_topology_lens_selector() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::TopologySetLens(Lens::Security)))
+            .any(|m| matches!(m, Message::Topology(TopoAction::SetLens(Lens::Security))))
     );
 }
 
@@ -1624,7 +1628,7 @@ fn test_topology_filter_controls() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::TopologyToggleHideIdle))
+            .any(|m| matches!(m, Message::Topology(TopoAction::ToggleHideIdle)))
     );
 }
 
@@ -1651,7 +1655,7 @@ fn test_topology_focus_flow() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::TopologyFocusNode(id) if id == "web1"))
+            .any(|m| matches!(m, Message::Topology(TopoAction::FocusNode(id)) if id == "web1"))
     );
 
     // Active focus renders the breadcrumb with hop buttons + exit.
@@ -1667,14 +1671,13 @@ fn test_topology_focus_flow() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::TopologyExitFocus))
+            .any(|m| matches!(m, Message::Topology(TopoAction::ExitFocus)))
     );
 }
 
 /// The node panel shows identity, listening sockets, and pivots (#393).
 #[test]
 fn test_topology_node_panel_sections() {
-    use zensight::view::specialized::fetch::Fetch;
     use zensight::view::topology::Node;
     use zensight_common::SocketRecord;
 
@@ -1689,12 +1692,19 @@ fn test_topology_node_panel_sections() {
     node.protocols.insert("netlink".to_string());
     state.nodes.insert("web1".to_string(), node);
     state.selected_node = Some("web1".to_string());
-    state.panel.listen = Fetch::Ready(vec![SocketRecord {
-        local: "0.0.0.0:22".to_string(),
-        state: "listen".to_string(),
-        process: Some("sshd".to_string()),
-        ..Default::default()
-    }]);
+    // The panel's sockets are a keyed call on the topology surface (#1306);
+    // the rows are bound to the node's addresses at decode.
+    state.panel.calls.set_ready(
+        &zensight::view::topology::listen_key("web1"),
+        "",
+        serde_json::to_value(vec![SocketRecord {
+            local: "0.0.0.0:22".to_string(),
+            state: "listen".to_string(),
+            process: Some("sshd".to_string()),
+            ..Default::default()
+        }])
+        .unwrap(),
+    );
 
     let mut ui = simulator(topo_view(&state, AppTheme::Dark));
     assert!(ui.find("Identity").is_ok());
@@ -1708,12 +1718,13 @@ fn test_topology_node_panel_sections() {
 /// (#393).
 #[test]
 fn test_topology_edge_panel_flows() {
-    use zensight::view::specialized::fetch::Fetch;
     use zensight::view::topology::{Edge, EdgeKind, Node};
     use zensight_common::FlowRecord;
 
+    // Nodes named by their address: the edge's flows are filtered to its
+    // endpoints at decode (#1306), and an IP-named node maps to itself.
     let mut state = TopologyState::default();
-    for id in ["a", "b"] {
+    for id in ["10.0.0.1", "10.0.0.2"] {
         state.nodes.insert(
             id.to_string(),
             Node {
@@ -1724,15 +1735,15 @@ fn test_topology_edge_panel_flows() {
         );
     }
     state.edges.push(Edge {
-        from: "a".to_string(),
-        to: "b".to_string(),
+        from: "10.0.0.1".to_string(),
+        to: "10.0.0.2".to_string(),
         kind: EdgeKind::Flow,
         rate: 1000.0,
         reverse_rate: 200.0,
         ..Default::default()
     });
     state.selected_edge = Some(0);
-    state.panel.edge_flows = Fetch::Ready(vec![FlowRecord {
+    let flows = vec![FlowRecord {
         src: "10.0.0.1:1234".to_string(),
         dst: "10.0.0.2:443".to_string(),
         proto: "tcp".to_string(),
@@ -1747,7 +1758,12 @@ fn test_topology_edge_panel_flows() {
         packets_initiator: 6,
         packets_responder: 6,
         dst_names: Vec::new(),
-    }]);
+    }];
+    state.panel.calls.set_ready(
+        &zensight::view::topology::edge_flows_key(0),
+        "",
+        serde_json::to_value(flows).unwrap(),
+    );
 
     let mut ui = simulator(topo_view(&state, AppTheme::Dark));
     assert!(ui.find("Flows").is_ok());
@@ -1756,9 +1772,9 @@ fn test_topology_edge_panel_flows() {
     let _ = ui.click("copy");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::TopologyCopyText(cid) if cid == "1:abcdef"))
+        messages.iter().any(
+            |m| matches!(m, Message::Topology(TopoAction::CopyText(cid)) if cid == "1:abcdef")
+        )
     );
 }
 
@@ -1772,7 +1788,7 @@ fn test_topology_legend_toggle() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::TopologyToggleLegend))
+            .any(|m| matches!(m, Message::Topology(TopoAction::ToggleLegend)))
     );
 
     let mut state = TopologyState::default();
@@ -1821,7 +1837,7 @@ fn test_topology_lens_active_inert() {
     assert!(
         !messages
             .iter()
-            .any(|m| matches!(m, Message::TopologySetLens(_)))
+            .any(|m| matches!(m, Message::Topology(TopoAction::SetLens(_))))
     );
 
     let state = TopologyState::default();
