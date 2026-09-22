@@ -44,6 +44,72 @@ use crate::view::specialized::fetch::Fetch;
 /// in this long is reported as not answering, not left spinning.
 pub const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// Which surface a call is asked from and lands on (#1261): the selected
+/// device's view, or one of the two hand-written surfaces (design §5.6)
+/// that join a producer's call into rows of their own — the Security
+/// drill-down and the topology edge panel, whose flow↔process join asks
+/// `netlink/sockets` for a flow it got from netring.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CallSurface {
+    #[default]
+    Device,
+    Security,
+    Topology,
+}
+
+/// One read-procedure call as a view asks it (#1261): what
+/// [`Message::Call`](crate::message::Message::Call) carries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Request {
+    pub surface: CallSurface,
+    /// The producer asked. `None` is the selected device's own, on its
+    /// origin; a producer named here is asked fleet-wide, because the host
+    /// that can answer is not the one whose view is open — the socket a
+    /// netring flow belongs to lives on the endpoint's host.
+    pub producer: Option<String>,
+    pub procedure: String,
+    /// The `?`-less query string (`sort=cpu&top=50`); empty for none.
+    pub params: String,
+    /// What the answer is filed under in [`Calls`]. `None` is the
+    /// procedure: one answer per procedure at a time, which is what every
+    /// panel wants. A caller that needs two answers to one procedure with
+    /// different params — the join's two endpoints — keys them itself.
+    pub key: Option<String>,
+}
+
+impl Request {
+    /// The selected device's own procedure, keyed by its name.
+    pub fn new(procedure: impl Into<String>, params: impl Into<String>) -> Self {
+        Request {
+            surface: CallSurface::Device,
+            producer: None,
+            procedure: procedure.into(),
+            params: params.into(),
+            key: None,
+        }
+    }
+
+    pub fn on(mut self, surface: CallSurface) -> Self {
+        self.surface = surface;
+        self
+    }
+
+    pub fn of(mut self, producer: impl Into<String>) -> Self {
+        self.producer = Some(producer.into());
+        self
+    }
+
+    pub fn keyed(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
+    }
+
+    /// What the answer is filed under.
+    pub fn key(&self) -> &str {
+        self.key.as_deref().unwrap_or(&self.procedure)
+    }
+}
+
 /// One answered read procedure: the reply as the producer sent it, and what
 /// the envelope said about it when the reply was one.
 pub struct Reply {
@@ -219,17 +285,20 @@ impl<'a, T> Answer<'a, T> {
     }
 }
 
-/// One procedure's call state on a device: the params of the last call and
-/// where it stands.
+/// One call's state: the procedure and the params of the last call under
+/// its key, and where it stands.
 #[derive(Debug, Clone, Default)]
 pub struct CallState {
+    /// The procedure asked — the key itself, unless the caller keyed it.
+    pub procedure: String,
     /// The `?`-less query string of the call in flight or answered
     /// (`sort=cpu&top=50`); empty for a call without parameters.
     pub params: String,
     pub fetch: Fetch<Reply>,
 }
 
-/// The calls a device view has made, by procedure path.
+/// The calls a surface has made, by key — the procedure path unless the
+/// caller chose one (see [`Request::key`]).
 #[derive(Debug, Clone, Default)]
 pub struct Calls {
     calls: BTreeMap<String, CallState>,
@@ -297,12 +366,19 @@ impl Calls {
         }
     }
 
-    /// Mark a call in flight. Replaces whatever the procedure held, so the
-    /// view shows "fetching" and not the old answer under a new sort.
+    /// Mark a call in flight under its procedure. Replaces whatever the
+    /// procedure held, so the view shows "fetching" and not the old answer
+    /// under a new sort.
     pub fn loading(&mut self, procedure: &str, params: &str) {
+        self.loading_as(procedure, procedure, params);
+    }
+
+    /// Mark a call in flight under a caller-chosen key.
+    pub fn loading_as(&mut self, key: &str, procedure: &str, params: &str) {
         self.calls.insert(
-            procedure.to_string(),
+            key.to_string(),
             CallState {
+                procedure: procedure.to_string(),
                 params: params.to_string(),
                 fetch: Fetch::Loading,
             },
@@ -328,6 +404,7 @@ impl Calls {
         self.calls.insert(
             procedure.to_string(),
             CallState {
+                procedure: procedure.to_string(),
                 params: params.to_string(),
                 fetch: Fetch::Ready(Reply::new(value, 0)),
             },
@@ -339,6 +416,7 @@ impl Calls {
         self.calls.insert(
             procedure.to_string(),
             CallState {
+                procedure: procedure.to_string(),
                 params: String::new(),
                 fetch: Fetch::Error(error.to_string()),
             },
@@ -911,5 +989,32 @@ mod tests {
         assert_eq!(calls.fetch("latency").error(), Some("no sysinfo sensor"));
         calls.clear("latency");
         assert!(matches!(calls.fetch("latency"), Fetch::Idle));
+    }
+
+    /// Two answers to one procedure coexist under caller-chosen keys
+    /// (#1261): the join's two endpoints, each with its own params, land
+    /// beside each other instead of the second replacing the first.
+    #[test]
+    fn a_keyed_call_coexists_with_another_to_the_same_procedure() {
+        let mut calls = Calls::default();
+        calls.loading_as("attribution:a → b#a", "sockets", "ip=10.0.0.5");
+        calls.loading_as("attribution:a → b#b", "sockets", "ip=1.1.1.1");
+        assert!(calls.apply(
+            "attribution:a → b#a",
+            "ip=10.0.0.5",
+            Ok(Reply::new(json!([]), 0))
+        ));
+        assert!(calls.is_loading("attribution:a → b#b"));
+        assert!(calls.reply("attribution:a → b#a").is_some());
+        assert_eq!(
+            calls.get("attribution:a → b#a").unwrap().procedure,
+            "sockets"
+        );
+        // The default key is the procedure, as before.
+        calls.loading("flows", "top=50");
+        assert_eq!(calls.get("flows").unwrap().procedure, "flows");
+        let request = Request::new("sockets", "ip=1.1.1.1").keyed("attribution:a → b#b");
+        assert_eq!(request.key(), "attribution:a → b#b");
+        assert_eq!(Request::new("flows", "").key(), "flows");
     }
 }

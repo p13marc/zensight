@@ -254,6 +254,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The flow↔process join is two calls through the generic call path, not a
+  slot per surface** (#1261). A `call::Request` names, when a view needs
+  them, the surface a call lands on (`CallSurface::{Device, Security,
+  Topology}`), the producer it asks (another producer is asked fleet-wide)
+  and the key its answer is filed under (`Calls::loading_as`), so two answers
+  to one procedure coexist. "who?" on a netring flow — the device's flows
+  table, the Security pivot rows, the topology edge panel — sends
+  `netlink/sockets?ip=` per endpoint as one `Message::Batch` of `Call`s and
+  each row's cell reads the join back at render time
+  (`specialized::attribution::{ask, lookup}`); several rows can be attributed
+  at once where the last press used to replace the previous answer.
+  `NetringDetailState`, `Message::FetchFlowAttribution`,
+  `FlowAttributionReceived` and `AttributionTarget` are deleted; `Message`
+  gains `Batch(Vec<Message>)`.
+
 - **snmp's trap/event ring is the intake's ring** (#1261). The last typed
   events arm is gone: `<device>/trap/<ulid>` arrives as a `Message::Event`
   like any other producer's record, the intake's ring lives on the dashboard

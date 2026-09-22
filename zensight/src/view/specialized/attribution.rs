@@ -12,6 +12,126 @@ use std::net::SocketAddr;
 
 use zensight_common::SocketRecord;
 
+use crate::call::{CallSurface, Calls, Request};
+use crate::message::Message;
+use crate::view::specialized::fetch::Fetch;
+
+/// The netlink read procedure the join asks (#304): `@rpc/netlink/sockets`.
+pub const PROCEDURE: &str = "sockets";
+
+/// What a flow endpoint's call is filed under in a surface's [`Calls`]
+/// (#1261): the flow, then the endpoint — two answers to one procedure.
+pub fn call_key(flow_key: &str, endpoint: &str) -> String {
+    format!("attribution:{flow_key}#{endpoint}")
+}
+
+/// The IP of an `ip:port` endpoint (`[::1]:22` included), or the endpoint
+/// itself when it is not one.
+pub fn endpoint_ip(endpoint: &str) -> String {
+    if let Ok(sa) = endpoint.parse::<SocketAddr>() {
+        return sa.ip().to_string();
+    }
+    if let Ok(ip) = endpoint.parse::<std::net::IpAddr>() {
+        return ip.to_string();
+    }
+    match endpoint.rsplit_once(':') {
+        Some((host, _port)) => host.trim_matches(['[', ']']).to_string(),
+        None => endpoint.to_string(),
+    }
+}
+
+/// The endpoints a flow's join asks about: both, or one when they share an
+/// IP (a flow between two ports of one host).
+fn endpoints<'a>(src: &'a str, dst: &'a str) -> Vec<&'a str> {
+    if endpoint_ip(src) == endpoint_ip(dst) {
+        vec![src]
+    } else {
+        vec![src, dst]
+    }
+}
+
+/// The message a "who?" press sends (#309, #1261): one `netlink/sockets`
+/// call per endpoint IP, fleet-wide — only the host that owns an endpoint
+/// can hold a matching socket, so the tuple match is itself
+/// host-discriminating — each filed under its [`call_key`] on `surface`.
+pub fn ask(surface: CallSurface, src: &str, dst: &str) -> Message {
+    let flow = flow_key(src, dst);
+    let calls: Vec<Message> = endpoints(src, dst)
+        .into_iter()
+        .map(|endpoint| {
+            Message::Call(
+                Request::new(PROCEDURE, format!("ip={}", endpoint_ip(endpoint)))
+                    .of("netlink")
+                    .on(surface)
+                    .keyed(call_key(&flow, endpoint)),
+            )
+        })
+        .collect();
+    match calls.len() {
+        1 => calls.into_iter().next().expect("one"),
+        _ => Message::Batch(calls),
+    }
+}
+
+/// Where a flow's join stands, read from the surface's [`Calls`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum Attribution {
+    /// Nobody pressed "who?" for this flow.
+    NotAsked,
+    /// At least one endpoint's call is in flight.
+    Looking,
+    /// No endpoint's call answered — no netlink sensor replied at all.
+    Unavailable(String),
+    /// Every endpoint that answered was matched: the owning process, or
+    /// none when no socket matched.
+    Ready(Option<AttributedProcess>),
+}
+
+/// Reduce a flow's endpoint calls to one outcome (#1261): the join runs at
+/// render time over the replies, each decoded as `Vec<SocketRecord>` once.
+pub fn lookup(calls: &Calls, src: &str, dst: &str) -> Attribution {
+    let flow = flow_key(src, dst);
+    let states: Vec<&Fetch<crate::call::Reply>> = endpoints(src, dst)
+        .into_iter()
+        .map(|endpoint| calls.fetch(&call_key(&flow, endpoint)))
+        .collect();
+    if states.iter().all(|f| matches!(f, Fetch::Idle)) {
+        return Attribution::NotAsked;
+    }
+    if states.iter().any(|f| f.is_loading()) {
+        return Attribution::Looking;
+    }
+    let mut first_error = None;
+    let mut answered = false;
+    let mut matched = None;
+    for state in states {
+        match state {
+            Fetch::Ready(reply) => match reply.decoded::<Vec<SocketRecord>>() {
+                Ok(sockets) => {
+                    answered = true;
+                    if matched.is_none() {
+                        matched = match_flow_socket(sockets, src, dst);
+                    }
+                }
+                Err(e) => {
+                    first_error.get_or_insert(e);
+                }
+            },
+            Fetch::Error(e) => {
+                first_error.get_or_insert(e.clone());
+            }
+            Fetch::Idle | Fetch::Loading => {}
+        }
+    }
+    if answered {
+        Attribution::Ready(matched)
+    } else {
+        Attribution::Unavailable(
+            first_error.unwrap_or_else(|| "no netlink sensor responded".to_string()),
+        )
+    }
+}
+
 /// Where a flow's process attribution came from — labelled in the UI so an
 /// analyst can weigh it ("live socket" is a now-snapshot; a completed
 /// connection would be event-time).
@@ -153,5 +273,74 @@ mod tests {
         let a = match_flow_socket(&sockets, "10.0.0.5:44444", "1.1.1.1:443").unwrap();
         assert_eq!(a.pid, None);
         assert_eq!(a.display(), "unknown process · uid 1000 · live socket");
+    }
+
+    /// The join over the surface's calls (#1261): not asked, looking while
+    /// either endpoint's call is in flight, unavailable when nobody answered,
+    /// and matched from whichever endpoint's host held the socket.
+    #[test]
+    fn lookup_reduces_the_endpoint_calls() {
+        let (src, dst) = ("10.0.0.5:44444", "1.1.1.1:443");
+        let flow = flow_key(src, dst);
+        let mut calls = Calls::default();
+        assert_eq!(lookup(&calls, src, dst), Attribution::NotAsked);
+
+        calls.loading_as(&call_key(&flow, src), PROCEDURE, "ip=10.0.0.5");
+        assert_eq!(lookup(&calls, src, dst), Attribution::Looking);
+        calls.loading_as(&call_key(&flow, dst), PROCEDURE, "ip=1.1.1.1");
+        assert_eq!(lookup(&calls, src, dst), Attribution::Looking);
+
+        // Neither host answered: unavailable, in the first failure's words.
+        calls.set_failed(&call_key(&flow, src), "no netlink sensor responded");
+        calls.set_failed(&call_key(&flow, dst), "no netlink sensor responded");
+        assert_eq!(
+            lookup(&calls, src, dst),
+            Attribution::Unavailable("no netlink sensor responded".into())
+        );
+
+        // One host answered with the socket, the other with nothing.
+        calls.set_ready(
+            &call_key(&flow, src),
+            "ip=10.0.0.5",
+            serde_json::to_value(vec![sock(src, dst, Some(4242), Some("curl"))]).unwrap(),
+        );
+        calls.set_ready(&call_key(&flow, dst), "ip=1.1.1.1", serde_json::json!([]));
+        match lookup(&calls, src, dst) {
+            Attribution::Ready(Some(a)) => {
+                assert_eq!(a.pid, Some(4242));
+                assert_eq!(a.endpoint, src);
+            }
+            other => panic!("expected a match, got {other:?}"),
+        }
+        // One answered, one failed: still an answer — absence on one host is
+        // not evidence, and the socket lives on exactly one of them.
+        calls.set_failed(&call_key(&flow, dst), "timed out");
+        assert!(matches!(
+            lookup(&calls, src, dst),
+            Attribution::Ready(Some(_))
+        ));
+    }
+
+    /// A flow between two ports of one host asks once, not twice.
+    #[test]
+    fn ask_sends_one_call_per_distinct_endpoint_ip() {
+        match ask(CallSurface::Security, "10.0.0.5:1", "10.0.0.5:2") {
+            Message::Call(r) => {
+                assert_eq!(r.params, "ip=10.0.0.5");
+                assert_eq!(r.producer.as_deref(), Some("netlink"));
+                assert_eq!(r.surface, CallSurface::Security);
+                assert_eq!(
+                    r.key(),
+                    call_key(&flow_key("10.0.0.5:1", "10.0.0.5:2"), "10.0.0.5:1")
+                );
+            }
+            other => panic!("expected one call, got {other:?}"),
+        }
+        match ask(CallSurface::Topology, "10.0.0.5:1", "[::1]:2") {
+            Message::Batch(calls) => assert_eq!(calls.len(), 2),
+            other => panic!("expected two calls, got {other:?}"),
+        }
+        assert_eq!(endpoint_ip("[::1]:22"), "::1");
+        assert_eq!(endpoint_ip("10.0.0.5"), "10.0.0.5");
     }
 }

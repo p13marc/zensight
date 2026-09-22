@@ -436,10 +436,9 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
                     text("Stream catalogue not loaded.")
                         .size(font::CAPTION)
                         .style(muted),
-                    button(text("Load streams").size(font::CAPTION)).on_press(Message::Call {
-                        procedure: "streams".to_string(),
-                        params: String::new(),
-                    }),
+                    button(text("Load streams").size(font::CAPTION)).on_press(Message::Call(
+                        crate::call::Request::new("streams", String::new())
+                    )),
                 ]
                 .spacing(space::SM)
                 .align_y(iced::Alignment::Center),
@@ -460,10 +459,9 @@ pub fn parallax_view(state: &DeviceDetailState) -> Element<'_, Message> {
                         .style(|t: &Theme| text::Style {
                             color: Some(theme::colors(t).danger_text()),
                         }),
-                    button(text("Retry").size(font::CAPTION)).on_press(Message::Call {
-                        procedure: "streams".to_string(),
-                        params: String::new(),
-                    }),
+                    button(text("Retry").size(font::CAPTION)).on_press(Message::Call(
+                        crate::call::Request::new("streams", String::new())
+                    )),
                 ]
                 .spacing(space::SM)
                 .align_y(iced::Alignment::Center),

@@ -1270,10 +1270,10 @@ fn render_process_explorer(state: &DeviceDetailState) -> Element<'_, Message> {
         let label = format!("By {}", sort.label());
         let mut b = button(text(label).size(font::DENSE)).padding([4, 10]);
         if !loading {
-            b = b.on_press(Message::Call {
-                procedure: "processes".into(),
-                params: sort.params(),
-            });
+            b = b.on_press(Message::Call(crate::call::Request::new(
+                "processes",
+                sort.params(),
+            )));
         }
         if active {
             b = b.style(iced::widget::button::primary);
@@ -1568,10 +1568,10 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
             .push(
                 button(text("Fetch latency histograms").size(font::CAPTION))
                     .padding([4, 10])
-                    .on_press(Message::Call {
-                        procedure: "latency".into(),
-                        params: String::new(),
-                    }),
+                    .on_press(Message::Call(crate::call::Request::new(
+                        "latency",
+                        String::new(),
+                    ))),
             )
             .into();
     };
@@ -1638,10 +1638,10 @@ fn render_latency_section(state: &DeviceDetailState) -> Element<'_, Message> {
     col.push(
         button(text("Refresh").size(font::CAPTION))
             .padding([4, 10])
-            .on_press(Message::Call {
-                procedure: "latency".into(),
-                params: String::new(),
-            }),
+            .on_press(Message::Call(crate::call::Request::new(
+                "latency",
+                String::new(),
+            ))),
     )
     .into()
 }

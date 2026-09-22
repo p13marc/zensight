@@ -653,10 +653,10 @@ fn unit_file_section<'a>(state: &'a DeviceDetailState, unit: &'a str) -> Element
         Answer::Idle => button(text("View unit file").size(font::CAPTION))
             .padding([2, 8])
             .style(iced::widget::button::secondary)
-            .on_press(Message::Call {
-                procedure: "unit/file".to_string(),
-                params: format!("name={unit}"),
-            })
+            .on_press(Message::Call(crate::call::Request::new(
+                "unit/file",
+                format!("name={unit}"),
+            )))
             .into(),
         Answer::Loading => text("Reading unit file…")
             .size(font::CAPTION)

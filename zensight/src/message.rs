@@ -605,24 +605,28 @@ pub enum Message {
         root: Option<zenkey::ContentHash>,
         filename: String,
     },
-    /// Call a read procedure of the selected device's producer (#1261,
-    /// design §5.5): `@rpc/<producer>/<procedure>?<params>` on the device's
-    /// origin. The one message every on-demand panel asks with; the answer
-    /// lands as [`Message::Reply`] in the device's [`crate::call::Calls`].
-    Call {
-        procedure: String,
-        /// The `?`-less query string (`sort=cpu&top=50`); empty for none.
-        params: String,
-    },
-    /// A read procedure answered (or did not). Carries the device and the
-    /// params it answers, so a reply to a superseded call — or to a device
-    /// no longer selected — is dropped, not shown.
+    /// Call a read procedure (#1261, design §5.5):
+    /// `@rpc/<producer>/<procedure>?<params>` on the selected device's
+    /// origin, or fleet-wide when the request names another producer. The
+    /// one message every on-demand panel asks with; the answer lands as
+    /// [`Message::Reply`] in the surface's [`crate::call::Calls`].
+    Call(crate::call::Request),
+    /// A read procedure answered (or did not). Carries the surface, the
+    /// device and the params it answers, so a reply to a superseded call —
+    /// or to a device no longer selected — is dropped, not shown.
     Reply {
-        device: DeviceId,
+        surface: crate::call::CallSurface,
+        /// The device that asked, on the device surface.
+        device: Option<DeviceId>,
+        /// What the answer is filed under — see [`crate::call::Request::key`].
+        key: String,
         procedure: String,
         params: String,
         result: Result<crate::call::Reply, String>,
     },
+    /// Several messages from one press (#1261): a join that asks two calls
+    /// at once. Folded in order, each as if sent alone.
+    Batch(Vec<Message>),
     /// Sort a device view's on-demand table by column index (#1261). The
     /// table is named by the view (`flows`), the state lives in
     /// `DeviceDetailState::tables`.
@@ -837,23 +841,6 @@ pub enum Message {
     },
     /// A flow-pivot reply for anomaly `key`: the filtered flows, or an error.
     AnomalyFlowsReceived(String, Result<Vec<zensight_common::FlowRecord>, String>),
-    /// Flow ↔ process display join (#309): fetch the endpoint hosts' sockets
-    /// (`@rpc/netlink/sockets?ip=`, all replies) and match the flow's 5-tuple to its
-    /// owning process. `key` identifies the flow row the result renders under.
-    FetchFlowAttribution {
-        target: AttributionTarget,
-        key: String,
-        src: String,
-        dst: String,
-    },
-    /// The flow↔process join outcome for flow `key` (#309): the matched owning
-    /// process, `Ok(None)` when no socket matched (unattributed), or `Err` when
-    /// no netlink sensor replied at all.
-    FlowAttributionReceived {
-        target: AttributionTarget,
-        key: String,
-        result: Result<Option<crate::view::specialized::attribution::AttributedProcess>, String>,
-    },
     /// The capture-to-disk index fetched for the Security drill-down (#327), so
     /// an expanded anomaly can offer its matching triggered capture.
     AnomalyCapturesReceived(Result<Vec<zensight_common::CaptureRecord>, String>),
@@ -1518,16 +1505,6 @@ pub struct SyslogFilterStatus {
     pub messages_received: u64,
     pub messages_passed: u64,
     pub messages_filtered: u64,
-}
-
-/// Which surface a flow↔process attribution result renders on (#309): the
-/// netring device Flows tab, or the Security anomaly pivot-flows table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AttributionTarget {
-    Device,
-    Security,
-    /// The topology edge panel (#393).
-    Topology,
 }
 
 /// One reconnect's view of the catalog's three operator-authored classes

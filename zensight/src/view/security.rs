@@ -41,12 +41,9 @@ pub struct SecurityState {
     /// expanded, so a triggered capture matching the anomaly can offer its
     /// evidence file for download right in the drill-down.
     pub captures: Fetch<Vec<zensight_common::CaptureRecord>>,
-    /// The flow↔process join result for one pivot-flow row (#309): `(flow key,
-    /// fetched attribution)`. One in-flight join at a time.
-    pub attribution: Option<(
-        String,
-        Fetch<Option<crate::view::specialized::attribution::AttributedProcess>>,
-    )>,
+    /// The calls this surface has made (#1261): the flow↔process joins of
+    /// the pivot-flow rows, `netlink/sockets` per endpoint, keyed by flow.
+    pub calls: crate::call::Calls,
 }
 
 /// Find a triggered capture matching this anomaly (#327): same detector slug,
@@ -575,21 +572,15 @@ fn render_pivot_flows<'a>(
             text("community_id")
                 .size(font::MICRO)
                 .width(Length::Fixed(260.0)),
-            text("process").size(font::MICRO).width(Length::Fixed(60.0)),
+            text("process")
+                .size(font::MICRO)
+                .width(Length::Fixed(220.0)),
         ]
         .spacing(8),
     );
     for f in records.iter().take(100) {
         // Flow ↔ process join (#309): "this beacon is curl run by uid 1000".
-        let who = button(text("who?").size(font::DENSE))
-            .padding([1, 6])
-            .style(iced::widget::button::text)
-            .on_press(Message::FetchFlowAttribution {
-                target: crate::message::AttributionTarget::Security,
-                key: crate::view::specialized::attribution::flow_key(&f.src, &f.dst),
-                src: f.src.clone(),
-                dst: f.dst.clone(),
-            });
+        let who = attribution_cell(&sec.calls, &f.src, &f.dst);
         list = list.push(
             row![
                 text(f.src.clone())
@@ -613,39 +604,47 @@ fn render_pivot_flows<'a>(
             .align_y(Alignment::Center),
         );
     }
-    let mut colm = column![
+    let colm = column![
         text(format!("{} flows for source", records.len()))
             .size(font::CAPTION)
             .style(dim),
         list,
     ]
     .spacing(2);
-    // The last-asked row's attribution outcome, labelled with its source.
-    if let Some((key, fetch)) = &sec.attribution {
-        let line: Element<'a, Message> = match fetch {
-            Fetch::Idle | Fetch::Loading => text(format!("{key}: looking up owning process…"))
-                .size(font::DENSE)
-                .style(dim)
-                .into(),
-            Fetch::Error(e) => text(format!("{key}: unattributed ({e})"))
-                .size(font::DENSE)
-                .style(dim)
-                .into(),
-            Fetch::Ready(Some(a)) => {
-                text(format!("{key}: {} — endpoint {}", a.display(), a.endpoint))
-                    .size(font::DENSE)
-                    .into()
-            }
-            Fetch::Ready(None) => text(format!(
-                "{key}: unattributed (no matching socket on any netlink host)"
+    colm.into()
+}
+
+/// The flow↔process join cell of one pivot-flow row (#309, #1261): "who?"
+/// until asked, then where the join stands, read from this surface's calls.
+fn attribution_cell<'a>(calls: &crate::call::Calls, src: &str, dst: &str) -> Element<'a, Message> {
+    use crate::view::specialized::attribution::{self, Attribution};
+    let cell: Element<'a, Message> = match attribution::lookup(calls, src, dst) {
+        Attribution::NotAsked => button(text("who?").size(font::DENSE))
+            .padding([1, 6])
+            .style(iced::widget::button::text)
+            .on_press(attribution::ask(
+                crate::call::CallSurface::Security,
+                src,
+                dst,
             ))
+            .into(),
+        Attribution::Looking => text("looking up owning process…")
             .size(font::DENSE)
             .style(dim)
             .into(),
-        };
-        colm = colm.push(line);
-    }
-    colm.into()
+        Attribution::Unavailable(e) => text(format!("unattributed ({e})"))
+            .size(font::DENSE)
+            .style(dim)
+            .into(),
+        Attribution::Ready(Some(a)) => text(format!("{} — endpoint {}", a.display(), a.endpoint))
+            .size(font::DENSE)
+            .into(),
+        Attribution::Ready(None) => text("unattributed (no matching socket on any netlink host)")
+            .size(font::DENSE)
+            .style(dim)
+            .into(),
+    };
+    container(cell).width(Length::Fixed(220.0)).into()
 }
 
 fn evidence_line<'a>(k: &str, v: &str) -> Element<'a, Message> {

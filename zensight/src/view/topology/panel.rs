@@ -11,11 +11,12 @@ use iced::{Alignment, Element, Length};
 use iced_anim::widget::button;
 
 use super::{Edge, EdgeKind, Node, NodeHealth, Provenance, TopologyState, format_rate};
+use crate::call::CallSurface;
 use crate::entity::EntityStore;
-use crate::message::{AttributionTarget, Message};
+use crate::message::Message;
 use crate::view::components::Sparkline;
 use crate::view::icons::{self, IconSize};
-use crate::view::specialized::attribution;
+use crate::view::specialized::attribution::{self, Attribution};
 use crate::view::specialized::fetch::Fetch;
 use crate::view::tokens::font;
 use crate::view::topology::graph::format_bytes;
@@ -368,8 +369,7 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
             Fetch::Ready(flows) => {
                 let total = flows.len();
                 for flow in flows.iter().take(SECTION_ROWS) {
-                    let key = attribution::flow_key(&flow.src, &flow.dst);
-                    let attributed = state.panel.attribution.as_ref().filter(|(k, _)| *k == key);
+                    let attributed = attribution::lookup(&state.panel.calls, &flow.src, &flow.dst);
                     let flow_line = format!(
                         "{} → {} · {} {}",
                         flow.src,
@@ -377,35 +377,34 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
                         format_bytes(flow.bytes),
                         flow.proto
                     );
-                    match attributed.map(|(_, fetch)| fetch) {
+                    match attributed {
                         // Attributed: show the owning process inline.
-                        Some(Fetch::Ready(Some(process))) => {
+                        Attribution::Ready(Some(process)) => {
                             items = items.push(note(flow_line));
                             items = items.push(note(format!("   ⚙ {}", process.display())));
                         }
-                        Some(Fetch::Ready(None)) => {
+                        Attribution::Ready(None) => {
                             items = items.push(note(flow_line));
                             items = items.push(note("   ⚙ no owning process found".to_string()));
                         }
-                        Some(Fetch::Loading) => {
+                        Attribution::Looking => {
                             items = items.push(note(flow_line));
                             items = items.push(note("   ⚙ attributing…".to_string()));
                         }
-                        Some(Fetch::Error(e)) => {
+                        Attribution::Unavailable(e) => {
                             items = items.push(note(flow_line));
                             items = items.push(note(format!("   ⚙ {e}")));
                         }
-                        _ => {
+                        Attribution::NotAsked => {
                             items = items.push(
                                 row![
                                     text(flow_line).size(font::MICRO),
                                     button(text("attr").size(font::MICRO))
-                                        .on_press(Message::FetchFlowAttribution {
-                                            target: AttributionTarget::Topology,
-                                            key,
-                                            src: flow.src.clone(),
-                                            dst: flow.dst.clone(),
-                                        })
+                                        .on_press(attribution::ask(
+                                            CallSurface::Topology,
+                                            &flow.src,
+                                            &flow.dst,
+                                        ))
                                         .style(iced::widget::button::secondary)
                                 ]
                                 .spacing(6)

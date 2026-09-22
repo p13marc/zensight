@@ -105,8 +105,6 @@ pub struct DeviceDetailState {
     pub merge_target: String,
     /// Timestamp when pending filter was last updated.
     pub pending_filter_time: i64,
-    /// On-demand netring flow detail, fetched lazily from `@rpc/netring/flows`.
-    pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
     /// Parallax stream catalogue + live preview tiles, fetched/opened on
     /// demand from the sensor's stream-control channels (#408).
     pub parallax_detail: crate::view::specialized::parallax_detail::ParallaxDetailState,
@@ -205,7 +203,6 @@ impl DeviceDetailState {
             pending_filter: String::new(),
             merge_target: String::new(),
             pending_filter_time: 0,
-            netring_detail: Default::default(),
             parallax_detail: Default::default(),
             calls: Default::default(),
             tables: Default::default(),
@@ -1302,10 +1299,10 @@ fn render_procedures(state: &DeviceDetailState) -> Option<Element<'_, Message>> 
             ])
             .style(iced::widget::button::secondary);
         if !fetch.is_loading() {
-            call = call.on_press(Message::Call {
-                procedure: procedure.path.clone(),
-                params: String::new(),
-            });
+            call = call.on_press(Message::Call(crate::call::Request::new(
+                procedure.path.clone(),
+                String::new(),
+            )));
         }
         head = head.push(call);
         let mut body = column![head].spacing(crate::view::tokens::space::XS);
@@ -2747,7 +2744,7 @@ mod tests {
         assert!(
             msgs.iter().any(|m| matches!(
                 m,
-                Message::Call { procedure, params } if procedure == "processes" && params.is_empty()
+                Message::Call(r) if r.procedure == "processes" && r.params.is_empty()
             )),
             "the first card's button calls its procedure with no params"
         );

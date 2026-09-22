@@ -294,13 +294,27 @@ A tab's prefetch is a list the view owns (`netlink::tab_procedures(tab)`) and
 `app::prefetch_calls` asks for each once — an answered, failed or in-flight
 procedure is not asked again.
 
-A parameterised call keys its answer by procedure, so one answer per
-procedure at a time: the unit drill-down's `unit?name=<u>` and
+A call is a `call::Request`: the procedure and its params, and — when a
+view needs them — the surface it lands on, the producer it asks and the key
+it is filed under. By default a call keys its answer by procedure, so one
+answer per procedure at a time: the unit drill-down's `unit?name=<u>` and
 `unit/file?name=<u>` replace each other as the selection moves, which is
-what the old single `Fetch` slot did. `ForgetCall { procedure }` clears one
-(the unit file's "Hide"). The app's own calls — a pivot, a refresh after an
-action — go through `app::call_now`, which marks the call in flight the way
-the `Call` arm does.
+what the old single `Fetch` slot did. A caller that needs two answers to one
+procedure keys them itself (`Request::keyed`): the flow↔process join asks
+`netlink/sockets?ip=<a>` and `?ip=<b>` for one flow and files each under
+`attribution:<flow>#<endpoint>` (`specialized::attribution::ask`, one
+`Message::Batch` of two `Call`s from one press), and reads them back at
+render time (`attribution::lookup`), so the join is a reduction over two
+replies and not a state slot of its own. A request that names another
+producer (`Request::of`) is asked fleet-wide — the host that can answer a
+netring flow's socket is the endpoint's, not the one whose view is open —
+and lands on the surface it named (`CallSurface::{Device, Security,
+Topology}`): the two hand-written surfaces (design §5.6) hold a `Calls` of
+their own (`SecurityState::calls`, `PanelData::calls`), and a reply is
+routed by surface, then by device. `ForgetCall { procedure }` clears one
+key (the unit file's "Hide"). The app's own calls — a pivot, a refresh after
+an action — go through `app::call_now`, which marks the call in flight the
+way the `Call` arm does.
 
 **Retired so far**: sysinfo (`processes`, `latency`; `SysinfoDetailState`,
 `ProcessSort` now lives in `specialized/sysinfo.rs` and round-trips through
@@ -402,9 +416,17 @@ per-device seed by source alone was not). A retired device's events go with
 it (`forget_events`). The cold store keeps the row with its key
 (`zensight_store::StoredEvent`: origin, producer, subject, value) so a boot
 backfill (`Message::EventHistory`) puts each record back on the device that
-published it. What remains per producer on the device state is netring's
-flow↔process join slot, parallax's tiles and controllers, and snmp's
-projected rows and records.
+published it.
+
+**The flow↔process join is two calls, not a slot** (#1261). netring's
+`NetringDetailState` held one thing: the last-asked flow's attribution. It
+is gone, and so are `FetchFlowAttribution`/`FlowAttributionReceived` and
+`AttributionTarget`: every "who?" — the device's flows table, the Security
+pivot rows, the topology edge panel — sends the same `attribution::ask`,
+and each row's cell reads its own answer, so several rows may be attributed
+at once where one replaced the next before. What remains per producer on
+the device state is parallax's tiles and controllers, and snmp's projected
+rows and records.
 
 ## Routing: `CurrentView`
 

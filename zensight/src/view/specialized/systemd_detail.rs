@@ -59,10 +59,7 @@ impl SystemdDetailTopic {
 
     /// The call for this topic on the selected device (#1261).
     pub fn call(&self) -> Message {
-        Message::Call {
-            procedure: self.procedure().to_string(),
-            params: String::new(),
-        }
+        Message::Call(crate::call::Request::new(self.procedure(), String::new()))
     }
 
     pub fn label(&self) -> &'static str {
@@ -288,7 +285,7 @@ mod tests {
             assert_eq!(topic.procedure(), procedure);
             assert!(matches!(
                 topic.call(),
-                Message::Call { procedure: p, params } if p == procedure && params.is_empty()
+                Message::Call(r) if r.procedure == procedure && r.params.is_empty()
             ));
         }
         assert_eq!(SystemdDetailTopic::Timers.label(), "Timers");

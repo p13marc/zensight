@@ -397,10 +397,10 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
     }
     let fetch = button(text("Fetch flows").size(font::CAPTION))
         .padding([4, 10])
-        .on_press(Message::Call {
-            procedure: "flows".into(),
-            params: FLOWS_PARAMS.into(),
-        });
+        .on_press(Message::Call(crate::call::Request::new(
+            "flows",
+            FLOWS_PARAMS,
+        )));
 
     let fetched = match calls.decoded::<Vec<NetflowRecord>>("flows") {
         Some(Ok(records)) => Some(records),

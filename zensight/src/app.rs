@@ -100,21 +100,6 @@ const TOPOLOGY_REFRESH_TICKS: u8 = 10;
 /// Pruning scans the whole table, so it runs far less often than flushing.
 const STORE_PRUNE_EVERY_FLUSHES: u32 = 40;
 
-/// Reduce an `ip:port` (or bracketed `[ipv6]:port`, or bare `ip`) endpoint to its
-/// bare IP, for matching a flow endpoint against an anomaly's source (#119).
-fn endpoint_ip(endpoint: &str) -> String {
-    if let Ok(sa) = endpoint.parse::<std::net::SocketAddr>() {
-        return sa.ip().to_string();
-    }
-    if let Ok(ip) = endpoint.parse::<std::net::IpAddr>() {
-        return ip.to_string();
-    }
-    match endpoint.rsplit_once(':') {
-        Some((host, _port)) => host.trim_matches(['[', ']']).to_string(),
-        None => endpoint.to_string(),
-    }
-}
-
 /// Cap on the rolling log buffer feeding the top-level Logs view.
 const MAX_RECENT_LOGS: usize = 5000;
 
@@ -172,6 +157,7 @@ use crate::view::groups::{GroupsState, groups_panel};
 use crate::view::overview::OverviewState;
 use crate::view::settings::{PersistentSettings, SettingsState, settings_view};
 use crate::view::specialized::SyslogFilterState;
+use crate::view::specialized::attribution::endpoint_ip;
 use crate::view::toast::{ToastSeverity, ToastState, toast_overlay};
 use crate::view::topology::{TopologyState, topology_view};
 
@@ -1405,7 +1391,9 @@ impl ZenSight {
                     device.calls.clear("unit/file");
                 }
                 if let Some(unit) = unit {
-                    return ControlFlow::Break(self.call_now("unit", format!("name={unit}")));
+                    return ControlFlow::Break(
+                        self.call_now(crate::call::Request::new("unit", format!("name={unit}"))),
+                    );
                 }
             }
             Message::PivotToUnit { host, unit } => {
@@ -1519,7 +1507,10 @@ impl ZenSight {
                     fetch_needed = matches!(device.calls.fetch(flows), Fetch::Idle);
                 }
                 if fetch_needed {
-                    return ControlFlow::Break(self.call_now(flows, NetringTopic::Flows.params()));
+                    return ControlFlow::Break(self.call_now(crate::call::Request::new(
+                        flows,
+                        NetringTopic::Flows.params(),
+                    )));
                 }
             }
             Message::NetringAssetToTopology { ip, hostname } => {
@@ -1559,24 +1550,35 @@ impl ZenSight {
                     format!("Capture-to-disk mode → {mode}"),
                 ));
             }
-            Message::Call { procedure, params } => {
-                if self.selected_device.is_some() {
-                    return ControlFlow::Break(self.call_now(&procedure, params));
-                }
+            Message::Call(request) => {
+                return ControlFlow::Break(self.call_now(request));
             }
             Message::Reply {
+                surface,
                 device,
-                procedure,
+                key,
                 params,
                 result,
+                ..
             } => {
-                // Landed only on the device that asked, and only for the
-                // params still in flight (#1261): a slow answer to an old
-                // sort, or to a device since deselected, is dropped.
-                if let Some(selected) = self.selected_device.as_mut()
-                    && selected.device_id == device
-                {
-                    selected.calls.apply(&procedure, &params, result);
+                // Landed only on the surface that asked — for a device, the
+                // device that asked — and only for the params still in
+                // flight (#1261): a slow answer to an old sort, or to a
+                // device since deselected, is dropped.
+                match surface {
+                    crate::call::CallSurface::Device => {
+                        if let Some(selected) = self.selected_device.as_mut()
+                            && device.as_ref() == Some(&selected.device_id)
+                        {
+                            selected.calls.apply(&key, &params, result);
+                        }
+                    }
+                    crate::call::CallSurface::Security => {
+                        self.security.calls.apply(&key, &params, result);
+                    }
+                    crate::call::CallSurface::Topology => {
+                        self.topology.panel.calls.apply(&key, &params, result);
+                    }
                 }
             }
             Message::DetailTableSort { table, column } => {
@@ -1828,6 +1830,12 @@ impl ZenSight {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let message = match message {
+            Message::Batch(messages) => {
+                return Task::batch(messages.into_iter().map(|m| self.update(m)));
+            }
+            other => other,
+        };
         // Live parallax tiles only render on the device-detail view: leaving
         // it (Sensors/Logs/Settings/…, from ANY message) is the single choke
         // point that stops their subscribers, so the sensor stops encoding
@@ -4260,54 +4268,6 @@ impl ZenSight {
                         crate::view::specialized::fetch::Fetch::from_result(result);
                 }
             }
-            Message::FetchFlowAttribution {
-                target,
-                key,
-                src,
-                dst,
-            } => {
-                use crate::view::specialized::fetch::Fetch;
-                let slot = Some((key.clone(), Fetch::Loading));
-                match target {
-                    crate::message::AttributionTarget::Security => {
-                        self.security.attribution = slot;
-                    }
-                    crate::message::AttributionTarget::Device => {
-                        if let Some(device) = self.selected_device.as_mut() {
-                            device.netring_detail.attribution = slot;
-                        }
-                    }
-                    crate::message::AttributionTarget::Topology => {
-                        self.topology.panel.attribution = slot;
-                    }
-                }
-                return self.query_flow_attribution(target, key, src, dst);
-            }
-            Message::FlowAttributionReceived {
-                target,
-                key,
-                result,
-            } => {
-                use crate::view::specialized::fetch::Fetch;
-                let slot = match target {
-                    crate::message::AttributionTarget::Security => {
-                        Some(&mut self.security.attribution)
-                    }
-                    crate::message::AttributionTarget::Device => self
-                        .selected_device
-                        .as_mut()
-                        .map(|d| &mut d.netring_detail.attribution),
-                    crate::message::AttributionTarget::Topology => {
-                        Some(&mut self.topology.panel.attribution)
-                    }
-                };
-                // Ignore a stale reply if another row was asked about since.
-                if let Some(slot) = slot
-                    && slot.as_ref().is_some_and(|(k, _)| *k == key)
-                {
-                    *slot = Some((key, Fetch::from_result(result)));
-                }
-            }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
                 // Pull the netring detector config so the tuning panel is ready.
@@ -5888,7 +5848,7 @@ impl ZenSight {
         if !moved || device.calls.is_loading(procedure) {
             return None;
         }
-        Some(self.call_now(procedure, params.to_string()))
+        Some(self.call_now(crate::call::Request::new(procedure, params)))
     }
 
     /// Query the netring sensor's current detector config (#121, status
@@ -5995,8 +5955,8 @@ impl ZenSight {
                 .filters
                 .insert("units/selected".to_string(), unit.clone());
         }
-        let detail = self.call_now("unit", format!("name={unit}"));
-        let units = self.call_now("units", String::new());
+        let detail = self.call_now(crate::call::Request::new("unit", format!("name={unit}")));
+        let units = self.call_now(crate::call::Request::new("units", ""));
         Task::batch([select, detail, units])
     }
 
@@ -6023,7 +5983,10 @@ impl ZenSight {
             device.pivot = Some(crate::view::device::Pivot::Process { pid, start_time });
             device.calls.loading("processes", &params);
         }
-        Task::batch([select, self.query_call("processes".to_string(), params)])
+        Task::batch([
+            select,
+            self.query_call(crate::call::Request::new("processes", params)),
+        ])
     }
 
     /// Fetch the on-demand netring flow detail from the sensor's query channel.
@@ -6307,7 +6270,7 @@ impl ZenSight {
             return None;
         }
         Some(Task::batch(todo.into_iter().map(|(procedure, params)| {
-            self.query_call(procedure, params)
+            self.query_call(crate::call::Request::new(procedure, params))
         })))
     }
 
@@ -6722,53 +6685,6 @@ impl ZenSight {
         })
     }
 
-    /// Flow ↔ process join (#309): fetch every netlink sensor's sockets
-    /// narrowed to the flow's endpoint IPs (`?ip=`, server-side), then match
-    /// the 5-tuple. Only the host that actually owns an endpoint can hold a
-    /// matching socket, so the tuple match is itself host-discriminating — no
-    /// per-host key needed.
-    fn query_flow_attribution(
-        &self,
-        target: crate::message::AttributionTarget,
-        key: String,
-        src: String,
-        dst: String,
-    ) -> Task<Message> {
-        use crate::view::specialized::attribution::match_flow_socket;
-        use crate::view::specialized::netlink_detail::{fetch_records_all, sockets_match_key};
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::FlowAttributionReceived {
-                target,
-                key,
-                result: Err("Not connected to Zenoh".to_string()),
-            });
-        };
-        Task::future(async move {
-            let src_ip = endpoint_ip(&src);
-            let dst_ip = endpoint_ip(&dst);
-            let a: Option<Vec<zensight_common::SocketRecord>> =
-                fetch_records_all(session.clone(), sockets_match_key(&src_ip)).await;
-            let b: Option<Vec<zensight_common::SocketRecord>> = if dst_ip != src_ip {
-                fetch_records_all(session, sockets_match_key(&dst_ip)).await
-            } else {
-                None
-            };
-            let result = match (a, b) {
-                (None, None) => Err("no netlink sensor responded".to_string()),
-                (a, b) => {
-                    let mut sockets = a.unwrap_or_default();
-                    sockets.extend(b.unwrap_or_default());
-                    Ok(match_flow_socket(&sockets, &src, &dst))
-                }
-            };
-            Message::FlowAttributionReceived {
-                target,
-                key,
-                result,
-            }
-        })
-    }
-
     /// Send the armed write of the selected device (#1261): only when its
     /// confirmation holds — checked here again, so a message arriving any
     /// other way cannot skip it — and only to the drilled-in host. There is
@@ -6861,39 +6777,65 @@ impl ZenSight {
             return Task::none();
         }
         Task::batch(
-            refresh
-                .into_iter()
-                .map(|(procedure, params)| self.call_now(&procedure, params)),
+            refresh.into_iter().map(|(procedure, params)| {
+                self.call_now(crate::call::Request::new(procedure, params))
+            }),
         )
     }
 
     /// Mark a procedure in flight on the selected device and call it (#1261)
     /// — for the app's own calls (a pivot, a refresh after an action), where
     /// no `Call` message passes through `update` to do the marking.
-    fn call_now(&mut self, procedure: &str, params: String) -> Task<Message> {
-        if let Some(device) = self.selected_device.as_mut() {
-            device.calls.loading(procedure, &params);
-        }
-        self.query_call(procedure.to_string(), params)
+    fn call_now(&mut self, request: crate::call::Request) -> Task<Message> {
+        let calls = match request.surface {
+            crate::call::CallSurface::Device => match self.selected_device.as_mut() {
+                Some(device) => &mut device.calls,
+                None => return Task::none(),
+            },
+            crate::call::CallSurface::Security => &mut self.security.calls,
+            crate::call::CallSurface::Topology => &mut self.topology.panel.calls,
+        };
+        calls.loading_as(request.key(), &request.procedure, &request.params);
+        self.query_call(request)
     }
 
-    /// Call a read procedure on the selected device (#1261): its origin's
-    /// concrete key once the source→origin map has learned it, else the
-    /// fleet selector. The answer lands as [`Message::Reply`] on that device
-    /// and no other.
-    fn query_call(&self, procedure: String, params: String) -> Task<Message> {
-        let Some(device) = self.selected_device.as_ref() else {
+    /// Call a read procedure (#1261). The selected device's own producer is
+    /// asked on its origin's concrete key once the source→origin map has
+    /// learned it, else the fleet selector; another producer — a join's
+    /// `netlink/sockets` from a netring view — is asked fleet-wide, since the
+    /// host that can answer is not the one whose view is open. The answer
+    /// lands as [`Message::Reply`] on the surface that asked and no other.
+    fn query_call(&self, request: crate::call::Request) -> Task<Message> {
+        let surface = request.surface;
+        let device = match surface {
+            crate::call::CallSurface::Device => {
+                match self.selected_device.as_ref().map(|d| d.device_id.clone()) {
+                    Some(id) => Some(id),
+                    None => return Task::none(),
+                }
+            }
+            _ => None,
+        };
+        let Some(producer) = request
+            .producer
+            .clone()
+            .or_else(|| device.as_ref().map(|d| d.producer.clone()))
+        else {
             return Task::none();
         };
-        let id = device.device_id.clone();
+        let key = request.key().to_string();
+        let procedure = request.procedure;
+        let params = request.params;
         if self.demo_mode {
             // Demo mirrors the wire contract and serves no queryables: the
             // mock answers what it has, and says so when it has nothing.
-            let result = crate::mock::demo_reply(&id.producer, &procedure)
+            let result = crate::mock::demo_reply(&producer, &procedure)
                 .map(|value| crate::call::Reply::new(value, crate::call::now_ms()))
                 .ok_or_else(|| "demo mode serves no such procedure".to_string());
             return Task::done(Message::Reply {
-                device: id,
+                surface,
+                device,
+                key,
                 procedure,
                 params,
                 result,
@@ -6901,23 +6843,29 @@ impl ZenSight {
         }
         let Some(session) = self.session.clone() else {
             return Task::done(Message::Reply {
-                device: id,
+                surface,
+                device,
+                key,
                 procedure,
                 params,
                 result: Err("Not connected to Zenoh".to_string()),
             });
         };
-        let origin = self
-            .dashboard
-            .resolve_device(&id.producer, &id.source)
+        // Its own producer: the device's origin. Another producer: the
+        // fleet, folded (`call::fold_replies`).
+        let origin = device
+            .as_ref()
+            .filter(|id| id.producer == producer)
+            .and_then(|id| self.dashboard.resolve_device(&id.producer, &id.source))
             .and_then(|d| d.remote_origin());
-        let producer = id.producer.clone();
         Task::future(async move {
             let result =
                 crate::call::call(session, origin, producer, procedure.clone(), params.clone())
                     .await;
             Message::Reply {
-                device: id,
+                surface,
+                device,
+                key,
                 procedure,
                 params,
                 result,
@@ -9507,18 +9455,18 @@ fn prefetch_channels(producer: &str) -> Vec<Message> {
         // gate (#956), so the probe has to have been asked before the first
         // render — otherwise a PDU's outlets appear controlless for a beat on
         // a deployment where control is on.
-        "snmp" => vec![Message::Call {
-            procedure: "action/capability".to_string(),
-            params: String::new(),
-        }],
-        "sysinfo" => vec![Message::Call {
-            procedure: "processes".to_string(),
-            params: crate::view::specialized::sysinfo::ProcessSort::default().params(),
-        }],
-        "parallax" => vec![Message::Call {
-            procedure: "streams".to_string(),
-            params: String::new(),
-        }],
+        "snmp" => vec![Message::Call(crate::call::Request::new(
+            "action/capability",
+            String::new(),
+        ))],
+        "sysinfo" => vec![Message::Call(crate::call::Request::new(
+            "processes",
+            crate::view::specialized::sysinfo::ProcessSort::default().params(),
+        ))],
+        "parallax" => vec![Message::Call(crate::call::Request::new(
+            "streams",
+            String::new(),
+        ))],
         _ => Vec::new(),
     }
 }
@@ -9701,27 +9649,27 @@ mod prefetch_tests {
         assert_eq!(nl.len(), 4);
         assert!(matches!(
             &nl[0],
-            Message::Call { procedure, .. } if procedure == "sockets"
+            Message::Call(r) if r.procedure == "sockets"
         ));
         assert!(matches!(
             &nl[3],
-            Message::Call { procedure, .. } if procedure == "route_changes"
+            Message::Call(r) if r.procedure == "route_changes"
         ));
 
         // Netring prefetches flows; sysinfo prefetches the process explorer.
         assert!(matches!(
             prefetch_channels("netring").as_slice(),
-            [Message::Call { procedure, .. }] if procedure == "flows"
+            [Message::Call(r)] if r.procedure == "flows"
         ));
         assert!(matches!(
             prefetch_channels("sysinfo").as_slice(),
-            [Message::Call { procedure, .. }] if procedure == "processes"
+            [Message::Call(r)] if r.procedure == "processes"
         ));
 
         // Parallax prefetches the stream catalogue (#408).
         assert!(matches!(
             prefetch_channels("parallax").as_slice(),
-            [Message::Call { procedure, .. }] if procedure == "streams"
+            [Message::Call(r)] if r.procedure == "streams"
         ));
 
         // SNMP prefetches the outlet-control gate (#956) — not a detail
@@ -9730,7 +9678,7 @@ mod prefetch_tests {
         // controlless for a beat on a deployment where control is on.
         assert!(matches!(
             prefetch_channels("snmp").as_slice(),
-            [Message::Call { procedure, .. }] if procedure == "action/capability"
+            [Message::Call(r)] if r.procedure == "action/capability"
         ));
 
         // Protocols without queryable detail channels prefetch nothing.
