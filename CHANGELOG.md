@@ -320,6 +320,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The chart and the groups panel are one `Message` variant each** (#1306,
+  the road to #1261's "under 200"). `Message::Chart(chart::Action)` replaces
+  the 23 chart variants (select/add/remove/toggle series, the windows and
+  ranges, zoom/pan/drag, the metric filter): `DeviceDetailState::apply_chart`
+  applies the action and hands back a `chart::Effect` — the favorite flip
+  (`Favorite { metric, now_fav }`), the pinned range to load, or the words for
+  a bad range — which is all the app still does. `Message::Groups(groups::
+  Action)` replaces the 13 groups variants with `GroupsState::update`, whose
+  `Effect::Persist` is the one thing the app acts on. The `update_chart` and
+  `update_groups` handler stages are gone; `PromoteMetricToAlert` stays
+  top-level (it navigates and queries). `Message` is 317 variants (351 before).
+
 - **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
   writes — netring's detector toggles, thresholds, allowlist, capture filter,
   threat intel and capture-to-disk, the syslog filter, parallax's stream

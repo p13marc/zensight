@@ -820,7 +820,9 @@ fn iface_columns<'a>(state: &'a DeviceDetailState) -> Vec<DataColumn<'a, IfaceRo
             match &r.chart_metric {
                 // Drill-down: open the history chart for this interface.
                 Some(metric) => button(label)
-                    .on_press(Message::SelectMetricForChart(metric.clone()))
+                    .on_press(Message::Chart(crate::view::chart::Action::SelectMetric(
+                        metric.clone(),
+                    )))
                     .style(iced::widget::button::text)
                     .padding(0)
                     .into(),
