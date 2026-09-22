@@ -67,6 +67,7 @@ a `Task`, the session or another view's state; a clock-needing action takes
 | topology (`TopologyState::update`, takes the entity store and `now_ms`) | `topology::Action` — the canvas (select, drag, pan, zoom, hover, fit), the toolbar (lens, labels, grouping, focus, filters, layout, pins, legend, search, close), the panel (open device, open flows, copy), the ticks and the data batch | `PersistPrefs`, `Close`, `AskListenSockets`, `AskEdgeFlows`, `OpenDevice`, `OpenFlows`, `Copy` |
 | explorer (`ExplorerState::update`, takes `visible`) | `explorer::Action` — the pump's started/tick/stopped/error, the watch input and submit, unwatch, tree toggle, key select, stop | none — the state holds the pump's handle and sends the command itself |
 | artifacts (the state machine stays in the app) | `artifact_fetch::Action` — request, capture-blob download, confirm/holder/pause/resume/cancel, the capture forms; `artifact_fetch::Event` — the kinds sweep, the request/poll stream, the download stream, the dialogs | n/a — the app matches the two sub-enums directly |
+| parallax live view (the app applies it: seven actions open, close or write through its session helpers) | `parallax_detail::Action` — open/close a tile, the tier buttons and auto, expand/collapse, keyframe request; the tile streams' frame / receiver report / ended; the stream-status transition; the report outcome | n/a |
 | logs (`SyslogFilterState::update`, takes `now_ms`) | `syslog::Action` — the panel and stats toggles, severity, time range, the facility/unit/boot lenses, row drill-down, follow/pause, the text filters, export format, paging | `RefreshHistory` (under the app's in-flight gate), `LoadOlder` (the app holds the cursor) |
 
 Kept as top-level variants by design: navigation (`Open*`/`Close*`), wire
@@ -394,10 +395,14 @@ field, and demo mode answers it from `mock::demo_reply` — the app's generic
 call path asks the mock instead of a session, so demo keeps mirroring the
 wire contract without a per-producer arm. **snmp**: the outlet probe is the
 `action/capability` call and the gate takes its answer; the interface table
-is `tables["interfaces"]`. Every fetch pair is gone; what remains
-per-producer is navigation, the write paths and their state machines
-(systemd's action, snmp's outlet, netring's captures and tuning, parallax's
-tiles), and the projections that are not answers to a call.
+is `tables["interfaces"]`. Every fetch pair is gone. **parallax's tiles**
+were the last per-producer messages: they are one `Message::Parallax(
+parallax_detail::Action)` now (#1306) — the tile and tier controls, the
+expand/collapse overlay, the keyframe request, the tile streams' frame /
+report / ended, the stream-status transition. What remains per-producer is
+navigation, the write paths and their state machines (systemd's action,
+snmp's outlet, netring's captures and tuning), and the projections that are
+not answers to a call; nothing per-producer remains in `Message`.
 
 **Writes** are the other half (#1261, design §5.5). A write procedure is a
 GET with a body on `@rpc/<producer>/<procedure>`, answered through the

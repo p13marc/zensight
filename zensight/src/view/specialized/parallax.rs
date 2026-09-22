@@ -187,10 +187,12 @@ fn catalogue_row<'a>(
             let is_live = live_tier.as_deref() == Some(spec.name.as_str());
             let mut b = button(text(tier_button_label(spec)).size(font::CAPTION));
             if !is_live {
-                b = b.on_press(Message::ParallaxOpenVideoTile {
-                    stream: stream.stream.clone(),
-                    tier: spec.name.clone(),
-                });
+                b = b.on_press(Message::Parallax(
+                    crate::view::specialized::parallax_detail::Action::OpenVideoTile {
+                        stream: stream.stream.clone(),
+                        tier: spec.name.clone(),
+                    },
+                ));
             }
             buttons = buttons.push(action_tooltip(b, tier_tooltip(spec)));
         }
@@ -199,9 +201,11 @@ fn catalogue_row<'a>(
         // state worth surfacing is the one the operator created and can undo.
         if open && detail.is_pinned(&stream.stream) {
             buttons = buttons.push(action_tooltip(
-                button(text("Auto").size(font::CAPTION)).on_press(Message::ParallaxAutoTier {
-                    stream: stream.stream.clone(),
-                }),
+                button(text("Auto").size(font::CAPTION)).on_press(Message::Parallax(
+                    crate::view::specialized::parallax_detail::Action::AutoTier {
+                        stream: stream.stream.clone(),
+                    },
+                )),
                 "Pinned by your tier choice — hand tier selection back to the \
                  viewer, which drops a rung when the link degrades and climbs \
                  back after sustained recovery"
@@ -210,9 +214,11 @@ fn catalogue_row<'a>(
         }
         if open {
             buttons = buttons.push(button(text("Close").size(font::CAPTION)).on_press(
-                Message::ParallaxCloseTile {
-                    stream: stream.stream.clone(),
-                },
+                Message::Parallax(
+                    crate::view::specialized::parallax_detail::Action::CloseTile {
+                        stream: stream.stream.clone(),
+                    },
+                ),
             ));
         }
         buttons.into()
@@ -224,15 +230,19 @@ fn catalogue_row<'a>(
         let mut buttons = row![].spacing(space::XS);
         if open {
             buttons = buttons.push(button(text("Close").size(font::CAPTION)).on_press(
-                Message::ParallaxCloseTile {
-                    stream: stream.stream.clone(),
-                },
+                Message::Parallax(
+                    crate::view::specialized::parallax_detail::Action::CloseTile {
+                        stream: stream.stream.clone(),
+                    },
+                ),
             ));
         } else {
             buttons = buttons.push(action_tooltip(
-                button(text("Preview").size(font::CAPTION)).on_press(Message::ParallaxOpenTile {
-                    stream: stream.stream.clone(),
-                }),
+                button(text("Preview").size(font::CAPTION)).on_press(Message::Parallax(
+                    crate::view::specialized::parallax_detail::Action::OpenTile {
+                        stream: stream.stream.clone(),
+                    },
+                )),
                 "Open a live JPEG preview of this stream. Live H.264 video needs a \
                  build with --features h264."
                     .to_string(),
@@ -291,9 +301,11 @@ fn tile<'a>(
         (None, None) => preview_frame(placeholder_frame()),
     };
     let frame: Element<'a, Message> = mouse_area(picture)
-        .on_press(Message::ParallaxExpandTile {
-            stream: name.to_string(),
-        })
+        .on_press(Message::Parallax(
+            crate::view::specialized::parallax_detail::Action::ExpandTile {
+                stream: name.to_string(),
+            },
+        ))
         .interaction(iced::mouse::Interaction::Pointer)
         .into();
     let caption = if let Some(end) = &tile.ended {
@@ -318,9 +330,11 @@ fn tile<'a>(
         row![
             text(caption).size(font::CAPTION).style(muted),
             Space::new().width(Length::Fill),
-            button(text("Close").size(font::DENSE)).on_press(Message::ParallaxCloseTile {
-                stream: name.to_string(),
-            }),
+            button(text("Close").size(font::DENSE)).on_press(Message::Parallax(
+                crate::view::specialized::parallax_detail::Action::CloseTile {
+                    stream: name.to_string(),
+                }
+            )),
         ]
         .spacing(space::SM)
         .align_y(iced::Alignment::Center)
@@ -359,7 +373,9 @@ pub fn expanded_overlay(state: &DeviceDetailState) -> Option<Element<'_, Message
     let header = row![
         text(caption).size(font::BODY),
         Space::new().width(Length::Fill),
-        button(text("Close").size(font::CAPTION)).on_press(Message::ParallaxCollapseTile),
+        button(text("Close").size(font::CAPTION)).on_press(Message::Parallax(
+            crate::view::specialized::parallax_detail::Action::CollapseTile
+        )),
     ]
     .spacing(space::SM)
     .align_y(iced::Alignment::Center);
@@ -397,7 +413,9 @@ pub fn expanded_overlay(state: &DeviceDetailState) -> Option<Element<'_, Message
                     ..Default::default()
                 }),
         )
-        .on_press(Message::ParallaxCollapseTile)
+        .on_press(Message::Parallax(
+            crate::view::specialized::parallax_detail::Action::CollapseTile,
+        ))
         .into(),
     )
 }
@@ -596,8 +614,10 @@ mod tests {
         let _ = ui.click("Close");
         let msgs: Vec<Message> = ui.into_messages().collect();
         assert!(
-            msgs.iter()
-                .any(|m| matches!(m, Message::ParallaxCollapseTile)),
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::Parallax(crate::view::specialized::parallax_detail::Action::CollapseTile)
+            )),
             "Close dismisses the overlay"
         );
     }
@@ -658,7 +678,7 @@ mod tests {
         assert!(
             msgs.iter().any(|m| matches!(
                 m,
-                Message::ParallaxOpenVideoTile { stream, tier } if stream == "cam0" && tier == "high"
+                Message::Parallax(crate::view::specialized::parallax_detail::Action::OpenVideoTile { stream, tier }) if stream == "cam0" && tier == "high"
             )),
             "clicking a tier opens Live on exactly that tier"
         );

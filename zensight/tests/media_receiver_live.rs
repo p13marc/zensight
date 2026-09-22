@@ -146,10 +146,21 @@ async fn a_tile_that_cannot_meet_its_deadline_rides_the_keyframes_and_says_so() 
         match tokio::time::timeout_at(until, tile.next()).await {
             Err(_) => break,
             Ok(None) => panic!("the tile stream ended early"),
-            Ok(Some(Message::ParallaxFrame { .. })) => frames += 1,
-            Ok(Some(Message::ParallaxRequestKeyframe { .. })) => keyframe_requests += 1,
-            Ok(Some(Message::ParallaxReceiverReport { report: r, .. })) => report = Some(*r),
-            Ok(Some(Message::ParallaxTileEnded { error, .. })) => {
+            Ok(Some(Message::Parallax(
+                zensight::view::specialized::parallax_detail::Action::Frame { .. },
+            ))) => frames += 1,
+            Ok(Some(Message::Parallax(
+                zensight::view::specialized::parallax_detail::Action::RequestKeyframe { .. },
+            ))) => keyframe_requests += 1,
+            Ok(Some(Message::Parallax(
+                zensight::view::specialized::parallax_detail::Action::ReceiverReport {
+                    report: r,
+                    ..
+                },
+            ))) => report = Some(*r),
+            Ok(Some(Message::Parallax(
+                zensight::view::specialized::parallax_detail::Action::TileEnded { error, .. },
+            ))) => {
                 panic!("the tile ended: {error:?}")
             }
             Ok(Some(_)) => {}
@@ -232,9 +243,18 @@ async fn a_live_tile_decodes_measures_and_its_report_reaches_the_producers_aggre
         match next {
             Err(_) => panic!("no frame and/or no report within 30 s (frames = {frames})"),
             Ok(None) => panic!("the tile stream ended early (frames = {frames})"),
-            Ok(Some(Message::ParallaxFrame { .. })) => frames += 1,
-            Ok(Some(Message::ParallaxReceiverReport { report: r, .. })) => report = Some(*r),
-            Ok(Some(Message::ParallaxTileEnded { error, .. })) => {
+            Ok(Some(Message::Parallax(
+                zensight::view::specialized::parallax_detail::Action::Frame { .. },
+            ))) => frames += 1,
+            Ok(Some(Message::Parallax(
+                zensight::view::specialized::parallax_detail::Action::ReceiverReport {
+                    report: r,
+                    ..
+                },
+            ))) => report = Some(*r),
+            Ok(Some(Message::Parallax(
+                zensight::view::specialized::parallax_detail::Action::TileEnded { error, .. },
+            ))) => {
                 panic!("the tile ended: {error:?}")
             }
             Ok(Some(_)) => {}

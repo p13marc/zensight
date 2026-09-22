@@ -1096,41 +1096,49 @@ impl ZenSight {
                     device.tables.entry(table).or_default().load_more();
                 }
             }
-            Message::ParallaxOpenTile { stream } => {
+            Message::Parallax(crate::view::specialized::parallax_detail::Action::OpenTile {
+                stream,
+            }) => {
                 return ControlFlow::Break(self.open_parallax_tile(stream));
             }
-            Message::ParallaxCloseTile { stream } => {
+            Message::Parallax(crate::view::specialized::parallax_detail::Action::CloseTile {
+                stream,
+            }) => {
                 return ControlFlow::Break(self.close_parallax_tile(stream));
             }
-            Message::ParallaxFrame {
+            Message::Parallax(crate::view::specialized::parallax_detail::Action::Frame {
                 stream,
                 generation,
                 seq,
                 handle,
-            } => {
+            }) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device
                         .parallax_detail
                         .apply_frame(&stream, generation, seq, handle);
                 }
             }
-            Message::ParallaxTileEnded {
+            Message::Parallax(crate::view::specialized::parallax_detail::Action::TileEnded {
                 stream,
                 generation,
                 error,
-            } => {
+            }) => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.parallax_detail.end_tile(&stream, generation, error);
                 }
             }
-            Message::ParallaxReceiverReport {
-                stream,
-                generation,
-                report,
-            } => {
+            Message::Parallax(
+                crate::view::specialized::parallax_detail::Action::ReceiverReport {
+                    stream,
+                    generation,
+                    report,
+                },
+            ) => {
                 return ControlFlow::Break(self.send_parallax_report(stream, generation, *report));
             }
-            Message::ParallaxStreamStatus { source, status } => {
+            Message::Parallax(
+                crate::view::specialized::parallax_detail::Action::StreamStatus { source, status },
+            ) => {
                 // A definitive `open: false` transition for a tile still
                 // waiting on its first frame = the open failed on the sensor;
                 // surface it instead of "waiting for frames…" forever.
@@ -1224,7 +1232,9 @@ impl ZenSight {
             Message::CopyText(text) => {
                 return ControlFlow::Break(iced::clipboard::write(text));
             }
-            Message::ParallaxOpenVideoTile { stream, tier } => {
+            Message::Parallax(
+                crate::view::specialized::parallax_detail::Action::OpenVideoTile { stream, tier },
+            ) => {
                 // A deliberate click pins the stream (#720). The controller
                 // stops deciding until the operator hands control back: a tier
                 // that moved itself back after a chosen click would be
@@ -1239,7 +1249,9 @@ impl ZenSight {
                 }
                 return ControlFlow::Break(self.open_parallax_video_tile(stream, tier, true));
             }
-            Message::ParallaxAutoTier { stream } => {
+            Message::Parallax(crate::view::specialized::parallax_detail::Action::AutoTier {
+                stream,
+            }) => {
                 if let Some(device) = self
                     .selected_device
                     .as_mut()
@@ -1249,13 +1261,17 @@ impl ZenSight {
                     device.parallax_detail.controller(&stream, now).unpin(now);
                 }
             }
-            Message::ParallaxRequestKeyframe { stream } => {
+            Message::Parallax(
+                crate::view::specialized::parallax_detail::Action::RequestKeyframe { stream },
+            ) => {
                 return ControlFlow::Break(self.request_parallax_keyframe(stream));
             }
-            Message::ParallaxExpandTile { stream } => {
+            Message::Parallax(crate::view::specialized::parallax_detail::Action::ExpandTile {
+                stream,
+            }) => {
                 return ControlFlow::Break(self.expand_parallax_tile(stream));
             }
-            Message::ParallaxCollapseTile => {
+            Message::Parallax(crate::view::specialized::parallax_detail::Action::CollapseTile) => {
                 return ControlFlow::Break(self.collapse_parallax_tile());
             }
             other => return ControlFlow::Continue(other),
@@ -2951,7 +2967,12 @@ impl ZenSight {
                 return self.query_topology_batch();
             }
 
-            Message::ParallaxReportOutcome { success, message } => {
+            Message::Parallax(
+                crate::view::specialized::parallax_detail::Action::ReportOutcome {
+                    success,
+                    message,
+                },
+            ) => {
                 // A tile reports every few seconds for as long as it is open,
                 // so a producer that refuses — an older sensor with no
                 // `stream/report` queryable, say — would otherwise put a red
@@ -5236,9 +5257,12 @@ impl ZenSight {
                 Some(key) => self
                     .send_command(key, &report, String::new())
                     .map(|message| match message {
-                        Message::CommandFeedback { success, message } => {
-                            Message::ParallaxReportOutcome { success, message }
-                        }
+                        Message::CommandFeedback { success, message } => Message::Parallax(
+                            crate::view::specialized::parallax_detail::Action::ReportOutcome {
+                                success,
+                                message,
+                            },
+                        ),
                         other => other,
                     }),
                 None => Task::none(),

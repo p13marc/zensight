@@ -242,14 +242,6 @@ pub enum Message {
     /// Zenoh connection lost or failed.
     Disconnected(String),
 
-    /// The outcome of forwarding one tile's receiver report (#718).
-    ///
-    /// Its own variant rather than [`Self::CommandFeedback`] because its
-    /// cadence is different in kind: a report goes out every few seconds per
-    /// open tile, forever, so a producer that refuses them would otherwise
-    /// toast on a 3-second loop for as long as the tile is open. This one
-    /// toasts the first refusal and then goes quiet until reports work again.
-    ParallaxReportOutcome { success: bool, message: String },
     /// Result of a command sent to a sensor (drives a feedback toast).
     CommandFeedback { success: bool, message: String },
 
@@ -447,51 +439,10 @@ pub enum Message {
     DetailTableFilter { table: String, query: String },
     /// Show more rows of a device view's on-demand table.
     DetailTableMore { table: String },
-    /// Open a live JPEG preview tile: sends `open_stream` (codec `mjpeg`) and
-    /// spawns the abortable per-tile subscriber task (#408).
-    ParallaxOpenTile { stream: String },
-    /// Close a preview tile: aborts its subscriber task and sends
-    /// `close_stream`.
-    ParallaxCloseTile { stream: String },
-    /// A decoded preview frame from a tile's subscriber task. `generation`
-    /// identifies the tile incarnation the task was opened for (frames from
-    /// a replaced task are dropped); stale `seq`s within an incarnation are
-    /// dropped too (latest frame wins).
-    ParallaxFrame {
-        stream: String,
-        generation: u64,
-        seq: u64,
-        handle: iced::widget::image::Handle,
-    },
-    /// A tile's subscriber task finished (session closed or subscribe
-    /// error). Carries the tile incarnation so a replaced task's late end
-    /// report cannot clear the new tile's abort handle.
-    ParallaxTileEnded {
-        stream: String,
-        generation: u64,
-        error: Option<String>,
-    },
-    /// A tile's periodic receiver report (#718, RFC 07 §1.1): how the stream
-    /// is arriving, measured by the tile itself. The app forwards it to that
-    /// tile's own producer as an `@rpc/parallax/stream/report` write — never
-    /// to the fleet selector, because a report is about one key on one host.
-    ///
-    /// Carries the tile incarnation for the same reason frames do: a report
-    /// from a replaced subscriber describes a subscription that no longer
-    /// exists. Boxed because the report is the largest thing any `Message`
-    /// carries and every other variant would pay for it.
-    ParallaxReceiverReport {
-        stream: String,
-        generation: u64,
-        report: Box<zensight_common::stream::MediaReceiverReport>,
-    },
-    /// A parallax `StreamStatus` transition from `state/parallax/stream/<stream>` (arrives
-    /// on the host-scoped control-plane subscriber): a definitive
-    /// `open: false` marks a still-waiting tile as failed.
-    ParallaxStreamStatus {
-        source: String,
-        status: zensight_common::stream::StreamStatus,
-    },
+    /// One live-view interaction or tile event (#1306, the last per-producer
+    /// slice of #1261): the tile and tier controls, the expand/collapse
+    /// overlay, and what the per-tile subscriber streams report.
+    Parallax(crate::view::specialized::parallax_detail::Action),
     /// The cold store's event rows at boot (#578, #1261): the feed survives a
     /// GUI restart without a bus-side storage. Folded into the ring like a
     /// live `Event`, and not written back.
@@ -528,29 +479,6 @@ pub enum Message {
     /// Copy a text snippet (e.g. a proposed `devices[]` entry) to the
     /// clipboard (#579).
     CopyText(String),
-    /// Open a live H.264 video tile (#409) on a specific `tier`: sends
-    /// `open_stream` (codec `h264`, that tier) and spawns the decoding
-    /// subscriber on the exact tier key. Fired by the per-tier buttons — each
-    /// offered tier is its own button (#494/#502). Opening a different tier for
-    /// a stream replaces its single tile. Only functional on builds with the
-    /// `h264` feature; otherwise it toasts the build hint.
-    ParallaxOpenVideoTile { stream: String, tier: String },
-    /// Hand tier selection back to the controller (#720).
-    ///
-    /// The counterpart of a manual tier click, which pins the stream. There is
-    /// no "turn adaptation off" — a pin *is* off, for the one stream the
-    /// operator pinned, and it is expressed by the thing they already did.
-    ParallaxAutoTier { stream: String },
-    /// Ask the sensor for a fresh IDR (`request_keyframe`) — fired by the
-    /// H.264 tile decoder on a sequence discontinuity (#409).
-    ParallaxRequestKeyframe { stream: String },
-    /// Expand a tile to the near-fullscreen overlay (#436). A preview tile
-    /// is upgraded to the H.264 video profile when the build and the stream
-    /// support it (same refcount-balanced switch as the Video button).
-    ParallaxExpandTile { stream: String },
-    /// Dismiss the expanded-tile overlay (Esc / backdrop click / Close),
-    /// restoring the tile's pre-expand profile.
-    ParallaxCollapseTile,
 
     // ── Cross-view identity pivots (#313) — host-local joins over already-
     // published data; every pivot is a query-time read, no new bus traffic.

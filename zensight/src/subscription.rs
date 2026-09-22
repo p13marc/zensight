@@ -1085,10 +1085,10 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         }),
         ZensightState::Stream { .. } => {
             decode!(zensight_common::stream::StreamStatus, |status| {
-                Message::ParallaxStreamStatus {
+                Message::Parallax(crate::view::specialized::parallax_detail::Action::StreamStatus {
                     source: origin,
                     status,
-                }
+                })
             })
         }
         // snmp's joined interface table is a state document like any other

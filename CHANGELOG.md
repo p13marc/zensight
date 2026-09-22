@@ -377,6 +377,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sub-enums directly. `LoadArtifactKinds` had no sender and is gone (the
   sweep runs from the fleet load). `Message` is 189 variants — under the
   200 #1261 set.
+  **parallax closes the per-producer half of #1261**:
+  `Message::Parallax(parallax_detail::Action)` replaces the twelve live-view
+  variants — the tile and tier controls, the expand/collapse overlay, the
+  keyframe request, the tile streams' frame / receiver report / ended, the
+  stream-status transition and the report outcome; the app applies it, since
+  seven of the twelve open, close or write through its session helpers.
+  Nothing per-producer remains in `Message`. `Message` is 178 variants (351
+  when #1306 opened).
 
 - **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
   writes — netring's detector toggles, thresholds, allowlist, capture filter,

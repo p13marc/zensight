@@ -857,6 +857,10 @@ Not required for phase 0–3.
   (`DeviceId::fixture(Protocol::X, …)`) becomes `fixture("x", …)`; mechanical.
 - The 82 protocol messages, 7 `*DetailState`s and ~40 `Fetch*/*Received` pairs are
   deleted in phase 4. `app.rs` shrinks by the corresponding `update` arms.
+  (Done 2026-09-22: #1261's per-producer slices, then #1306's app-wide groups —
+  `Message` went from 437 to 178, each view's interactions one typed `Action`
+  with a pure `State::update -> Effect`; see `zensight/docs/views.md`,
+  "Actions and effects".)
 - `specialized/mod.rs` and `overview/mod.rs` lose their `Protocol` matches; the
   tab strip is built from producers seen (#1128 already made it structural).
 
