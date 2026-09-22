@@ -1358,11 +1358,11 @@ pub fn artifact_section<'a>(
                 for s in streams {
                     let mut b = button(text(format!("Still: {s}")).size(font::CAPTION));
                     if !other_busy {
-                        b = b.on_press(Message::StartArtifact {
+                        b = b.on_press(Message::Artifact(Action::Start {
                             producer: this_prefix.to_string(),
                             kind: ArtifactKind::Still { stream: s.clone() },
                             target_source: target_source.map(str::to_string),
-                        });
+                        }));
                     }
                     btns = btns.push(b);
                 }
@@ -1384,7 +1384,7 @@ pub fn artifact_section<'a>(
                 for s in streams {
                     let mut b = button(text(format!("Clip {secs}s: {s}")).size(font::CAPTION));
                     if !other_busy {
-                        b = b.on_press(Message::StartArtifact {
+                        b = b.on_press(Message::Artifact(Action::Start {
                             producer: this_prefix.to_string(),
                             kind: ArtifactKind::Clip {
                                 stream: s.clone(),
@@ -1392,7 +1392,7 @@ pub fn artifact_section<'a>(
                                 tier: None,
                             },
                             target_source: target_source.map(str::to_string),
-                        });
+                        }));
                     }
                     btns = btns.push(b);
                 }
