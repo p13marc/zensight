@@ -424,9 +424,27 @@ is gone, and so are `FetchFlowAttribution`/`FlowAttributionReceived` and
 `AttributionTarget`: every "who?" — the device's flows table, the Security
 pivot rows, the topology edge panel — sends the same `attribution::ask`,
 and each row's cell reads its own answer, so several rows may be attributed
-at once where one replaced the next before. What remains per producer on
-the device state is parallax's tiles and controllers, and snmp's projected
-rows and records.
+at once where one replaced the next before.
+
+**A write is addressed to one host, everywhere** (#1261). An `Armed` write
+names the surface that armed it, the producer and the host it goes to; a
+host it cannot name is the surface's own — the drilled-in device's origin,
+the Security pane's chosen netring host — and a write with no host is
+refused with the reason, never broadcast. The last fleet-wide writes are
+gone: netring's tuning (detectors, thresholds, allowlist, capture filter,
+threat intel) reads its three statuses from and writes to **one host**,
+chosen in the pane's header the way #1114 made the expectations pane do
+(`SecurityState::{host, hosts, writes}`, `detection_tuning::{status_request,
+tuning_write}`, one armed bar for every control) — a fleet fan-in's first
+reply used to be rendered as the config and edited back to every capturing
+host; the device's capture-to-disk controls arm on the device; the syslog
+filter's "Apply to Sensor" is offered on a host's Logs view and not on the
+fleet's; the inventory's "allowlist" arms to the Security pane's host and
+confirms in its row; parallax's stream controls refuse a host they cannot
+name instead of falling back to the fleet. One write is armed at a time,
+app-wide, so `Confirm` is never ambiguous. What remains per producer on the
+device state is parallax's tiles and controllers, and snmp's projected rows
+and records.
 
 ## Routing: `CurrentView`
 

@@ -3621,22 +3621,69 @@ fn test_capture_focus_panel() {
     };
     state.loaded = false; // even unloaded, the focus card renders.
 
+    // No host chosen (#1261): the card renders, and Apply has nowhere to
+    // write — it is not offered, and the panel says why.
+    let sec = zensight::view::security::SecurityState::default();
     {
-        let mut ui = simulator(detection_tuning_panel(&state));
+        let mut ui = simulator(detection_tuning_panel(&state, &sec));
         assert!(ui.find("Capture Focus (netring)").is_ok());
         assert!(ui.find("current: host 10.0.0.5").is_ok());
         assert!(ui.find("✕ rejected: unexpected token foo").is_ok());
+        assert!(
+            ui.find(
+                "No host chosen — netring tuning belongs to one host's sensor; pick the host above."
+            )
+            .is_ok()
+        );
+        let _ = ui.click("Apply");
+        let messages: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            !messages.iter().any(|m| matches!(m, Message::Arm(_))),
+            "no host, no write: {messages:?}"
+        );
     }
 
-    // Clicking Apply emits ApplyPacketFilter.
-    let mut ui = simulator(detection_tuning_panel(&state));
-    let _ = ui.click("Apply");
+    // With a host: Apply arms `capture_filter/set` on that host, on the
+    // Security surface, confirmed by a second click on the pane's bar.
+    let sec = zensight::view::security::SecurityState {
+        host: Some(zensight::view::expectations::ExpHost {
+            chunk: "h-3fa9c2d41b7e".into(),
+            label: "vm-dev-01 (h-3fa9c2d41b7e)".into(),
+        }),
+        ..Default::default()
+    };
+    let mut ui = simulator(detection_tuning_panel(&state, &sec));
+    ui.click("Apply").expect("offered with a host");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::ApplyPacketFilter))
+        messages.iter().any(|m| matches!(
+            m,
+            Message::Arm(a)
+                if a.procedure == "capture_filter/set"
+                    && a.origin == zenkey::RemoteOrigin::parse("h-3fa9c2d41b7e").ok()
+                    && a.request["expr"] == "host 10.0.0.5"
+        )),
+        "expected an armed write to the host: {messages:?}"
     );
+    // Armed: the pane's bar names it and offers confirm/cancel.
+    let sec = zensight::view::security::SecurityState {
+        writes: zensight::call::Writes {
+            armed: messages.iter().find_map(|m| match m {
+                Message::Arm(a) => Some(a.clone()),
+                _ => None,
+            }),
+            ..Default::default()
+        },
+        ..sec
+    };
+    let mut ui = simulator(detection_tuning_panel(&state, &sec));
+    assert!(
+        ui.find("capture filter → host 10.0.0.5 on vm-dev-01 (h-3fa9c2d41b7e)?")
+            .is_ok()
+    );
+    ui.click("confirm").expect("the bar confirms");
+    let messages: Vec<Message> = ui.into_messages().collect();
+    assert!(messages.iter().any(|m| matches!(m, Message::Confirm)));
 }
 
 /// #70: the netring view shows the passive asset-inventory section — the
@@ -4393,7 +4440,14 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
     }));
 
     let entities = zensight::entity::EntityStore::default();
-    let mut ui = simulator(inventory_view(&state, &entities, 0));
+    let sec = zensight::view::security::SecurityState {
+        host: Some(zensight::view::expectations::ExpHost {
+            chunk: "h-3fa9c2d41b7e".into(),
+            label: "vm-dev-01 (h-3fa9c2d41b7e)".into(),
+        }),
+        ..Default::default()
+    };
+    let mut ui = simulator(inventory_view(&state, &entities, &sec, 0));
     assert!(ui.find("Inventory").is_ok());
     assert!(ui.find("AcmeCorp").is_ok(), "vendor must be rendered");
     assert!(ui.find("printer1").is_ok());
@@ -4409,13 +4463,14 @@ fn test_inventory_view_renders_assets_and_fingerprints() {
         ui.find("ge11nn05enus_ff01_aa02").is_ok(),
         "JA4H fingerprint row must render"
     );
-    // The SNI-bearing JA4 row offers an allowlist action.
+    // The SNI-bearing JA4 row offers an allowlist action — armed to the
+    // Security pane's chosen host (#1261), never the fleet.
     let _ = ui.click("allowlist");
     let msgs: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        msgs.iter()
-            .any(|m| matches!(m, Message::AddNetringAllowlistEntry(h) if h == "login.example"))
-    );
+    assert!(msgs.iter().any(|m| matches!(
+        m,
+        Message::Arm(a) if a.procedure == "detectors/set" && a.request["entry"] == "login.example"
+    )));
 }
 
 /// Drilling into a syslog device shows the host's recent log *stream* from the

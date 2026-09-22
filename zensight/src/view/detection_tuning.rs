@@ -6,14 +6,85 @@
 //! `@rpc/netring/detectors/set` and applied without a sensor
 //! restart. Rendered inside the Security view (the NDR home).
 
-use iced::widget::{Row, column, container, row, text, text_input};
+use iced::widget::{Row, column, container, pick_list, row, text, text_input};
 use iced::{Alignment, Element, Length, Theme};
 use iced_anim::widget::button;
 
+use crate::call::{Armed, CallSurface, Confirmation, Request};
 use crate::message::Message;
 use crate::view::components::card;
+use crate::view::security::SecurityState;
 use crate::view::theme;
-use crate::view::tokens::font;
+use crate::view::tokens::{font, space};
+
+/// The three status procedures the panel reads (#121, #225, #328), each at
+/// the chosen host — a fleet fan-in's first reply is one host's config,
+/// and editing it back fleet-wide was the bug #1114 named.
+pub const STATUS_PROCEDURES: [&str; 3] = ["detectors", "capture_filter", "threat_intel"];
+
+/// How long a tuning write waits: the sensor applies it without a restart.
+const WRITE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// One status read at `host`, on the Security surface.
+pub fn status_request(host: &zenkey::RemoteOrigin, procedure: &str) -> Request {
+    Request::new(procedure, "")
+        .of("netring")
+        .on(CallSurface::Security)
+        .at(host.clone())
+}
+
+/// The three status reads at `host`.
+pub fn status_requests(host: &zenkey::RemoteOrigin) -> Vec<Request> {
+    STATUS_PROCEDURES
+        .iter()
+        .map(|p| status_request(host, p))
+        .collect()
+}
+
+/// What Refresh sends: the three reads, as one message.
+pub fn refresh(host: &zenkey::RemoteOrigin) -> Message {
+    Message::Batch(
+        status_requests(host)
+            .into_iter()
+            .map(Message::Call)
+            .collect(),
+    )
+}
+
+/// Arm a tuning write to `host` (#1261): `<topic>/set` with the request
+/// the registry declares, confirmed by a second click on the pane's armed
+/// bar, sent to that host and no other.
+pub fn tuning_write(
+    host: &zenkey::RemoteOrigin,
+    topic: &str,
+    request: serde_json::Value,
+    label: impl Into<String>,
+) -> Message {
+    Message::Arm(Armed {
+        surface: CallSurface::Security,
+        producer: Some("netring".to_string()),
+        origin: Some(host.clone()),
+        procedure: format!("{topic}/set"),
+        request,
+        label: label.into(),
+        confirmation: Confirmation::Click,
+        typed: String::new(),
+        timeout: WRITE_TIMEOUT,
+    })
+}
+
+/// A caption button that is offered only when it has somewhere to write.
+fn btn<'a>(
+    label: &str,
+    style: fn(&Theme, iced::widget::button::Status) -> iced::widget::button::Style,
+    on_press: Option<Message>,
+) -> Element<'a, Message> {
+    let b = button(text(label.to_string()).size(font::CAPTION)).style(style);
+    match on_press {
+        Some(m) => b.on_press(m).into(),
+        None => b.into(),
+    }
+}
 
 /// The tunable detectors, in display order: (config key, label, has-threshold).
 /// Mirrors `zensight_sensor_netring::command::detector_names`.
@@ -110,6 +181,21 @@ pub struct DetectionTuningState {
 }
 
 impl DetectionTuningState {
+    /// Forget what was read from a host (#1261) — on a host change, so the
+    /// panel never shows one host's config under another's name. The
+    /// operator's inputs survive.
+    pub fn forget_status(&mut self) {
+        self.loaded = false;
+        self.detectors.clear();
+        self.allowlist.clear();
+        self.status_note = None;
+        self.capture_filter = None;
+        self.threat_intel = None;
+        self.detectors_verdict = None;
+        self.capture_filter_verdict = None;
+        self.threat_intel_verdict = None;
+    }
+
     /// The current enabled state for a detector, if known.
     pub fn is_enabled(&self, detector: &str) -> Option<bool> {
         self.detectors
@@ -242,23 +328,54 @@ fn fmt_threshold(v: f64) -> String {
 }
 
 /// Render the detection-tuning panel.
-pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Message> {
+pub fn detection_tuning_panel<'a>(
+    state: &'a DetectionTuningState,
+    sec: &'a SecurityState,
+) -> Element<'a, Message> {
     let muted = |t: &Theme| text::Style {
         color: Some(theme::colors(t).text_muted()),
     };
+    let host = sec.host_origin();
+    // Every write control is offered only with a host to write to.
+    let arm = |topic: &str, request: serde_json::Value, label: String| -> Option<Message> {
+        host.as_ref()
+            .map(|h| tuning_write(h, topic, request, label))
+    };
 
-    let refresh = button(text("Refresh").size(font::CAPTION))
-        .on_press(Message::RefreshDetectorConfig)
-        .style(iced::widget::button::secondary);
+    // The host chooser (#1261): one host's sensor, chosen or alone.
+    let host_pick = pick_list(
+        sec.hosts.clone(),
+        sec.host.clone(),
+        Message::SetSecurityHost,
+    )
+    .placeholder("pick a netring host")
+    .text_size(font::CAPTION);
+    let refresh = btn(
+        "Refresh",
+        iced::widget::button::secondary,
+        host.as_ref().map(refresh),
+    );
     let mut header = row![text("Detection Tuning (netring)").size(font::EMPHASIS)];
     if let Some(v) = &state.detectors_verdict {
         header = header.push(crate::view::components::verdict::verdict_badge(v));
     }
     let header = header
         .push(iced::widget::Space::new().width(Length::Fill))
+        .push(host_pick)
         .push(refresh)
         .align_y(Alignment::Center)
         .spacing(8);
+    let mut top = column![header].spacing(space::SM);
+    if let Some(bar) = armed_bar(sec) {
+        top = top.push(bar);
+    }
+    if host.is_none() {
+        top = top.push(
+            text("No host chosen — netring tuning belongs to one host's sensor; pick the host above.")
+                .size(font::CAPTION)
+                .style(muted),
+        );
+    }
 
     if !state.loaded {
         let note = state
@@ -266,9 +383,9 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
             .clone()
             .unwrap_or_else(|| "Open with a live netring sensor, then Refresh.".to_string());
         return column![
-            card(column![header, text(note).size(font::CAPTION).style(muted)].spacing(8)),
-            capture_focus_card(state),
-            threat_intel_card(state),
+            card(top.push(text(note).size(font::CAPTION).style(muted))),
+            capture_focus_card(state, &arm),
+            threat_intel_card(state, &arm),
         ]
         .spacing(12)
         .into();
@@ -277,13 +394,20 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
     // Per-detector rows: mute/unmute + optional threshold edit.
     let mut detectors = column![].spacing(6);
     for d in &state.detectors {
-        let toggle = button(text(if d.enabled { "On" } else { "Off" }).size(font::CAPTION))
-            .on_press(Message::ToggleNetringDetector(d.name.clone()))
-            .style(if d.enabled {
+        let enabled = !d.enabled;
+        let toggle = btn(
+            if d.enabled { "On" } else { "Off" },
+            if d.enabled {
                 iced::widget::button::primary
             } else {
                 iced::widget::button::secondary
-            });
+            },
+            arm(
+                "detectors",
+                serde_json::json!({ "type": "set_enabled", "detector": d.name, "enabled": enabled }),
+                format!("{} {}", if enabled { "enable" } else { "mute" }, d.label),
+            ),
+        );
         let mut r = row![
             toggle,
             text(d.label.clone())
@@ -305,11 +429,20 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
                     .padding(4)
                     .width(Length::Fixed(80.0)),
             );
-            r = r.push(
-                button(text("Apply").size(font::CAPTION))
-                    .on_press(Message::ApplyNetringThreshold(d.name.clone()))
-                    .style(iced::widget::button::secondary),
-            );
+            // Offered only for a number: a threshold that does not parse
+            // has nothing to send.
+            let value = d.threshold_input.trim().parse::<f64>().ok();
+            r = r.push(btn(
+                "Apply",
+                iced::widget::button::secondary,
+                value.and_then(|v| {
+                    arm(
+                        "detectors",
+                        serde_json::json!({ "type": "set_threshold", "detector": d.name, "value": v }),
+                        format!("{} threshold = {v}", d.label),
+                    )
+                }),
+            ));
         }
         detectors = detectors.push(r);
     }
@@ -321,48 +454,95 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
         chips.push(text("(none)").size(font::CAPTION).style(muted).into());
     }
     for entry in &state.allowlist {
-        chips.push(
-            button(text(format!("{entry}  ✕")).size(font::CAPTION))
-                .on_press(Message::RemoveNetringAllowlist(entry.clone()))
-                .style(iced::widget::button::secondary)
-                .into(),
-        );
+        chips.push(btn(
+            &format!("{entry}  ✕"),
+            iced::widget::button::secondary,
+            arm(
+                "detectors",
+                serde_json::json!({ "type": "remove_allowlist", "entry": entry }),
+                format!("remove {entry} from the allowlist"),
+            ),
+        ));
     }
     let allowlist_row = Row::with_children(chips)
         .spacing(6)
         .align_y(Alignment::Center);
-    let add_row = row![
-        text_input("host or SLD to allowlist", &state.new_entry)
-            .on_input(Message::SetNetringAllowlistInput)
-            .on_submit(Message::AddNetringAllowlist)
-            .size(font::CAPTION)
-            .padding(5)
-            .width(Length::Fixed(220.0)),
-        button(text("Add").size(font::CAPTION))
-            .on_press(Message::AddNetringAllowlist)
-            .style(iced::widget::button::primary),
-    ]
-    .spacing(8)
-    .align_y(Alignment::Center);
+    let entry = state.new_entry.trim().to_string();
+    let add = (!entry.is_empty())
+        .then(|| {
+            arm(
+                "detectors",
+                serde_json::json!({ "type": "add_allowlist", "entry": entry }),
+                format!("allowlist {entry}"),
+            )
+        })
+        .flatten();
+    let input = text_input("host or SLD to allowlist", &state.new_entry)
+        .on_input(Message::SetNetringAllowlistInput)
+        .size(font::CAPTION)
+        .padding(5)
+        .width(Length::Fixed(220.0));
+    let input = match add.clone() {
+        Some(m) => input.on_submit(m),
+        None => input,
+    };
+    let add_row = row![input, btn("Add", iced::widget::button::primary, add)]
+        .spacing(8)
+        .align_y(Alignment::Center);
 
     column![
         container(
-            column![
-                header,
-                detectors,
-                allowlist_row,
-                add_row,
-                text("Tuning applies without a sensor restart. Enabling a detector that was off at startup needs a restart.")
-                    .size(font::MICRO)
-                    .style(muted),
-            ]
-            .spacing(10),
+            top.push(detectors)
+                .push(allowlist_row)
+                .push(add_row)
+                .push(
+                    text("Tuning applies without a sensor restart. Enabling a detector that was off at startup needs a restart.")
+                        .size(font::MICRO)
+                        .style(muted),
+                )
+                .spacing(10),
         ),
-        capture_focus_card(state),
-        threat_intel_card(state),
+        capture_focus_card(state, &arm),
+        threat_intel_card(state, &arm),
     ]
     .spacing(12)
     .into()
+}
+
+/// The pane's armed write, when there is one (#1261): what will be sent,
+/// to which host, and the confirm/cancel pair — one bar for every control,
+/// since one write is armed at a time.
+fn armed_bar(sec: &SecurityState) -> Option<Element<'_, Message>> {
+    let host = sec
+        .host
+        .as_ref()
+        .map(|h| h.label.clone())
+        .unwrap_or_default();
+    if let Some(armed) = &sec.writes.armed {
+        return Some(
+            row![
+                text(format!("{} on {host}?", armed.label)).size(font::CAPTION),
+                btn(
+                    "confirm",
+                    iced::widget::button::primary,
+                    Some(Message::Confirm)
+                ),
+                btn(
+                    "cancel",
+                    iced::widget::button::secondary,
+                    Some(Message::Disarm)
+                ),
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center)
+            .into(),
+        );
+    }
+    sec.writes.inflight.as_ref().map(|a| {
+        text(format!("{} on {host}…", a.label))
+            .size(font::CAPTION)
+            .into()
+    })
 }
 
 /// Capture-focus card (#225/#228): a live BPF box that hot-swaps the netring
@@ -370,7 +550,10 @@ pub fn detection_tuning_panel(state: &DetectionTuningState) -> Element<'_, Messa
 /// readout of the currently-applied filter (and any validation error) from
 /// `@rpc/netring/capture_filter`. Narrows capture attention during an incident
 /// without restarting capture.
-fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
+fn capture_focus_card<'a>(
+    state: &'a DetectionTuningState,
+    arm: &dyn Fn(&str, serde_json::Value, String) -> Option<Message>,
+) -> Element<'a, Message> {
     let muted = |t: &Theme| text::Style {
         color: Some(theme::colors(t).text_muted()),
     };
@@ -384,22 +567,40 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
     if let Some(v) = &state.capture_filter_verdict {
         header = header.push(crate::view::components::verdict::verdict_badge(v));
     }
+    let expr = state.packet_filter_input.trim().to_string();
+    let apply = (!expr.is_empty())
+        .then(|| {
+            arm(
+                "capture_filter",
+                serde_json::json!({ "type": "set_packet_filter", "expr": expr }),
+                format!("capture filter → {expr}"),
+            )
+        })
+        .flatten();
+    let input = text_input(
+        "BPF expr, e.g. host 10.0.0.5 and port 443",
+        &state.packet_filter_input,
+    )
+    .on_input(Message::SetPacketFilterInput)
+    .size(font::CAPTION)
+    .padding(5)
+    .width(Length::Fixed(320.0));
+    let input = match apply.clone() {
+        Some(m) => input.on_submit(m),
+        None => input,
+    };
     let input_row = row![
-        text_input(
-            "BPF expr, e.g. host 10.0.0.5 and port 443",
-            &state.packet_filter_input
-        )
-        .on_input(Message::SetPacketFilterInput)
-        .on_submit(Message::ApplyPacketFilter)
-        .size(font::CAPTION)
-        .padding(5)
-        .width(Length::Fixed(320.0)),
-        button(text("Apply").size(font::CAPTION))
-            .on_press(Message::ApplyPacketFilter)
-            .style(iced::widget::button::primary),
-        button(text("Clear").size(font::CAPTION))
-            .on_press(Message::ClearPacketFilter)
-            .style(iced::widget::button::secondary),
+        input,
+        btn("Apply", iced::widget::button::primary, apply),
+        btn(
+            "Clear",
+            iced::widget::button::secondary,
+            arm(
+                "capture_filter",
+                serde_json::json!({ "type": "clear_packet_filter" }),
+                "clear the capture filter".to_string(),
+            ),
+        ),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
@@ -453,7 +654,10 @@ fn capture_focus_card(state: &DetectionTuningState) -> Element<'_, Message> {
 /// rules and swap them into the live netring matchers via
 /// `@rpc/netring/threat_intel/set`, with an armed/loaded readout and the last-reload
 /// outcome from `@rpc/netring/threat_intel`. No capture restart.
-fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
+fn threat_intel_card<'a>(
+    state: &'a DetectionTuningState,
+    arm: &dyn Fn(&str, serde_json::Value, String) -> Option<Message>,
+) -> Element<'a, Message> {
     let muted = |t: &Theme| text::Style {
         color: Some(theme::colors(t).text_muted()),
     };
@@ -461,34 +665,65 @@ fn threat_intel_card(state: &DetectionTuningState) -> Element<'_, Message> {
         color: Some(theme::colors(t).danger()),
     };
 
+    let (ips, domains) = split_ioc_paste(&state.threat_ioc_input);
+    let n = ips.len() + domains.len();
+    let apply_ioc = (n > 0)
+        .then(|| {
+            arm(
+                "threat_intel",
+                serde_json::json!({
+                    "type": "set_ioc", "ips": ips, "domains": domains, "ja4": [], "ja3": [],
+                }),
+                format!("push {n} IOC indicators"),
+            )
+        })
+        .flatten();
     let ioc_row = row![
         text_input("IOCs, one per line (IP or domain)", &state.threat_ioc_input)
             .on_input(Message::SetThreatIocInput)
             .size(font::CAPTION)
             .padding(5)
             .width(Length::Fixed(320.0)),
-        button(text("Apply IOCs").size(font::CAPTION))
-            .on_press(Message::ApplyThreatIoc)
-            .style(iced::widget::button::primary),
-        button(text("Reload files").size(font::CAPTION))
-            .on_press(Message::ReloadThreatIocFiles)
-            .style(iced::widget::button::secondary),
-        button(text("Clear").size(font::CAPTION))
-            .on_press(Message::ClearThreatIoc)
-            .style(iced::widget::button::secondary),
+        btn("Apply IOCs", iced::widget::button::primary, apply_ioc),
+        btn(
+            "Reload files",
+            iced::widget::button::secondary,
+            arm(
+                "threat_intel",
+                serde_json::json!({ "type": "reload_ioc_files" }),
+                "reload the indicator files".to_string(),
+            ),
+        ),
+        btn(
+            "Clear",
+            iced::widget::button::secondary,
+            arm(
+                "threat_intel",
+                serde_json::json!({ "type": "clear_ioc" }),
+                "clear the IOC indicators".to_string(),
+            ),
+        ),
     ]
     .spacing(8)
     .align_y(Alignment::Center);
 
+    let rules = state.threat_yara_input.trim().to_string();
+    let apply_yara = (!rules.is_empty())
+        .then(|| {
+            arm(
+                "threat_intel",
+                serde_json::json!({ "type": "set_yara", "rules": rules }),
+                "apply the YARA rules".to_string(),
+            )
+        })
+        .flatten();
     let yara_row = row![
         text_input("YARA rules source", &state.threat_yara_input)
             .on_input(Message::SetThreatYaraInput)
             .size(font::CAPTION)
             .padding(5)
             .width(Length::Fixed(320.0)),
-        button(text("Apply YARA").size(font::CAPTION))
-            .on_press(Message::ApplyThreatYara)
-            .style(iced::widget::button::primary),
+        btn("Apply YARA", iced::widget::button::primary, apply_yara),
     ]
     .spacing(8)
     .align_y(Alignment::Center);

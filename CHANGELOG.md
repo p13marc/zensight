@@ -258,6 +258,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
+  writes — netring's detector toggles, thresholds, allowlist, capture filter,
+  threat intel and capture-to-disk, the syslog filter, parallax's stream
+  fallback — went to every host serving the sensor with `QueryTarget::All`.
+  Now an `Armed` write names its surface, its producer and its host, and one
+  it cannot name is refused with the reason. **Netring tuning is per host:**
+  the Security pane's panel gets the expectations pane's host chooser
+  (#1114's rule), reads its three statuses from that host and arms every
+  control to it, confirmed on one bar — a fleet fan-in's *first reply* used
+  to be rendered as the config and edited back to every capturing host. The
+  device's capture-to-disk controls and the syslog filter's "Apply to Sensor"
+  arm on the device (the fleet Logs view no longer offers Apply, and says
+  where to); the inventory's "allowlist" arms to the Security pane's host;
+  parallax's stream controls refuse when the stream's host is not known.
+  Eighteen messages are deleted (`ToggleNetringDetector`… `ApplySyslogFilters`,
+  the three `*StatusReceived`, `NetringCaptureNow`, `NetringSetCaptureDiskMode`)
+  and `SetSecurityHost` added.
+
 - **The flow↔process join is two calls through the generic call path, not a
   slot per surface** (#1261). A `call::Request` names, when a view needs
   them, the surface a call lands on (`CallSurface::{Device, Security,

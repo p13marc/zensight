@@ -331,6 +331,7 @@ pub fn entity_for_asset<'e>(
 pub fn inventory_view<'a>(
     state: &'a InventoryState,
     entities: &'a EntityStore,
+    security: &'a crate::view::security::SecurityState,
     now_ms: i64,
 ) -> Element<'a, Message> {
     let refresh = {
@@ -354,7 +355,7 @@ pub fn inventory_view<'a>(
 
     content = content
         .push(card(render_assets(state, entities, now_ms)))
-        .push(card(render_fingerprints(state)));
+        .push(card(render_fingerprints(state, security)));
 
     container(scrollable(content.padding(space::LG)))
         .width(Length::Fill)
@@ -535,7 +536,10 @@ fn entity_cell<'a>(
     }
 }
 
-fn render_fingerprints(state: &InventoryState) -> Element<'_, Message> {
+fn render_fingerprints<'a>(
+    state: &'a InventoryState,
+    security: &'a crate::view::security::SecurityState,
+) -> Element<'a, Message> {
     let header = section_header(
         format!("Fingerprint explorer ({})", state.fingerprints.len()),
         None,
@@ -597,10 +601,37 @@ fn render_fingerprints(state: &InventoryState) -> Element<'_, Message> {
         // detection-tuning command channel, #121); other rows are informational.
         let action: Element<'_, Message> = match &f.allowlist_host {
             Some(host) if !host.is_empty() && host != "-" => {
-                button(text("allowlist").size(font::MICRO))
-                    .padding([2, 8])
-                    .on_press(Message::AddNetringAllowlistEntry(host.clone()))
-                    .into()
+                // An allowlist entry is one host's (#1261): armed to the
+                // Security pane's chosen netring host, confirmed here in the
+                // row, and not offered without a host to write to.
+                let armed = security
+                    .writes
+                    .armed_for("detectors/set")
+                    .filter(|a| a.request["entry"] == host.as_str());
+                match (armed, security.host_origin()) {
+                    (Some(_), _) => row![
+                        button(text("confirm").size(font::MICRO))
+                            .padding([2, 8])
+                            .on_press(Message::Confirm),
+                        button(text("cancel").size(font::MICRO))
+                            .padding([2, 8])
+                            .on_press(Message::Disarm),
+                    ]
+                    .spacing(space::XS)
+                    .into(),
+                    (None, Some(h)) => button(text("allowlist").size(font::MICRO))
+                        .padding([2, 8])
+                        .on_press(crate::view::detection_tuning::tuning_write(
+                            &h,
+                            "detectors",
+                            serde_json::json!({ "type": "add_allowlist", "entry": host }),
+                            format!("allowlist {host}"),
+                        ))
+                        .into(),
+                    (None, None) => button(text("allowlist").size(font::MICRO))
+                        .padding([2, 8])
+                        .into(),
+                }
             }
             _ => cell("", 90),
         };
@@ -842,7 +873,8 @@ mod tests {
             assets_responded: true,
             ..Default::default()
         };
-        let mut ui = simulator(inventory_view(&state, &store, 1_000));
+        let sec = crate::view::security::SecurityState::default();
+        let mut ui = simulator(inventory_view(&state, &store, &sec, 1_000));
         // Sensor-backed asset links to its host; the wire-only one gets a badge.
         assert!(ui.find("wire-only").is_ok());
         assert!(ui.find("web01").is_ok());
@@ -878,7 +910,8 @@ mod tests {
             ..Default::default()
         };
         let store = crate::entity::EntityStore::default();
-        let mut ui = simulator(inventory_view(&state, &store, 1_000));
+        let sec = crate::view::security::SecurityState::default();
+        let mut ui = simulator(inventory_view(&state, &store, &sec, 1_000));
         // Degraded path (#314): no correlator ⇒ no entity column, no badges.
         assert!(ui.find("host entity").is_err());
         assert!(ui.find("wire-only").is_err());

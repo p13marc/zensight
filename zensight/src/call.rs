@@ -75,6 +75,10 @@ pub struct Request {
     /// panel wants. A caller that needs two answers to one procedure with
     /// different params — the join's two endpoints — keys them itself.
     pub key: Option<String>,
+    /// The host asked, when the surface chose one (the Security pane's
+    /// netring host). `None` is the selected device's origin for its own
+    /// producer, the fleet for another's.
+    pub origin: Option<zenkey::RemoteOrigin>,
 }
 
 impl Request {
@@ -86,6 +90,7 @@ impl Request {
             procedure: procedure.into(),
             params: params.into(),
             key: None,
+            origin: None,
         }
     }
 
@@ -101,6 +106,11 @@ impl Request {
 
     pub fn keyed(mut self, key: impl Into<String>) -> Self {
         self.key = Some(key.into());
+        self
+    }
+
+    pub fn at(mut self, origin: zenkey::RemoteOrigin) -> Self {
+        self.origin = Some(origin);
         self
     }
 
@@ -548,9 +558,19 @@ pub enum Confirmation {
 }
 
 /// A write procedure the operator has armed and not yet confirmed (#1261):
-/// what will be sent, how it reads on screen, and how it is confirmed.
+/// what will be sent, to whom, how it reads on screen, and how it is
+/// confirmed. One write is armed at a time, app-wide: arming on one
+/// surface disarms the other, so `Confirm` is never ambiguous.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Armed {
+    /// The surface that armed it and shows its confirmation.
+    pub surface: CallSurface,
+    /// The producer written to; `None` is the selected device's own.
+    pub producer: Option<String>,
+    /// The host written to; `None` is the surface's own — the selected
+    /// device's origin, the Security pane's chosen host. Never the fleet:
+    /// a write with no host to address is refused, not broadcast.
+    pub origin: Option<zenkey::RemoteOrigin>,
     pub procedure: String,
     /// The request body as JSON — the request type the registry declares.
     pub request: serde_json::Value,
@@ -766,6 +786,9 @@ mod tests {
 
     fn armed(confirmation: Confirmation) -> Armed {
         Armed {
+            surface: CallSurface::Device,
+            producer: None,
+            origin: None,
             procedure: "action/set".into(),
             request: json!({ "device": "pdu-a", "outlet": "3", "verb": "cycle" }),
             label: "cycle outlet pdu-a/3".into(),

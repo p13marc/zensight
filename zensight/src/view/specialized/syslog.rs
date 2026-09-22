@@ -154,6 +154,9 @@ impl LogSource {
     }
 }
 
+/// The logs sensor's filter write procedure this panel arms (#1261).
+const FILTER_SET: &str = "filter/set";
+
 /// Syslog filter state for the UI.
 #[derive(Debug, Clone, Default)]
 pub struct SyslogFilterState {
@@ -345,6 +348,37 @@ impl SyslogFilterState {
         self.modified = false;
     }
 
+    /// The sensor-side filter this panel applies (#1261): one `add_filter`
+    /// with a stable id, so re-applying replaces the same dynamic filter
+    /// rather than stacking duplicates.
+    pub fn to_command(&self) -> serde_json::Value {
+        let mut filter = serde_json::Map::new();
+        if let Some(sev) = self.min_severity {
+            filter.insert("min_severity".into(), serde_json::json!(sev));
+        }
+        if !self.selected_facilities.is_empty() {
+            let facs: Vec<&String> = self.selected_facilities.iter().collect();
+            filter.insert("include_facilities".into(), serde_json::json!(facs));
+        }
+        if !self.app_filter.is_empty() {
+            filter.insert(
+                "include_app_patterns".into(),
+                serde_json::json!([{ "pattern": self.app_filter, "pattern_type": "glob" }]),
+            );
+        }
+        if !self.message_filter.is_empty() {
+            filter.insert(
+                "include_message_patterns".into(),
+                serde_json::json!([{ "pattern": self.message_filter, "pattern_type": "glob" }]),
+            );
+        }
+        serde_json::json!({
+            "type": "add_filter",
+            "id": "frontend-panel",
+            "filter": serde_json::Value::Object(filter),
+        })
+    }
+
     /// A filter changed: flag it, and reset paging (#601). A narrowed feed
     /// must start at the first page — carrying a grown window or a stale
     /// "nothing older" verdict across a filter change is how a feed lies
@@ -431,7 +465,12 @@ pub fn syslog_event_view<'a>(
         .spacing(space::MD)
         .padding(space::LG);
     if filter_state.panel_open {
-        content = content.push(card(render_filter_panel(messages, filter_state, None)));
+        content = content.push(card(render_filter_panel(
+            messages,
+            filter_state,
+            None,
+            Some(&state.writes),
+        )));
     }
     // Log statistics (#350): severity summary + derived rollups behind ONE
     // collapsible header (default closed) so the log stream is on screen
@@ -740,7 +779,14 @@ pub fn logs_view<'a>(
         ));
     }
     if filter_state.panel_open {
-        content = content.push(card(render_filter_panel(messages, filter_state, export)));
+        // The fleet view has no host to apply a sensor-side filter to
+        // (#1261): the panel narrows what is shown, and says where to apply.
+        content = content.push(card(render_filter_panel(
+            messages,
+            filter_state,
+            export,
+            None,
+        )));
     }
     content = content.push(card(render_severity_summary(messages, filter_state)));
     content = content.push(card(render_log_stream(messages, filter_state)));
@@ -795,6 +841,7 @@ fn render_filter_panel<'a>(
     messages: &[SyslogMessage],
     filter_state: &'a SyslogFilterState,
     export: Option<LogExport>,
+    writes: Option<&'a crate::call::Writes>,
 ) -> Element<'a, Message> {
     let title = row![
         icons::toggle(IconSize::Medium),
@@ -979,15 +1026,52 @@ fn render_filter_panel<'a>(
         );
     }
 
-    // Action buttons
-    let apply_button =
-        button(row![text("Apply to Sensor").size(font::BODY)].align_y(Alignment::Center))
-            .on_press(Message::ApplySyslogFilters)
-            .style(if filter_state.modified {
-                iced::widget::button::primary
-            } else {
-                iced::widget::button::secondary
-            });
+    // Action buttons. "Apply to Sensor" is a write to this host's logs
+    // sensor (#1261): armed on the device, confirmed by a second click, and
+    // absent on the fleet view, which has no host to address.
+    let apply_button: Element<'a, Message> = match writes {
+        None => text("Apply a sensor-side filter from a host's Logs view — a filter belongs to one host's sensor")
+            .size(font::DENSE)
+            .style(|t: &Theme| text::Style {
+                color: Some(theme::colors(t).text_muted()),
+            })
+            .into(),
+        Some(w) => match w.armed_for(FILTER_SET) {
+            Some(armed) => row![
+                text(format!("{}?", armed.label)).size(font::BODY),
+                button(text("confirm").size(font::BODY)).on_press(Message::Confirm),
+                button(text("cancel").size(font::BODY))
+                    .on_press(Message::Disarm)
+                    .style(iced::widget::button::secondary),
+            ]
+            .spacing(space::SM)
+            .align_y(Alignment::Center)
+            .into(),
+            None if w.inflight_for(FILTER_SET).is_some() => {
+                text("applying…").size(font::BODY).into()
+            }
+            None => {
+                button(row![text("Apply to Sensor").size(font::BODY)].align_y(Alignment::Center))
+                    .on_press(Message::Arm(crate::call::Armed {
+                        surface: crate::call::CallSurface::Device,
+                        producer: None,
+                        origin: None,
+                        procedure: FILTER_SET.to_string(),
+                        request: filter_state.to_command(),
+                        label: "apply the syslog filter".to_string(),
+                        confirmation: crate::call::Confirmation::Click,
+                        typed: String::new(),
+                        timeout: std::time::Duration::from_secs(10),
+                    }))
+                    .style(if filter_state.modified {
+                        iced::widget::button::primary
+                    } else {
+                        iced::widget::button::secondary
+                    })
+                    .into()
+            }
+        },
+    };
 
     let clear_button = button(row![text("Clear").size(font::BODY)].align_y(Alignment::Center))
         .on_press(Message::ClearSyslogFilters)

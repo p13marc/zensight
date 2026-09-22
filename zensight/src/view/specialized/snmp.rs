@@ -466,6 +466,9 @@ fn outlet_row<'a>(
                 tiny_button(
                     "cycle".into(),
                     Some(Message::Arm(crate::call::Armed {
+                        surface: crate::call::CallSurface::Device,
+                        producer: None,
+                        origin: None,
                         procedure: ACTION_SET.to_string(),
                         request: serde_json::to_value(&request).unwrap_or_default(),
                         label: format!("cycle outlet {device}/{outlet}"),

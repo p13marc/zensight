@@ -912,9 +912,32 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
         "rotating" => theme::STATUS_ONLINE,
         _ => theme::STATUS_UNKNOWN,
     };
-    let capture_now = button(text("Capture now").size(font::CAPTION))
-        .padding([4, 10])
-        .on_press(Message::NetringCaptureNow);
+    // The capture-to-disk writes arm on this device (#1261): a second
+    // click confirms, and they go to this host and no other.
+    let capture_now: Element<'_, Message> = match state.writes.armed_for(CAPTURE_DISK_SET) {
+        Some(armed) => row![
+            text(format!("{}?", armed.label)).size(font::CAPTION),
+            button(text("confirm").size(font::CAPTION))
+                .padding([4, 10])
+                .on_press(Message::Confirm),
+            button(text("cancel").size(font::CAPTION))
+                .padding([4, 10])
+                .on_press(Message::Disarm),
+        ]
+        .spacing(space::XS)
+        .align_y(iced::Alignment::Center)
+        .into(),
+        None if state.writes.inflight_for(CAPTURE_DISK_SET).is_some() => {
+            text("writing…").size(font::CAPTION).style(dim).into()
+        }
+        None => button(text("Capture now").size(font::CAPTION))
+            .padding([4, 10])
+            .on_press(capture_write(
+                serde_json::json!({ "type": "capture_now" }),
+                "capture now",
+            ))
+            .into(),
+    };
     let header = section_header(
         "Capture to disk",
         Some(
@@ -980,7 +1003,10 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
     for m in ["off", "rotating", "triggered"] {
         let mut b = button(text(m).size(font::CAPTION)).padding([3, 9]);
         if m != mode {
-            b = b.on_press(Message::NetringSetCaptureDiskMode(m.to_string()));
+            b = b.on_press(capture_write(
+                serde_json::json!({ "type": "set_capture", "mode": m }),
+                format!("capture-to-disk mode → {m}"),
+            ));
         }
         modes = modes.push(b);
     }
@@ -1886,6 +1912,24 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     col.into()
 }
 
+/// The capture-to-disk write procedure this view arms (#1261).
+const CAPTURE_DISK_SET: &str = "capture_disk/set";
+
+/// Arm a capture-to-disk write on this device: confirmed by a second click.
+fn capture_write(request: serde_json::Value, label: impl Into<String>) -> Message {
+    Message::Arm(crate::call::Armed {
+        surface: crate::call::CallSurface::Device,
+        producer: None,
+        origin: None,
+        procedure: CAPTURE_DISK_SET.to_string(),
+        request,
+        label: label.into(),
+        confirmation: crate::call::Confirmation::Click,
+        typed: String::new(),
+        timeout: std::time::Duration::from_secs(10),
+    })
+}
+
 /// The flow↔process join cell of one flow row (#309, #1261): "who?" until
 /// asked, then where the join stands, read from the device's calls.
 fn attribution_cell<'a>(calls: &crate::call::Calls, src: &str, dst: &str) -> Element<'a, Message> {
@@ -2459,7 +2503,11 @@ mod tests {
         let _ = ui.click("Download");
         let _ = ui.click("rotating");
         let msgs: Vec<Message> = ui.into_messages().collect();
-        assert!(msgs.iter().any(|m| matches!(m, Message::NetringCaptureNow)));
+        // The writes arm on this device (#1261), confirmed by a second click.
+        assert!(msgs.iter().any(|m| matches!(
+            m,
+            Message::Arm(a) if a.procedure == "capture_disk/set" && a.request["type"] == "capture_now"
+        )));
         // The emitted message carries the concrete origin and the root, which
         // is what lets the fetch be both literal-keyed (RFC 07 §3) and
         // anchored (§2.1).
@@ -2482,7 +2530,7 @@ mod tests {
         );
         assert!(
             msgs.iter().any(
-                |m| matches!(m, Message::NetringSetCaptureDiskMode(mode) if mode == "rotating")
+                |m| matches!(m, Message::Arm(a) if a.procedure == "capture_disk/set" && a.request["mode"] == "rotating")
             )
         );
     }
