@@ -1329,7 +1329,7 @@ fn test_overview_firing_alert_tile() {
         &overview,
         &state.devices,
         SnmpOverviewData {
-            interfaces: &state.snmp_interfaces,
+            interfaces: Vec::new(),
             events: &state.snmp_events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -1354,7 +1354,7 @@ fn test_overview_firing_alert_tile() {
         &overview,
         &state.devices,
         SnmpOverviewData {
-            interfaces: &state.snmp_interfaces,
+            interfaces: Vec::new(),
             events: &state.snmp_events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -4817,14 +4817,13 @@ mod adopt_discovered {
         // Leak the fixtures: the view borrows them and the simulator outlives
         // this frame. Fine in a test, and it keeps the call sites readable.
         let disc: &'static _ = Box::leak(Box::new(disc.clone()));
-        let docs: &'static _ = Box::leak(Box::new(HashMap::new()));
         let events: &'static _ = Box::leak(Box::new(std::collections::VecDeque::new()));
         let filter: &'static EventFilterState = Box::leak(Box::default());
         let devices: &'static _ = Box::leak(Box::new(HashMap::new()));
         snmp_overview(
             devices,
             SnmpOverviewData {
-                interfaces: docs,
+                interfaces: Vec::new(),
                 events,
                 event_filter: filter,
                 discovery: disc,
@@ -7186,7 +7185,7 @@ fn test_snmp_overview_two_pollers_one_device_name() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7255,7 +7254,7 @@ fn test_snmp_overview_rate_based() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7283,14 +7282,14 @@ fn test_snmp_overview_empty() {
     use zensight::view::overview::snmp::snmp_overview;
 
     let devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
-    let docs = HashMap::new();
+    let docs: HashMap<DeviceId, zensight_common::InterfaceTable> = HashMap::new();
     let events = std::collections::VecDeque::new();
     let discovery = HashMap::new();
     let evt_filter = EventFilterState::default();
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7351,7 +7350,7 @@ fn test_snmp_overview_trap_feed() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7414,7 +7413,7 @@ fn test_snmp_overview_discovery_card() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7430,7 +7429,7 @@ fn test_snmp_overview_discovery_card() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7493,7 +7492,7 @@ fn test_snmp_event_feed_filters_and_links() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7525,7 +7524,7 @@ fn test_snmp_event_feed_filters_and_links() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7550,7 +7549,7 @@ fn test_snmp_event_feed_filters_and_links() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7571,7 +7570,7 @@ fn test_snmp_event_feed_filters_and_links() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,
@@ -7611,7 +7610,7 @@ fn test_snmp_event_row_links_to_the_alert_it_raised() {
     let mut devices: HashMap<&DeviceId, &DeviceState> = HashMap::new();
     devices.insert(&router_id, &router);
 
-    let docs = HashMap::new();
+    let docs: HashMap<DeviceId, zensight_common::InterfaceTable> = HashMap::new();
     let discovery = HashMap::new();
     let mut events = std::collections::VecDeque::new();
     events.push_back(mock::snmp::trap_event_with_alert(
@@ -7627,7 +7626,7 @@ fn test_snmp_event_row_links_to_the_alert_it_raised() {
     let mut ui = simulator(snmp_overview(
         &devices,
         SnmpOverviewData {
-            interfaces: &docs,
+            interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
             events: &events,
             event_filter: &evt_filter,
             discovery: &discovery,

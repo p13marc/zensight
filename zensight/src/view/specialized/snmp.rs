@@ -75,6 +75,24 @@ pub fn outlet_capability_key(origin: &zenkey::RemoteOrigin) -> String {
     zensight_common::origin_rpc_key(origin, "snmp", "action/capability")
 }
 
+/// Project the device's `<source>/interfaces` document (#530, #1261) into
+/// the interface table's rows, joined with the metric tree's rates. The
+/// document arrives through the generic intake and is decoded as an
+/// `InterfaceTable` once; a document that is not one leaves the table as it
+/// was and the generic Documents card shows the value as it came.
+pub fn project_documents(state: &mut DeviceDetailState) {
+    let subject = format!("{}/interfaces", state.device_id.source);
+    let Some(table) = state
+        .documents
+        .get(&subject)
+        .and_then(|doc| doc.decoded::<InterfaceTable>().ok())
+    else {
+        return;
+    };
+    let table = table.clone();
+    state.snmp_detail.apply_interfaces(table, &state.metrics);
+}
+
 /// The `action/set` write procedure this panel arms and sends (#956, #1261).
 const ACTION_SET: &str = "action/set";
 

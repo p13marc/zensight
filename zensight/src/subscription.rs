@@ -1107,15 +1107,11 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
                 }
             })
         }
-        ZensightState::SnmpInterfaces { device } => {
-            let device = device.to_string();
-            decode!(zensight_common::InterfaceTable, |table| {
-                Message::SnmpInterfaceTable {
-                    origin,
-                    device,
-                    table,
-                }
-            })
+        // snmp's joined interface table is a state document like any other
+        // since #1261: held by the intake, decoded as `InterfaceTable` once by
+        // the views that read it, ranked fleet-wide from the store.
+        ZensightState::SnmpInterfaces { .. } => {
+            decode_structural(key, payload, class, origin, producer, &tail)
         }
         // Subnet-discovery proposals (#579): the sensor's LWW report of
         // unconfigured responders. Shown, never auto-added (#541).
@@ -1757,6 +1753,28 @@ mod tests {
             ),
             Some(Message::Document { subject, .. }) if subject == "device/dev1/liveness"
         ));
+    }
+
+    /// A registered producer's state document that no typed arm claims —
+    /// snmp's `<device>/interfaces` since #1261 — is held as a document, the
+    /// subject naming the device, and the view decodes it as its type once.
+    #[test]
+    fn the_snmp_interface_table_is_a_document() {
+        let payload = br#"{"device":"router01","interfaces":[]}"#;
+        match decode_sample("v1/h-3fa9c2d41b7e/state/snmp/router01/interfaces", payload) {
+            Some(Message::Document {
+                origin,
+                producer,
+                subject,
+                value,
+            }) => {
+                assert_eq!(origin, "h-3fa9c2d41b7e");
+                assert_eq!(producer, "snmp");
+                assert_eq!(subject, "router01/interfaces");
+                assert_eq!(value["device"], serde_json::json!("router01"));
+            }
+            other => panic!("expected a Document, got {other:?}"),
+        }
     }
 
     /// The structural path (#1256): a producer the compiled registry never

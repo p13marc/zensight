@@ -318,7 +318,13 @@ pub struct DashboardState {
     /// between them every poll. That is the class #474 fixed for `DeviceId`:
     /// the origin says who is talking, the source says who they are talking
     /// about, and neither alone names a device.
-    pub snmp_interfaces: HashMap<DeviceId, zensight_common::InterfaceTable>,
+    /// State documents from the structural intake (#1256, #1261), per
+    /// `(origin, producer)` and by subject; bounded per key. Fleet-wide,
+    /// because the overviews read them (snmp's interface documents rank
+    /// the fleet's interfaces) and a device reads the subjects under its
+    /// source; each is decoded as a type once, on first read.
+    pub documents:
+        HashMap<(String, String), std::collections::BTreeMap<String, crate::intake::DocumentState>>,
     /// Recent SNMP trap/event records off the events plane (#536), newest
     /// first, deduped by ULID, capped.
     pub snmp_events: std::collections::VecDeque<zensight_common::EventRecord>,
@@ -356,7 +362,7 @@ impl Default for DashboardState {
             devices_per_page: DEFAULT_DEVICES_PER_PAGE,
             view_mode: DashboardViewMode::default(),
             status_filter: None,
-            snmp_interfaces: HashMap::new(),
+            documents: HashMap::new(),
             snmp_events: std::collections::VecDeque::new(),
             snmp_discovery: HashMap::new(),
             snmp_discovery_open: false,
@@ -701,7 +707,7 @@ pub fn dashboard_view<'a>(
         overview,
         &state.devices,
         crate::view::overview::snmp::SnmpOverviewData {
-            interfaces: &state.snmp_interfaces,
+            interfaces: crate::view::overview::snmp::interface_documents(&state.documents),
             events: &state.snmp_events,
             event_filter: &state.snmp_event_filter,
             discovery: &state.snmp_discovery,

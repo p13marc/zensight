@@ -190,12 +190,13 @@ impl FleetIface<'_> {
 /// Bundled because these five travel together through `overview_section`
 /// into `snmp_overview` and nowhere else — passing them individually made
 /// every intermediate signature grow with each SNMP feature.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct SnmpOverviewData<'a> {
-    /// Joined interface docs keyed by device (#529).
-    /// Keyed by [`DeviceId`] since #1118: two pollers polling one `switch01`
-    /// are two devices, and a name key made them collide LWW.
-    pub interfaces: &'a HashMap<crate::message::DeviceId, InterfaceTable>,
+    /// The fleet's interface documents (#529), each with the origin of the
+    /// poller that published it — two pollers polling one `switch01` are two
+    /// devices (#1118). From the intake's document store (#1261), decoded
+    /// once: see [`interface_documents`].
+    pub interfaces: Vec<(&'a str, &'a InterfaceTable)>,
     /// Fleet trap/event ring, newest first (#536).
     pub events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
     /// Filter/search state for that feed (#578).
@@ -213,6 +214,35 @@ pub struct SnmpOverviewData<'a> {
     /// `file | desired | rpc` is in force on that host's SNMP sensor, and the
     /// last desired document it refused.
     pub applied_targets: &'a HashMap<String, zensight_common::desired::AppliedConfig>,
+}
+
+/// The fleet's `snmp` interface documents (`<device>/interfaces`, state
+/// class) from the intake's store (#1261), as `(origin, table)` — each
+/// decoded once through `DocumentState::decoded`, so ranking the fleet
+/// every frame costs a walk, not a parse. A document that is not an
+/// `InterfaceTable` is left out here; the device view says so.
+pub fn interface_documents<'a>(
+    documents: &'a HashMap<
+        (String, String),
+        std::collections::BTreeMap<String, crate::intake::DocumentState>,
+    >,
+) -> Vec<(&'a str, &'a InterfaceTable)> {
+    let mut out: Vec<(&'a str, &'a InterfaceTable)> = documents
+        .iter()
+        .filter(|((_, producer), _)| producer == "snmp")
+        .flat_map(|((origin, _), docs)| {
+            docs.iter()
+                .filter(|(subject, _)| subject.ends_with("/interfaces"))
+                .filter_map(move |(_, doc)| {
+                    doc.decoded::<InterfaceTable>()
+                        .ok()
+                        .map(|table| (origin.as_str(), table))
+                })
+        })
+        .collect();
+    // Deterministic order: the map is a hash map.
+    out.sort_by(|(oa, ta), (ob, tb)| (ta.device.as_str(), *oa).cmp(&(tb.device.as_str(), *ob)));
+    out
 }
 
 /// Render the SNMP network overview.
@@ -235,12 +265,12 @@ pub fn snmp_overview<'a>(
 
     let fleet: Vec<FleetIface<'a>> = interfaces
         .iter()
-        .flat_map(|(id, doc)| {
+        .flat_map(|(origin, doc)| {
             doc.interfaces.iter().map(move |entry| FleetIface {
                 device: &doc.device,
                 // The publishing poller, so two `switch01`s are told apart in
                 // the row as well as in the map (#1118).
-                origin: id.origin.as_str(),
+                origin,
                 entry,
             })
         })
@@ -252,11 +282,11 @@ pub fn snmp_overview<'a>(
     let ambiguous: std::collections::HashSet<&str> = {
         let mut by_name: std::collections::HashMap<&str, std::collections::HashSet<&str>> =
             std::collections::HashMap::new();
-        for (id, doc) in interfaces {
+        for (origin, doc) in &interfaces {
             by_name
                 .entry(doc.device.as_str())
                 .or_default()
-                .insert(id.origin.as_str());
+                .insert(*origin);
         }
         by_name
             .into_iter()

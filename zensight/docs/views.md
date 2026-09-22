@@ -369,10 +369,25 @@ counter a tab watches — systemd's Units tab re-pulls `units` when
 `events/job_removed_total` moves, because some unit changed on the host
 whether ZenSight caused it or not — is `specialized::refresh_when_moves`
 over `DeviceDetailState::counters_seen`, seeded on first sight. On open, the
-producer's prefetch list is keyed by name. `SystemdDetailState` is gone;
-what remains per producer on the device state is netring's flow↔process
-join slot, parallax's tiles and controllers, and snmp's interface document
-and events — projections of the wire that no call answers.
+producer's prefetch list is keyed by name. `SystemdDetailState` is gone.
+
+**A state document is read as a type where a view needs one** (#1261).
+The intake's document store lives on the dashboard state
+(`DashboardState::documents`, per `(origin, producer)` and by subject,
+fleet-wide), and `DocumentState::decoded::<T>()` decodes a document once
+and lends it out from then on, the way `Reply::decoded` does for a call —
+so the generic Documents card keeps showing the value as it came while a
+bespoke view reads its type. snmp's joined interface table
+(`<device>/interfaces`) is the first: the typed `SnmpInterfaceTable` arm is
+gone, the document arrives through the structural path like any other, the
+overview ranks the fleet's interfaces straight from the store
+(`overview::snmp::interface_documents`, a walk per frame and never a parse),
+and the device view rebuilds its joined rows when its documents change
+(`specialized::on_documents` → `snmp::project_documents`). A retired
+device's documents go with it (`forget_documents`, the rule `documents_for`
+reads by). What remains per producer on the device state is netring's
+flow↔process join slot, parallax's tiles and controllers, and snmp's
+projected rows and its event ring.
 
 ## Routing: `CurrentView`
 

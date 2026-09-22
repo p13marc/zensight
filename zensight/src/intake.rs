@@ -39,7 +39,6 @@ pub enum Declared {
 
 /// A state document held for a device — the `(type, verdict, declared)`
 /// triple beside the value, so the view can say what it knows.
-#[derive(Debug, Clone)]
 pub struct DocumentState {
     /// The subject tail, as published (chunks 5.. of the key, joined).
     pub subject: String,
@@ -50,6 +49,83 @@ pub struct DocumentState {
     pub declared: Declared,
     /// Our clock at fold, for the "as of" caption.
     pub received_ms: i64,
+    /// The typed projection a view asked for, decoded once (#1261): a view
+    /// borrows `&state` and hands Iced elements that borrow the rows, so the
+    /// decoded document must live here, beside the value, not on a stack.
+    pub(crate) typed: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for DocumentState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocumentState")
+            .field("subject", &self.subject)
+            .field("type_name", &self.type_name)
+            .field("value", &self.value)
+            .field("verdict", &self.verdict)
+            .field("declared", &self.declared)
+            .field("received_ms", &self.received_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for DocumentState {
+    /// The wire value clones; the typed projection is decoded again on
+    /// first use — it is a cache, not state.
+    fn clone(&self) -> Self {
+        DocumentState {
+            subject: self.subject.clone(),
+            type_name: self.type_name.clone(),
+            value: self.value.clone(),
+            verdict: self.verdict.clone(),
+            declared: self.declared,
+            received_ms: self.received_ms,
+            typed: std::sync::OnceLock::new(),
+        }
+    }
+}
+
+impl DocumentState {
+    pub fn new(
+        subject: String,
+        type_name: Option<String>,
+        value: serde_json::Value,
+        verdict: Verdict,
+        declared: Declared,
+        received_ms: i64,
+    ) -> Self {
+        DocumentState {
+            subject,
+            type_name,
+            value,
+            verdict,
+            declared,
+            received_ms,
+            typed: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The document as a type, decoded once and borrowed from then on —
+    /// what a bespoke view reads a state document as (snmp's
+    /// `InterfaceTable`), while the generic view keeps rendering the value
+    /// as it came. One document, one type: a second type asked of the same
+    /// document is an error, not a second decode.
+    pub fn decoded<T>(&self) -> Result<&T, String>
+    where
+        T: serde::de::DeserializeOwned + std::any::Any + Send + Sync,
+    {
+        let slot = self.typed.get_or_init(|| {
+            Box::new(serde_json::from_value::<T>(self.value.clone()).map_err(|e| e.to_string()))
+                as Box<dyn std::any::Any + Send + Sync>
+        });
+        match slot.downcast_ref::<Result<T, String>>() {
+            Some(Ok(t)) => Ok(t),
+            Some(Err(e)) => Err(e.clone()),
+            None => Err(format!(
+                "document already decoded as another type than {}",
+                std::any::type_name::<T>()
+            )),
+        }
+    }
 }
 
 /// An events-class record held in the ring — wire facts only.
@@ -325,5 +401,43 @@ mod tests {
         // A repeat is not an overflow.
         u.insert("s/0", "s/0");
         assert_eq!(u.overflow, 10);
+    }
+
+    /// A document decodes once as the type a view asks for, and is borrowed
+    /// from then on (#1261); the wrong shape is an error, never a default.
+    #[test]
+    fn a_document_decodes_once_as_a_type() {
+        let doc = DocumentState::new(
+            "router01/interfaces".into(),
+            Some("InterfaceTable".into()),
+            serde_json::to_value(crate::mock::snmp::interface_table("router01", 1)).unwrap(),
+            Verdict::NotValidated(NotValidated::NoSchema),
+            Declared::Yes,
+            0,
+        );
+        let a: &zensight_common::InterfaceTable = doc.decoded().expect("decodes");
+        let b: &zensight_common::InterfaceTable = doc.decoded().expect("the same");
+        assert!(std::ptr::eq(a, b), "decoded once, borrowed twice");
+        assert_eq!(a.device, "router01");
+        assert!(
+            doc.decoded::<Vec<u8>>().is_err(),
+            "a second type is refused"
+        );
+        let wrong = DocumentState::new(
+            "x".into(),
+            None,
+            serde_json::json!([1, 2]),
+            Verdict::NotValidated(NotValidated::NoSchema),
+            Declared::No,
+            0,
+        );
+        assert!(wrong.decoded::<zensight_common::InterfaceTable>().is_err());
+        // A clone starts over: a cache, not state.
+        assert!(doc.clone().decoded::<Vec<u8>>().is_err());
+        assert!(
+            doc.clone()
+                .decoded::<zensight_common::InterfaceTable>()
+                .is_ok()
+        );
     }
 }
