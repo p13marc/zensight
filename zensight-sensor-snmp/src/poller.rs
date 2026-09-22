@@ -8,7 +8,9 @@ use async_snmp::{Auth, Client, EngineCache, MessageSize, Retry, UdpHandle, Value
 use bytes::Bytes;
 use zenoh::Session as ZenohSession;
 
+use zensight_common::v1::V1ContextExt;
 use zensight_common::{Format, TelemetryPoint, TelemetryValue};
+use zensight_sensor_core::v1::V1Context;
 
 use crate::config::{AuthProtocol, DeviceConfig, OidGroup, PrivProtocol, SnmpVersion};
 use crate::mib::MibResolver;
@@ -21,6 +23,9 @@ const SYS_UPTIME_OID: &str = "1.3.6.1.2.1.1.3.0";
 /// SNMP poller for a single device.
 pub struct SnmpPoller {
     device: DeviceConfig,
+    /// This producer's v1 context: every key is rendered from the generated
+    /// subject as this producer (#1274).
+    v1: V1Context,
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
     registry: Arc<zensight_common::PublisherRegistry>,
@@ -145,6 +150,7 @@ impl SnmpPoller {
 
         Self {
             device,
+            v1: zensight_sensor_core::v1::for_producer("snmp"),
             registry: Arc::new(zensight_common::PublisherRegistry::new(zenoh)),
             mib_resolver,
             format,
@@ -224,9 +230,7 @@ impl SnmpPoller {
         // would mint a key colliding with the liveliness leaf (RFC 03 §3).
         // Refusing it costs this one state doc; minting it would cost the
         // device's liveliness.
-        match zensight_sensor_core::v1::for_producer("snmp")
-            .state_key(&[&self.device.name, "interfaces"])
-        {
+        match self.v1.state_key(&[&self.device.name, "interfaces"]) {
             Ok(key) => self.interfaces_doc = Some((registry, key.into())),
             Err(e) => tracing::warn!(
                 device = %self.device.name,
@@ -513,11 +517,12 @@ impl SnmpPoller {
                     let mut known = known.write().unwrap();
                     known.extend(claim.ips.iter().cloned());
                 }
-                let key: String = zensight_common::registry::snmp::key(
-                    &zensight_common::PROFILE.local_origin(),
-                    &zensight_common::registry::snmp::Subject::evidence_device(&self.device.name),
-                )
-                .into();
+                let key: String = self
+                    .v1
+                    .subject_key(&zensight_common::registry::snmp::Subject::evidence_device(
+                        &self.device.name,
+                    ))
+                    .into();
                 if let Err(e) = registry.publish_serializable(&key, &claim).await {
                     tracing::warn!(device = %self.device.name, error = %e, "evidence publish failed");
                 }
@@ -1096,14 +1101,14 @@ impl SnmpPoller {
         }
 
         // #559: through the generated builder (slugs the device chunk too —
-        // the state key already slugs it, so the trees stay aligned).
-        let key = zensight_common::registry::snmp::key(
-            &zensight_common::PROFILE.local_origin(),
-            &zensight_common::registry::snmp::Subject::device_metric(
+        // the state key already slugs it, so the trees stay aligned); as
+        // this producer, through the proxy seam (#1274).
+        let key = self
+            .v1
+            .subject_key(&zensight_common::registry::snmp::Subject::device_metric(
                 &self.device.name,
                 metric_name.split('/'),
-            ),
-        );
+            ));
         let key = key.as_str();
 
         // `put_point`, not `put`: this is the last place the point is still a

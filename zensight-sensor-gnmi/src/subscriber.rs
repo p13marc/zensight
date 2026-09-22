@@ -8,7 +8,10 @@ use tonic::Request;
 use tonic::transport::{Channel, ClientTlsConfig, Endpoint};
 use tracing::{debug, error, info, warn};
 
+use zensight_common::registry::gnmi::Subject;
+use zensight_common::v1::V1ContextExt;
 use zensight_common::{TelemetryPoint, TelemetryValue};
+use zensight_sensor_core::v1::V1Context;
 
 use crate::config::{GnmiTarget, SerializationFormat, Subscription, SubscriptionMode};
 use crate::gnmi::{
@@ -19,8 +22,9 @@ use crate::gnmi::{
 /// A gNMI subscriber that connects to a target and streams telemetry
 pub struct GnmiSubscriber {
     target: GnmiTarget,
-    /// The v1 telemetry prefix keys hang off.
-    telemetry_prefix: String,
+    /// This producer's v1 context: every telemetry key is rendered from the
+    /// generated subject as this producer (#1274).
+    v1: V1Context,
     serialization: SerializationFormat,
     /// Set by [`GnmiSubscriber::with_thresholds`] (#931); installed on the
     /// registry this subscriber builds in `run`.
@@ -29,14 +33,10 @@ pub struct GnmiSubscriber {
 
 impl GnmiSubscriber {
     /// Create a new gNMI subscriber
-    pub fn new(
-        target: GnmiTarget,
-        telemetry_prefix: String,
-        serialization: SerializationFormat,
-    ) -> Self {
+    pub fn new(target: GnmiTarget, serialization: SerializationFormat) -> Self {
         Self {
             target,
-            telemetry_prefix,
+            v1: zensight_sensor_core::v1::for_producer("gnmi"),
             serialization,
             thresholds: None,
         }
@@ -424,23 +424,14 @@ impl GnmiSubscriber {
     /// be one too. It is the *elements* that are slugged — which is why this
     /// takes them, and not the joined string a `split('/')` could only guess
     /// the boundaries of.
+    ///
+    /// Rendered from the generated `{device}/{path...}` subject (#1274): the
+    /// builder slugs the target name and each element exactly as
+    /// `device_chunk` did here, once.
     fn point_key(&self, elements: &[String]) -> String {
-        let subject = elements
-            .iter()
-            .filter(|e| !e.is_empty())
-            .map(|e| {
-                zensight_sensor_core::key::device_chunk(e)
-                    .as_str()
-                    .to_string()
-            })
-            .collect::<Vec<_>>()
-            .join("/");
-        format!(
-            "{}/{}/{}",
-            self.telemetry_prefix,
-            zensight_sensor_core::key::device_chunk(&self.target.name).as_str(),
-            subject
-        )
+        let subject =
+            Subject::device_path(&self.target.name, elements.iter().filter(|e| !e.is_empty()));
+        self.v1.subject_key(&subject).into()
     }
 
     /// The instant to publish a notification at (#1077).
@@ -585,13 +576,7 @@ mod tests {
             max_clock_skew_secs: 300,
         };
 
-        let subscriber = GnmiSubscriber::new(
-            target,
-            zensight_sensor_core::v1::for_producer("gnmi")
-                .telemetry_prefix()
-                .into(),
-            SerializationFormat::Json,
-        );
+        let subscriber = GnmiSubscriber::new(target, SerializationFormat::Json);
 
         let path = subscriber.parse_path("/interfaces/interface/state");
         assert_eq!(path.elem.len(), 3);
@@ -614,13 +599,7 @@ mod tests {
             max_clock_skew_secs: 300,
         };
 
-        let subscriber = GnmiSubscriber::new(
-            target,
-            zensight_sensor_core::v1::for_producer("gnmi")
-                .telemetry_prefix()
-                .into(),
-            SerializationFormat::Json,
-        );
+        let subscriber = GnmiSubscriber::new(target, SerializationFormat::Json);
 
         let path = subscriber.parse_path("/interfaces/interface[name=eth0]/state");
         assert_eq!(path.elem.len(), 3);
@@ -642,13 +621,7 @@ mod tests {
             max_clock_skew_secs: 300,
         };
 
-        let subscriber = GnmiSubscriber::new(
-            target,
-            zensight_sensor_core::v1::for_producer("gnmi")
-                .telemetry_prefix()
-                .into(),
-            SerializationFormat::Json,
-        );
+        let subscriber = GnmiSubscriber::new(target, SerializationFormat::Json);
 
         let mut path = Path::default();
         path.elem.push(PathElem {
@@ -689,13 +662,7 @@ mod tests {
             gauge_paths: Vec::new(),
             max_clock_skew_secs: 300,
         };
-        GnmiSubscriber::new(
-            target,
-            zensight_sensor_core::v1::for_producer("gnmi")
-                .telemetry_prefix()
-                .into(),
-            SerializationFormat::Json,
-        )
+        GnmiSubscriber::new(target, SerializationFormat::Json)
     }
 
     fn typed(value: gnmi::typed_value::Value) -> gnmi::TypedValue {
@@ -759,6 +726,37 @@ mod tests {
                 "the key must be a legal v1 key: {key}"
             );
         }
+    }
+
+    /// The typed key is the hand-spelled one, byte for byte (#1274): the
+    /// prefix, then `device_chunk` of the target name, then `device_chunk`
+    /// of every element.
+    #[test]
+    fn the_typed_key_is_the_hand_spelled_key() {
+        let mut sub = test_subscriber();
+        sub.target.name = "core sw/1".to_string();
+        let elems: Vec<String> = [
+            "interfaces",
+            "interface[name=Ethernet1/1/1]",
+            "state",
+            "in-octets",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let spelled = format!(
+            "{}/{}/{}",
+            zensight_sensor_core::v1::for_producer("gnmi").telemetry_prefix(),
+            zensight_sensor_core::key::device_chunk(&sub.target.name).as_str(),
+            elems
+                .iter()
+                .map(|e| zensight_sensor_core::key::device_chunk(e)
+                    .as_str()
+                    .to_string())
+                .collect::<Vec<_>>()
+                .join("/")
+        );
+        assert_eq!(sub.point_key(&elems), spelled);
     }
 
     /// The target's own name is a foreign value too — an operator types it.

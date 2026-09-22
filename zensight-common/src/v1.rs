@@ -73,6 +73,19 @@ pub trait V1ContextExt {
     /// # Panics
     /// As [`const_state_key`](V1ContextExt::const_state_key).
     fn const_rpc_key(&self, procedure: &[&str]) -> Key;
+
+    /// The key a generated subject publishes under as this context's
+    /// producer, instance suffix included, whatever its class (#1274).
+    ///
+    /// This is the **proxy** sensors' seam (snmp, modbus, gnmi, netflow). A
+    /// `{device}/{metric...}` family carries the device in the key and, in
+    /// the point, the name the device calls the series — two strings on
+    /// purpose, which is why those sensors do not go through
+    /// `Publisher::publish_subject` and its metric-equals-tail rule. The key
+    /// is still *rendered* from the registry's own type, never spelled: the
+    /// builder slugs every foreign chunk once, and a family the registry
+    /// does not declare has no constructor.
+    fn subject_key(&self, subject: &impl crate::subject::TelemetrySubject) -> Key;
 }
 
 impl V1ContextExt for V1Context {
@@ -84,6 +97,10 @@ impl V1ContextExt for V1Context {
     fn const_rpc_key(&self, procedure: &[&str]) -> Key {
         self.rpc_key(procedure)
             .unwrap_or_else(|e| panic!("{procedure:?} is not a constant procedure path: {e}"))
+    }
+
+    fn subject_key(&self, subject: &impl crate::subject::TelemetrySubject) -> Key {
+        subject.key_as(&crate::PROFILE.local_origin(), self.producer())
     }
 }
 
@@ -120,6 +137,39 @@ mod tests {
         let shimmed = for_producer("netring");
         let direct = V1Context::for_producer(&crate::PROFILE, "netring").expect("legal name");
         assert_eq!(shimmed.telemetry_prefix(), direct.telemetry_prefix());
+    }
+
+    /// The proxy seam renders the same key the producer module's own `key`
+    /// renders — and, unlike it, as the context's producer.
+    #[test]
+    fn subject_key_is_the_registry_key_as_this_producer() {
+        use crate::registry::snmp::{self, Subject};
+        let subject = Subject::device_metric("Core SW/1", ["if", "1", "in_octets"]);
+        let ctx = for_producer("snmp");
+        assert_eq!(
+            ctx.subject_key(&subject),
+            snmp::key(&crate::PROFILE.local_origin(), &subject)
+        );
+        assert!(
+            ctx.subject_key(&subject)
+                .as_str()
+                .ends_with("/telemetry/snmp/core_x20_sw_x2f_1/if/1/in_octets")
+                || crate::keyexpr::parse_key(ctx.subject_key(&subject).as_str()).is_some(),
+            "{}",
+            ctx.subject_key(&subject)
+        );
+        let instanced = V1Context::with_producer(
+            Origin::Host(crate::PROFILE.host_id().clone()),
+            Producer::with_instance("snmp", 2).unwrap(),
+        );
+        assert!(
+            instanced
+                .subject_key(&subject)
+                .as_str()
+                .contains("/telemetry/snmp-2/"),
+            "{}",
+            instanced.subject_key(&subject)
+        );
     }
 
     /// The precondition `const_state_key` names is real: the reserved token

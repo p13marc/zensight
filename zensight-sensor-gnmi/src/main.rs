@@ -99,14 +99,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Create subscriber tasks for each target
     for target in gnmi_config.targets {
-        let subscriber = GnmiSubscriber::new(
-            target.clone(),
-            zensight_sensor_core::v1::for_producer("gnmi")
-                .telemetry_prefix()
-                .into(),
-            gnmi_config.serialization,
-        )
-        .with_thresholds(thresholds.clone());
+        let subscriber = GnmiSubscriber::new(target.clone(), gnmi_config.serialization)
+            .with_thresholds(thresholds.clone());
         let session = session.clone();
 
         runner.spawn(async move {
