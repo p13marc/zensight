@@ -88,7 +88,12 @@ async fn a_fire_and_a_resolve_are_one_page_and_survive_a_restart() {
                 true,
                 Some("link down on if3".into()),
             ));
-            g.record_event(event(3_000, "01hq"));
+            g.record_event(zensight_store::StoredEvent {
+                origin: origin.to_string(),
+                producer: "snmp".to_string(),
+                subject: "vm-dev-01/trap/01hq".to_string(),
+                value: serde_json::to_value(event(3_000, "01hq")).unwrap(),
+            });
         }
         zensight_historian::ingest::flush_once(&store).await;
 
@@ -120,7 +125,11 @@ async fn a_fire_and_a_resolve_are_one_page_and_survive_a_restart() {
     // not an amnesia.
     let events = persistent.query_events(10).expect("events");
     assert_eq!(events.len(), 1, "the event survived the restart");
-    assert_eq!(events[0].id, "01hq");
+    assert_eq!(events[0].id(), "01hq");
+    assert_eq!(
+        events[0].origin, origin,
+        "the row says who published it (#1261)"
+    );
 
     // ── serve it and ask ─────────────────────────────────────────────────
     let session = session().await;

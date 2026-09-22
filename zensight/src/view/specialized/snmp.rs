@@ -34,7 +34,8 @@ pub struct SnmpDetailState {
     /// Rendered rows derived from the doc (rebuilt on every doc refresh, so
     /// the `DataTable` can borrow them for the view's lifetime).
     pub rows: Vec<IfaceRow>,
-    /// This device's recent trap/event records (#536), newest first.
+    /// This device's recent trap/event records (#536), newest first —
+    /// projected from the intake's ring by [`project_events`] (#1261).
     pub events: std::collections::VecDeque<zensight_common::EventRecord>,
     // ── Gated PDU outlet control (#956) ─────────────────────────────────
 }
@@ -91,6 +92,19 @@ pub fn project_documents(state: &mut DeviceDetailState) {
     };
     let table = table.clone();
     state.snmp_detail.apply_interfaces(table, &state.metrics);
+}
+
+/// Project the device's events (#536, #1261) into the trap card's records:
+/// the intake's ring, already newest first and scoped to this device, each
+/// decoded as an `EventRecord` once. A record that is not one is left out
+/// here; the generic view shows the value as it came.
+pub fn project_events(state: &mut DeviceDetailState) {
+    state.snmp_detail.events = state
+        .events
+        .iter()
+        .filter_map(|e| e.decoded::<zensight_common::EventRecord>().ok().cloned())
+        .take(DEVICE_EVENT_RING)
+        .collect();
 }
 
 /// The `action/set` write procedure this panel arms and sends (#956, #1261).

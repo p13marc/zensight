@@ -89,8 +89,10 @@ pub async fn run_events(
                         // The full record goes in the events table too, so a
                         // reader that wants the payload and not just the line
                         // has somewhere to get it.
-                        let mut g = store.lock().unwrap_or_else(|e| e.into_inner());
-                        g.record_event(ev);
+                        if let Some(row) = stored_event(&key, &ev) {
+                            let mut g = store.lock().unwrap_or_else(|e| e.into_inner());
+                            g.record_event(row);
+                        }
                     }
                     Err(_) => { counters.rejected.fetch_add(1, Ordering::Relaxed); }
                 }
@@ -193,6 +195,23 @@ fn record(store: &SharedStore, row: TimelineRow, counter: &AtomicU64) {
 /// The origin chunk of a v1 key.
 fn origin_of(key: &str) -> Option<String> {
     zensight_common::keyexpr::parse_key(key).map(|k| k.origin.chunk().to_string())
+}
+
+/// The row the events table keeps (#1261): the key's coordinates beside the
+/// record as it came, so a reader can put it back on the device that
+/// published it. `None` for a key that is not a v1 events key, which
+/// `decode_event` has already refused.
+fn stored_event(
+    key: &str,
+    ev: &zensight_common::EventRecord,
+) -> Option<zensight_store::StoredEvent> {
+    let parsed = zensight_common::keyexpr::parse_key(key)?;
+    Some(zensight_store::StoredEvent {
+        origin: parsed.origin.chunk().to_string(),
+        producer: zensight_common::keyexpr::producer_name(key)?,
+        subject: parsed.subject.join("/"),
+        value: serde_json::to_value(ev).ok()?,
+    })
 }
 
 fn now_ms() -> i64 {

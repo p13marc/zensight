@@ -113,29 +113,104 @@ impl DocumentState {
     where
         T: serde::de::DeserializeOwned + std::any::Any + Send + Sync,
     {
-        let slot = self.typed.get_or_init(|| {
-            Box::new(serde_json::from_value::<T>(self.value.clone()).map_err(|e| e.to_string()))
-                as Box<dyn std::any::Any + Send + Sync>
-        });
-        match slot.downcast_ref::<Result<T, String>>() {
-            Some(Ok(t)) => Ok(t),
-            Some(Err(e)) => Err(e.clone()),
-            None => Err(format!(
-                "document already decoded as another type than {}",
-                std::any::type_name::<T>()
-            )),
+        decode_once(&self.typed, &self.value)
+    }
+}
+
+/// Decode a value into `slot` once and lend it out from then on — the one
+/// rule behind [`DocumentState::decoded`] and [`EventState::decoded`].
+fn decode_once<'a, T>(
+    slot: &'a std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+    value: &serde_json::Value,
+) -> Result<&'a T, String>
+where
+    T: serde::de::DeserializeOwned + std::any::Any + Send + Sync,
+{
+    let slot = slot.get_or_init(|| {
+        Box::new(serde_json::from_value::<T>(value.clone()).map_err(|e| e.to_string()))
+            as Box<dyn std::any::Any + Send + Sync>
+    });
+    match slot.downcast_ref::<Result<T, String>>() {
+        Some(Ok(t)) => Ok(t),
+        Some(Err(e)) => Err(e.clone()),
+        None => Err(format!(
+            "document already decoded as another type than {}",
+            std::any::type_name::<T>()
+        )),
+    }
+}
+
+/// An events-class record held in the ring — wire facts, plus the typed
+/// projection a view asked for, decoded once (#1261) like a document's.
+pub struct EventState {
+    pub origin: String,
+    pub producer: String,
+    /// The subject tail, as published (chunks 5.. of the key, joined). Its
+    /// last chunk is the record's id — a ULID for every events subject the
+    /// registry declares — which is what the ring orders and dedups by.
+    pub subject: String,
+    pub value: serde_json::Value,
+    pub received_ms: i64,
+    pub(crate) typed: std::sync::OnceLock<Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl std::fmt::Debug for EventState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventState")
+            .field("origin", &self.origin)
+            .field("producer", &self.producer)
+            .field("subject", &self.subject)
+            .field("value", &self.value)
+            .field("received_ms", &self.received_ms)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Clone for EventState {
+    /// The wire value clones; the typed projection is decoded again on
+    /// first use — it is a cache, not state.
+    fn clone(&self) -> Self {
+        EventState {
+            origin: self.origin.clone(),
+            producer: self.producer.clone(),
+            subject: self.subject.clone(),
+            value: self.value.clone(),
+            received_ms: self.received_ms,
+            typed: std::sync::OnceLock::new(),
         }
     }
 }
 
-/// An events-class record held in the ring — wire facts only.
-#[derive(Debug, Clone)]
-pub struct EventState {
-    pub origin: String,
-    pub producer: String,
-    pub subject: String,
-    pub value: serde_json::Value,
-    pub received_ms: i64,
+impl EventState {
+    pub fn new(
+        origin: String,
+        producer: String,
+        subject: String,
+        value: serde_json::Value,
+        received_ms: i64,
+    ) -> Self {
+        EventState {
+            origin,
+            producer,
+            subject,
+            value,
+            received_ms,
+            typed: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The record's id: the subject's last chunk.
+    pub fn id(&self) -> &str {
+        self.subject.rsplit('/').next().unwrap_or("")
+    }
+
+    /// The record as a type, decoded once — see [`DocumentState::decoded`].
+    pub fn decoded<T>(&self) -> Result<&T, String>
+    where
+        T: serde::de::DeserializeOwned + std::any::Any + Send + Sync,
+    {
+        decode_once(&self.typed, &self.value)
+    }
 }
 
 /// The bound on undeclared subjects remembered per device. A producer with

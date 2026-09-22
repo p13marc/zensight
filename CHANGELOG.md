@@ -237,6 +237,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **snmp's trap/event ring is the intake's ring** (#1261). The last typed
+  events arm is gone: `<device>/trap/<ulid>` arrives as a `Message::Event`
+  like any other producer's record, the intake's ring lives on the dashboard
+  state fleet-wide (newest first by id, deduped on the key, cap 500 — the
+  generic ring was 256, in arrival order and without dedup, which no producer
+  had exercised yet), `EventState::decoded::<T>()` decodes
+  a record once, the overview's trap feed reads the ring
+  (`overview::snmp::event_records`) and the device view projects its trap
+  card from it (`specialized::on_events`) — scoped by origin *and* source,
+  where the old per-device seed matched on the device name alone and put one
+  poller's traps on another poller's `switch01`. `Message::SnmpEventReceived`
+  and `SnmpEventHistoryLoaded` are deleted; a retired device's events are
+  evicted with it (`forget_events`).
+
+  **The cold store's event row carries its key.** `zensight_store::StoredEvent`
+  (origin, producer, subject, value) replaces the typed `EventRecord` row in
+  the GUI's and the historian's `events` table, so a boot backfill can put a
+  record back on the device that published it. Rows written by an earlier
+  build have no origin, do not decode as the new shape, and are skipped on
+  read until retention prunes them: one restart's worth of local feed history
+  is lost on upgrade. A bus-side events storage is unaffected.
+
 - **One `Message::Call` / `Message::Reply` pair replaces the per-producer
   fetch pairs; sysinfo and netflow are the first producers retired**
   (#1261, phase 4 of #1253, one producer per PR). A read procedure is a GET

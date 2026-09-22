@@ -127,6 +127,23 @@ pub mod snmp {
         }
     }
 
+    /// The same record as the intake's ring holds it (#1261): the origin,
+    /// the producer and the subject `<device>/trap/<ulid>` around the value.
+    pub fn trap_event_state(
+        origin: &str,
+        device: &str,
+        kind: &str,
+        ulid: &str,
+    ) -> crate::intake::EventState {
+        crate::intake::EventState::new(
+            origin.to_string(),
+            "snmp".to_string(),
+            format!("{device}/trap/{ulid}"),
+            serde_json::to_value(trap_event(device, kind, ulid)).expect("a record serialises"),
+            0,
+        )
+    }
+
     /// A trap record that raised `alert_key` (#651) — the shape whose feed row
     /// links to one alert rather than pivoting to the device's alert list.
     pub fn trap_event_with_alert(

@@ -1330,7 +1330,7 @@ fn test_overview_firing_alert_tile() {
         &state.devices,
         SnmpOverviewData {
             interfaces: Vec::new(),
-            events: &state.snmp_events,
+            events: Vec::new(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -1355,7 +1355,7 @@ fn test_overview_firing_alert_tile() {
         &state.devices,
         SnmpOverviewData {
             interfaces: Vec::new(),
-            events: &state.snmp_events,
+            events: Vec::new(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -4817,14 +4817,13 @@ mod adopt_discovered {
         // Leak the fixtures: the view borrows them and the simulator outlives
         // this frame. Fine in a test, and it keeps the call sites readable.
         let disc: &'static _ = Box::leak(Box::new(disc.clone()));
-        let events: &'static _ = Box::leak(Box::new(std::collections::VecDeque::new()));
         let filter: &'static EventFilterState = Box::leak(Box::default());
         let devices: &'static _ = Box::leak(Box::new(HashMap::new()));
         snmp_overview(
             devices,
             SnmpOverviewData {
                 interfaces: Vec::new(),
-                events,
+                events: Vec::new(),
                 event_filter: filter,
                 discovery: disc,
                 discovery_open: true,
@@ -7186,7 +7185,7 @@ fn test_snmp_overview_two_pollers_one_device_name() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7220,15 +7219,8 @@ fn test_snmp_overview_two_pollers_one_device_name() {
         "the interface-table decode must carry the publishing origin — \
          without it two pollers polling one `switch01` are one device: {arm}"
     );
-    let events = include_str!("../src/subscription.rs")
-        .split("Message::SnmpEventReceived")
-        .nth(1)
-        .expect("the trap decode");
-    assert!(
-        events[..events.len().min(200)].contains("origin"),
-        "and so must the trap decode — `record.source` alone routes one \
-         poller's trap to another poller's open view"
-    );
+    // The trap decode is the structural path too since #1261; its origin is
+    // pinned by `subscription::tests::the_snmp_trap_is_an_event`.
 }
 
 /// SNMP fleet overview (#533): rate-based top talkers, down hotlist, error
@@ -7259,7 +7251,7 @@ fn test_snmp_overview_rate_based() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7294,7 +7286,7 @@ fn test_snmp_overview_empty() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7355,7 +7347,7 @@ fn test_snmp_overview_trap_feed() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7418,7 +7410,7 @@ fn test_snmp_overview_discovery_card() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7434,7 +7426,7 @@ fn test_snmp_overview_discovery_card() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: true,
@@ -7497,7 +7489,7 @@ fn test_snmp_event_feed_filters_and_links() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7529,7 +7521,7 @@ fn test_snmp_event_feed_filters_and_links() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7554,7 +7546,7 @@ fn test_snmp_event_feed_filters_and_links() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7575,7 +7567,7 @@ fn test_snmp_event_feed_filters_and_links() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7631,7 +7623,7 @@ fn test_snmp_event_row_links_to_the_alert_it_raised() {
         &devices,
         SnmpOverviewData {
             interfaces: docs.iter().map(|(id, t)| (id.origin.as_str(), t)).collect(),
-            events: &events,
+            events: events.iter().collect(),
             event_filter: &evt_filter,
             discovery: &discovery,
             discovery_open: false,
@@ -7657,22 +7649,39 @@ fn test_snmp_event_row_links_to_the_alert_it_raised() {
     );
 }
 
-/// The fleet event ring dedups by ULID and keeps newest-first order (#536).
+/// The fleet event ring dedups on the record's key and keeps newest-first
+/// order by id (#536, #1261) — for every producer, not only snmp's traps.
 #[test]
-fn test_snmp_event_ring_dedup_and_order() {
+fn test_event_ring_dedup_and_order() {
     use zensight::view::dashboard::DashboardState;
 
+    let h = "h-3fa9c2d41b7e";
     let mut dash = DashboardState::default();
-    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/a", "01aaa"));
-    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/b", "01aac"));
-    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/c", "01aab")); // out of order
-    dash.push_snmp_event(mock::snmp::trap_event("r1", "trap/b", "01aac")); // duplicate
+    assert!(dash.push_event(mock::snmp::trap_event_state(h, "r1", "trap/a", "01aaa")));
+    assert!(dash.push_event(mock::snmp::trap_event_state(h, "r1", "trap/b", "01aac")));
+    // out of order
+    assert!(dash.push_event(mock::snmp::trap_event_state(h, "r1", "trap/c", "01aab")));
+    // duplicate
+    assert!(!dash.push_event(mock::snmp::trap_event_state(h, "r1", "trap/b", "01aac")));
+    // The same ulid from another poller is another record (#1118).
+    assert!(dash.push_event(mock::snmp::trap_event_state(
+        "h-1b4504757626",
+        "r1",
+        "trap/b",
+        "01aac"
+    )));
 
-    let ids: Vec<&str> = dash.snmp_events.iter().map(|e| e.id.as_str()).collect();
+    let ids: Vec<&str> = dash.events.iter().map(|e| e.id()).collect();
     assert_eq!(
         ids,
-        vec!["01aac", "01aab", "01aaa"],
-        "newest first, deduped"
+        vec!["01aac", "01aac", "01aab", "01aaa"],
+        "newest first, deduped on the key"
+    );
+    // And the overview reads them as records, decoded once, in that order.
+    let records = zensight::view::overview::snmp::event_records(&dash.events);
+    assert_eq!(
+        records.iter().map(|r| r.kind.as_str()).collect::<Vec<_>>(),
+        vec!["trap/b", "trap/b", "trap/c", "trap/a"]
     );
 }
 
