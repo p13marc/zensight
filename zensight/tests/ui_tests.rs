@@ -3531,7 +3531,7 @@ fn test_netring_quic_ssh_sections() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::Call { procedure, .. } if procedure == "quic"))
+            .any(|m| matches!(m, Message::Call(r) if r.procedure == "quic"))
     );
 }
 
@@ -3685,7 +3685,7 @@ fn test_netring_assets_section() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::Call { procedure, .. } if procedure == "assets"))
+            .any(|m| matches!(m, Message::Call(r) if r.procedure == "assets"))
     );
 }
 
@@ -4511,7 +4511,7 @@ fn test_systemd_units_tab_fetches_on_demand() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::Call { procedure, .. } if procedure == "units"))
+            .any(|m| matches!(m, Message::Call(r) if r.procedure == "units"))
     );
 }
 

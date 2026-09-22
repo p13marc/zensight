@@ -143,14 +143,10 @@ pub struct PanelData {
     pub listen: crate::view::specialized::fetch::Fetch<Vec<zensight_common::SocketRecord>>,
     /// Recent flows between the selected edge's endpoints.
     pub edge_flows: crate::view::specialized::fetch::Fetch<Vec<zensight_common::FlowRecord>>,
-    /// One in-flight flow→process join for the edge panel (#309 reuse):
-    /// `(flow key, fetched attribution)`.
-    pub attribution: Option<(
-        String,
-        crate::view::specialized::fetch::Fetch<
-            Option<crate::view::specialized::attribution::AttributedProcess>,
-        >,
-    )>,
+    /// The calls this surface has made (#1261): the edge panel's
+    /// flow→process joins (#309 reuse), `netlink/sockets` per endpoint,
+    /// keyed by flow.
+    pub calls: crate::call::Calls,
 }
 
 impl Default for TopologyState {

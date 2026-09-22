@@ -1881,46 +1881,37 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(empty_state("No recent flows", None));
         } else {
             col = col.push(flows_table(flows, state));
-            // Flow ↔ process join result (#309), for the row whose "who?" was
-            // clicked last.
-            if let Some(line) = attribution_line(state.netring_detail.attribution.as_ref()) {
-                col = col.push(line);
-            }
         }
     }
     col.into()
 }
 
-/// Render the flow↔process join outcome (#309): the owning process labelled
-/// with its attribution source, "unattributed" when no socket matched, or the
-/// no-netlink hint. `None` while nothing was asked.
-fn attribution_line<'a>(
-    attribution: Option<&'a (
-        String,
-        Fetch<Option<crate::view::specialized::attribution::AttributedProcess>>,
-    )>,
-) -> Option<Element<'a, Message>> {
-    let (key, fetch) = attribution?;
-    let line: Element<'a, Message> = match fetch {
-        Fetch::Idle | Fetch::Loading => text(format!("{key}: looking up owning process…"))
+/// The flow↔process join cell of one flow row (#309, #1261): "who?" until
+/// asked, then where the join stands, read from the device's calls.
+fn attribution_cell<'a>(calls: &crate::call::Calls, src: &str, dst: &str) -> Element<'a, Message> {
+    use crate::view::specialized::attribution::{self, Attribution};
+    match attribution::lookup(calls, src, dst) {
+        Attribution::NotAsked => button(text("who?").size(font::CAPTION))
+            .padding([2, 6])
+            .style(iced::widget::button::text)
+            .on_press(attribution::ask(crate::call::CallSurface::Device, src, dst))
+            .into(),
+        Attribution::Looking => text("looking up owning process…")
             .size(font::CAPTION)
             .style(dim)
             .into(),
-        Fetch::Error(e) => text(format!("{key}: unattributed ({e})"))
+        Attribution::Unavailable(e) => text(format!("unattributed ({e})"))
             .size(font::CAPTION)
             .style(dim)
             .into(),
-        Fetch::Ready(Some(a)) => text(format!("{key}: {} — endpoint {}", a.display(), a.endpoint))
+        Attribution::Ready(Some(a)) => text(format!("{} — endpoint {}", a.display(), a.endpoint))
             .size(font::CAPTION)
             .into(),
-        Fetch::Ready(None) => text(format!(
-            "{key}: unattributed (no matching socket on any netlink host)"
-        ))
-        .size(font::CAPTION)
-        .style(dim)
-        .into(),
-    };
-    Some(line)
+        Attribution::Ready(None) => text("unattributed (no matching socket on any netlink host)")
+            .size(font::CAPTION)
+            .style(dim)
+            .into(),
+    }
 }
 
 /// The Recent-Flows table, rendered through the shared [`DataTable`] (#244) —
@@ -1973,19 +1964,10 @@ fn flows_table<'a>(
         TableColumn::fixed("reason", 80.0, |f: &zensight_common::FlowRecord| {
             text(f.reason.clone()).size(font::CAPTION).into()
         }),
-        // Flow ↔ process join (#309): ask the endpoint hosts' netlink sensors
-        // who owns this 5-tuple. The result renders below the table.
-        TableColumn::fixed("process", 60.0, |f: &zensight_common::FlowRecord| {
-            button(text("who?").size(font::CAPTION))
-                .padding([2, 6])
-                .style(iced::widget::button::text)
-                .on_press(Message::FetchFlowAttribution {
-                    target: crate::message::AttributionTarget::Device,
-                    key: crate::view::specialized::attribution::flow_key(&f.src, &f.dst),
-                    src: f.src.clone(),
-                    dst: f.dst.clone(),
-                })
-                .into()
+        // Flow ↔ process join (#309, #1261): ask the endpoint hosts' netlink
+        // sensors who owns this 5-tuple; the answer renders in this cell.
+        TableColumn::fixed("process", 220.0, move |f: &zensight_common::FlowRecord| {
+            attribution_cell(&state.calls, &f.src, &f.dst)
         }),
     ];
     DataTable::new(columns)
@@ -2359,7 +2341,7 @@ mod tests {
 
     use super::*;
     use crate::message::DeviceId;
-    use crate::view::specialized::fetch::Fetch;
+    use crate::view::specialized::attribution;
 
     #[test]
     fn matrix_destination_pivots_to_flows() {
@@ -2515,7 +2497,6 @@ mod tests {
     /// with the exact 5-tuple endpoints; the join outcome renders below.
     #[test]
     fn flow_who_button_emits_attribution_fetch() {
-        use crate::view::specialized::attribution::{AttributedProcess, AttributionSource};
         let mut state = DeviceDetailState::new(DeviceId::fixture("netring", "host01"));
         state.calls.set_ready(
             "flows",
@@ -2538,49 +2519,81 @@ mod tests {
             }])
             .unwrap(),
         );
-        // A previously-fetched attribution renders under the table.
-        state.netring_detail.attribution = Some((
-            "10.0.0.5:44444 → 1.1.1.1:443".into(),
-            Fetch::Ready(Some(AttributedProcess {
-                pid: Some(4242),
-                comm: Some("curl".into()),
-                uid: 1000,
+        // Not asked yet: the row offers "who?", and a press asks both
+        // endpoints' hosts through the generic call path (#1261) — two
+        // `netlink/sockets?ip=` calls on the device surface, keyed by flow.
+        let mut ui = simulator(render_flow_detail(&state));
+        ui.click("who?").expect("the cell offers the join");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        let asked: Vec<&crate::call::Request> = msgs
+            .iter()
+            .flat_map(|m| match m {
+                Message::Batch(inner) => inner.iter().collect::<Vec<_>>(),
+                other => vec![other],
+            })
+            .filter_map(|m| match m {
+                Message::Call(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(asked.len(), 2, "one call per endpoint: {msgs:?}");
+        assert!(
+            asked
+                .iter()
+                .all(|r| r.producer.as_deref() == Some("netlink")
+                    && r.procedure == "sockets"
+                    && r.surface == crate::call::CallSurface::Device)
+        );
+        assert_eq!(asked[0].params, "ip=10.0.0.5");
+        assert_eq!(asked[1].params, "ip=1.1.1.1");
+
+        // Answered: the join renders in the row's cell, from the calls.
+        let flow = attribution::flow_key("10.0.0.5:44444", "1.1.1.1:443");
+        state.calls.set_ready(
+            &attribution::call_key(&flow, "10.0.0.5:44444"),
+            "ip=10.0.0.5",
+            serde_json::to_value(vec![zensight_common::SocketRecord {
+                local: "10.0.0.5:44444".into(),
+                remote: "1.1.1.1:443".into(),
                 state: "established".into(),
-                endpoint: "10.0.0.5:44444".into(),
-                source: AttributionSource::LiveSocket,
-            })),
-        ));
+                uid: 1000,
+                pid: Some(4242),
+                process: Some("curl".into()),
+                ..Default::default()
+            }])
+            .unwrap(),
+        );
+        state.calls.set_ready(
+            &attribution::call_key(&flow, "1.1.1.1:443"),
+            "ip=1.1.1.1",
+            serde_json::json!([]),
+        );
         let mut ui = simulator(render_flow_detail(&state));
         assert!(
-            ui.find(
-                "10.0.0.5:44444 → 1.1.1.1:443: curl (4242) · uid 1000 · live socket \
-                 — endpoint 10.0.0.5:44444"
-            )
-            .is_ok()
+            ui.find("curl (4242) · uid 1000 · live socket — endpoint 10.0.0.5:44444")
+                .is_ok()
         );
-        let _ = ui.click("who?");
-        let msgs: Vec<Message> = ui.into_messages().collect();
-        assert!(msgs.iter().any(|m| matches!(
-            m,
-            Message::FetchFlowAttribution { target: crate::message::AttributionTarget::Device, src, dst, .. }
-                if src == "10.0.0.5:44444" && dst == "1.1.1.1:443"
-        )));
     }
 
     /// #309: no socket matched → graceful "unattributed", never an error look.
     #[test]
     fn flow_attribution_unattributed_renders_gracefully() {
-        let mut state = DeviceDetailState::new(DeviceId::fixture("netring", "host01"));
-        state.netring_detail.attribution =
-            Some(("10.0.0.5:1 → 1.1.1.1:2".into(), Fetch::Ready(None)));
-        let line = attribution_line(state.netring_detail.attribution.as_ref())
-            .expect("line renders once asked");
-        let mut ui = simulator(line);
+        let mut calls = crate::call::Calls::default();
+        let flow = attribution::flow_key("10.0.0.5:1", "1.1.1.1:2");
+        calls.set_ready(
+            &attribution::call_key(&flow, "10.0.0.5:1"),
+            "ip=10.0.0.5",
+            serde_json::json!([]),
+        );
+        calls.set_ready(
+            &attribution::call_key(&flow, "1.1.1.1:2"),
+            "ip=1.1.1.1",
+            serde_json::json!([]),
+        );
+        let mut ui = simulator(attribution_cell(&calls, "10.0.0.5:1", "1.1.1.1:2"));
         assert!(
-            ui.find(
-                "10.0.0.5:1 → 1.1.1.1:2: unattributed (no matching socket on any netlink host)"
-            )
-            .is_ok()
+            ui.find("unattributed (no matching socket on any netlink host)")
+                .is_ok()
         );
     }
 }

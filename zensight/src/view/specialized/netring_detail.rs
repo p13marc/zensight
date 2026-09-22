@@ -1,8 +1,9 @@
 //! The netring view's on-demand vocabulary: the topics it calls its
 //! `@rpc/netring/*` read procedures by (the calls go through `Message::Call`
 //! and land in `DeviceDetailState::calls`, #1261 — principle P2, pulled only
-//! when a user drills into a netring host, never streamed), and what is not
-//! an answer to a call: the flow↔process join slot.
+//! when a user drills into a netring host, never streamed). The flow↔process
+//! join is two of those calls to netlink, keyed by flow
+//! (`specialized::attribution`); nothing of the view's is held elsewhere.
 //!
 //! The `*_key` builders and `fetch_*` helpers remain for the fleet-wide
 //! joins (topology, the Security drill-down) that fetch with the `*` origin
@@ -16,7 +17,6 @@ use zensight_common::{
 };
 
 use crate::message::Message;
-use crate::view::specialized::fetch::Fetch;
 
 /// Which netring read procedure a panel calls — and the name its answer
 /// and its table's UI state are keyed by (#1261).
@@ -73,10 +73,7 @@ impl NetringTopic {
 
     /// The call for this topic on the selected device (#1261).
     pub fn call(&self) -> Message {
-        Message::Call {
-            procedure: self.procedure().to_string(),
-            params: self.params(),
-        }
+        Message::Call(crate::call::Request::new(self.procedure(), self.params()))
     }
 }
 
@@ -158,20 +155,6 @@ pub fn encrypted_dns_key(origin: Option<&zenkey::RemoteOrigin>) -> String {
 /// The per-host HTTP detail key (`?top=N`).
 pub fn http_key(origin: Option<&zenkey::RemoteOrigin>) -> String {
     format!("{}?top={TOP_N}", rpc_key(origin, "http"))
-}
-
-/// What the netring view holds that is not an answer to a call (#1261):
-/// the flow↔process join slot. (The device's firing anomalies are
-/// `DeviceDetailState::alerts`.)
-#[derive(Debug, Clone, Default)]
-pub struct NetringDetailState {
-    /// The flow↔process join result for one flow row (#309): `(flow key,
-    /// fetched attribution)`. One in-flight join at a time — clicking another
-    /// row's "who?" replaces it.
-    pub attribution: Option<(
-        String,
-        Fetch<Option<crate::view::specialized::attribution::AttributedProcess>>,
-    )>,
 }
 
 /// Fetch + decode the recent-flow ring. Thin wrapper over the shared helper.
@@ -374,7 +357,7 @@ mod tests {
             assert_eq!(topic.params(), params);
             assert!(matches!(
                 topic.call(),
-                Message::Call { procedure: p, params: q } if p == procedure && q == params
+                Message::Call(r) if r.procedure == procedure && r.params == params
             ));
         }
     }
