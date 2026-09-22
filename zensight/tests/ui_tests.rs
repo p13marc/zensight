@@ -2028,8 +2028,10 @@ fn test_security_drilldown_and_filter() {
     let _ = ui.click("PortScanTRW from 10.0.0.5");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
-        msgs.iter()
-            .any(|m| matches!(m, Message::SelectAnomaly(Some(_)))),
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::Security(zensight::view::security::Action::SelectAnomaly(Some(_)))
+        )),
         "row click should emit SelectAnomaly, got {msgs:?}"
     );
 

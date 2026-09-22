@@ -12,6 +12,43 @@ use crate::view::theme;
 use crate::view::tokens::font;
 use zensight_common::ComparisonOp;
 
+/// One field of the expectations pane (#1306): which target and host it
+/// addresses, and the authoring form's inputs.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Field {
+    /// The sentinel target being authored (#278).
+    Target(ExpTarget),
+    /// The host whose sentinel the pane addresses (#1114).
+    Host(ExpHost),
+    /// The systemd expectation kind (#278).
+    SystemdKind(SystemdExpKind),
+    /// The hostspec assertion kind (#821).
+    HostspecKind(HostspecExpKind),
+    Kind(ExpKind),
+    /// The name (socket) or interface (link).
+    Name(String),
+    Port(String),
+    Severity(Severity),
+    /// The metric path (metric-threshold expectation).
+    Metric(String),
+    /// The comparison operator (metric-threshold expectation).
+    Op(ComparisonOp),
+    /// The threshold value (metric-threshold expectation).
+    Value(String),
+}
+
+/// What the app has to do after a field changed.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    /// The target changed: the host lists follow it, and its sentinel's
+    /// current set is read.
+    TargetChanged,
+    /// A host was chosen: read its sentinel's current set.
+    HostChosen,
+}
+
 /// The kind of expectation being authored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExpKind {
@@ -717,6 +754,36 @@ pub struct ExpectationsState {
     pub hostspec_verdict: Option<zensight_common::schema::Verdict>,
 }
 
+impl ExpectationsState {
+    /// One field change (#1306): the pane's own state moves here; what the
+    /// app must read afterwards comes back as the [`Effect`].
+    pub fn set(&mut self, field: Field) -> Effect {
+        match field {
+            Field::Target(target) => {
+                self.target = target;
+                self.status_note = None;
+                return Effect::TargetChanged;
+            }
+            Field::Host(host) => {
+                self.host = Some(host);
+                self.host_explicit = true;
+                self.status_note = None;
+                return Effect::HostChosen;
+            }
+            Field::SystemdKind(kind) => self.systemd_kind = kind,
+            Field::HostspecKind(kind) => self.hostspec_kind = kind,
+            Field::Kind(kind) => self.new_kind = kind,
+            Field::Name(name) => self.new_name = name,
+            Field::Port(port) => self.new_port = port,
+            Field::Severity(sev) => self.new_severity = sev,
+            Field::Metric(metric) => self.new_metric = metric,
+            Field::Op(op) => self.new_op = op,
+            Field::Value(value) => self.new_value = value,
+        }
+        Effect::None
+    }
+}
+
 impl Default for ExpectationsState {
     fn default() -> Self {
         Self {
@@ -794,8 +861,10 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
         .style(iced::widget::button::secondary);
 
     // Sensor target selector (#278): netlink vs systemd sentinel.
-    let target = pick_list(ExpTarget::ALL, Some(state.target), Message::SetExpTarget)
-        .width(Length::Fixed(120.0));
+    let target = pick_list(ExpTarget::ALL, Some(state.target), |t| {
+        Message::Expectations(Field::Target(t))
+    })
+    .width(Length::Fixed(120.0));
 
     // Host selector (#1114): which host's sentinel. Thresholds carry their
     // own origin (set by the metric that was promoted), so the picker is for
@@ -803,11 +872,9 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
     let host: Element<'_, Message> = if state.target == ExpTarget::Thresholds {
         iced::widget::Space::new().width(0).into()
     } else {
-        pick_list(
-            state.hosts.clone(),
-            state.host.clone(),
-            Message::SetExpectationHost,
-        )
+        pick_list(state.hosts.clone(), state.host.clone(), |h| {
+            Message::Expectations(Field::Host(h))
+        })
         .placeholder(if state.hosts.is_empty() {
             "no host runs this sentinel"
         } else {
@@ -852,11 +919,9 @@ fn render_header(state: &ExpectationsState) -> Element<'_, Message> {
 }
 
 fn render_form(state: &ExpectationsState) -> Element<'_, Message> {
-    let kind = pick_list(
-        ExpKind::ALL,
-        Some(state.new_kind),
-        Message::SetExpectationKind,
-    )
+    let kind = pick_list(ExpKind::ALL, Some(state.new_kind), |k| {
+        Message::Expectations(Field::Kind(k))
+    })
     .width(Length::Fixed(220.0));
 
     let is_link = state.new_kind == ExpKind::LinkUp;
@@ -869,7 +934,7 @@ fn render_form(state: &ExpectationsState) -> Element<'_, Message> {
         "name (sshd)"
     };
     let name = text_input(name_placeholder, &state.new_name)
-        .on_input(Message::SetExpectationName)
+        .on_input(|v| Message::Expectations(Field::Name(v)))
         .padding(8)
         .width(Length::Fixed(140.0));
 
@@ -879,37 +944,33 @@ fn render_form(state: &ExpectationsState) -> Element<'_, Message> {
         // metric path + operator + threshold value.
         form = form.push(
             text_input("metric (conntrack/utilization)", &state.new_metric)
-                .on_input(Message::SetExpectationMetric)
+                .on_input(|v| Message::Expectations(Field::Metric(v)))
                 .padding(8)
                 .width(Length::Fixed(220.0)),
         );
         form = form.push(
-            pick_list(
-                ComparisonOp::ALL,
-                Some(state.new_op),
-                Message::SetExpectationOp,
-            )
+            pick_list(ComparisonOp::ALL, Some(state.new_op), |op| {
+                Message::Expectations(Field::Op(op))
+            })
             .width(Length::Fixed(70.0)),
         );
         form = form.push(
             text_input("value", &state.new_value)
-                .on_input(Message::SetExpectationValue)
+                .on_input(|v| Message::Expectations(Field::Value(v)))
                 .padding(8)
                 .width(Length::Fixed(90.0)),
         );
     } else if !is_link {
         let port = text_input("port", &state.new_port)
-            .on_input(Message::SetExpectationPort)
+            .on_input(|v| Message::Expectations(Field::Port(v)))
             .padding(8)
             .width(Length::Fixed(90.0));
         form = form.push(port);
     }
 
-    let severity = pick_list(
-        Severity::ALL,
-        Some(state.new_severity),
-        Message::SetExpectationSeverity,
-    )
+    let severity = pick_list(Severity::ALL, Some(state.new_severity), |sev| {
+        Message::Expectations(Field::Severity(sev))
+    })
     .width(Length::Fixed(120.0));
 
     let add = button(text("Add & Push").size(font::BODY))
@@ -930,11 +991,9 @@ fn render_form(state: &ExpectationsState) -> Element<'_, Message> {
 /// The systemd expectation authoring form (#278). Unlike netlink's incremental
 /// commands, each add mutates the accumulated draft and re-pushes the full set.
 fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
-    let kind = pick_list(
-        SystemdExpKind::ALL,
-        Some(state.systemd_kind),
-        Message::SetSystemdExpKind,
-    )
+    let kind = pick_list(SystemdExpKind::ALL, Some(state.systemd_kind), |k| {
+        Message::Expectations(Field::SystemdKind(k))
+    })
     .width(Length::Fixed(220.0));
 
     let mut form = row![kind].spacing(10).align_y(Alignment::Center);
@@ -950,7 +1009,7 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
         };
         form = form.push(
             text_input(placeholder, &state.new_name)
-                .on_input(Message::SetExpectationName)
+                .on_input(|v| Message::Expectations(Field::Name(v)))
                 .padding(8)
                 .width(Length::Fixed(200.0)),
         );
@@ -959,7 +1018,7 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
         SystemdExpKind::TimerWithin | SystemdExpKind::TimerSucceeded => {
             form = form.push(
                 text_input("within (secs)", &state.new_value)
-                    .on_input(Message::SetExpectationValue)
+                    .on_input(|v| Message::Expectations(Field::Value(v)))
                     .padding(8)
                     .width(Length::Fixed(120.0)),
             );
@@ -967,13 +1026,13 @@ fn render_systemd_form(state: &ExpectationsState) -> Element<'_, Message> {
         SystemdExpKind::RestartRate => {
             form = form.push(
                 text_input("max restarts", &state.new_value)
-                    .on_input(Message::SetExpectationValue)
+                    .on_input(|v| Message::Expectations(Field::Value(v)))
                     .padding(8)
                     .width(Length::Fixed(110.0)),
             );
             form = form.push(
                 text_input("window (secs)", &state.new_port)
-                    .on_input(Message::SetExpectationPort)
+                    .on_input(|v| Message::Expectations(Field::Port(v)))
                     .padding(8)
                     .width(Length::Fixed(120.0)),
             );
@@ -1079,27 +1138,25 @@ fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
     }
 
     let name = text_input("rule name", &state.new_name)
-        .on_input(Message::SetExpectationName)
+        .on_input(|v| Message::Expectations(Field::Name(v)))
         .padding(8)
         .width(Length::Fixed(160.0));
     let metric = text_input("metric (cpu/usage)", &state.new_metric)
-        .on_input(Message::SetExpectationMetric)
+        .on_input(|v| Message::Expectations(Field::Metric(v)))
         .padding(8)
         .width(Length::Fixed(240.0));
-    let op = pick_list(
-        ComparisonOp::ALL,
-        Some(state.new_op),
-        Message::SetExpectationOp,
-    )
+    let op = pick_list(ComparisonOp::ALL, Some(state.new_op), |op| {
+        Message::Expectations(Field::Op(op))
+    })
     .width(Length::Fixed(70.0));
     let value = text_input("value", &state.new_value)
-        .on_input(Message::SetExpectationValue)
+        .on_input(|v| Message::Expectations(Field::Value(v)))
         .padding(8)
         .width(Length::Fixed(90.0));
     let severity = pick_list(
         crate::view::alerts::Severity::ALL,
         Some(state.new_severity),
-        Message::SetExpectationSeverity,
+        |sev| Message::Expectations(Field::Severity(sev)),
     )
     .width(Length::Fixed(110.0));
     let add = button(text("Add rule").size(font::BODY))
@@ -1165,17 +1222,15 @@ fn render_thresholds_form(state: &ExpectationsState) -> Element<'_, Message> {
 }
 
 fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
-    let kind = pick_list(
-        HostspecExpKind::ALL,
-        Some(state.hostspec_kind),
-        Message::SetHostspecExpKind,
-    )
+    let kind = pick_list(HostspecExpKind::ALL, Some(state.hostspec_kind), |k| {
+        Message::Expectations(Field::HostspecKind(k))
+    })
     .width(Length::Fixed(220.0));
 
     let mut form = row![kind].spacing(10).align_y(Alignment::Center);
     form = form.push(
         text_input("name (rule slug)", &state.new_name)
-            .on_input(Message::SetExpectationName)
+            .on_input(|v| Message::Expectations(Field::Name(v)))
             .padding(8)
             .width(Length::Fixed(160.0)),
     );
@@ -1186,13 +1241,13 @@ fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
         HostspecExpKind::Listening | HostspecExpKind::ListeningForbid => {
             form = form.push(
                 text_input("port", &state.new_port)
-                    .on_input(Message::SetExpectationPort)
+                    .on_input(|v| Message::Expectations(Field::Port(v)))
                     .padding(8)
                     .width(Length::Fixed(90.0)),
             );
             form = form.push(
                 text_input("addr (optional; 0.0.0.0 and :: differ)", &state.new_value)
-                    .on_input(Message::SetExpectationValue)
+                    .on_input(|v| Message::Expectations(Field::Value(v)))
                     .padding(8)
                     .width(Length::Fixed(240.0)),
             );
@@ -1200,7 +1255,7 @@ fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
         kind => {
             form = form.push(
                 text_input("path (absolute)", &state.new_metric)
-                    .on_input(Message::SetExpectationMetric)
+                    .on_input(|v| Message::Expectations(Field::Metric(v)))
                     .padding(8)
                     .width(Length::Fixed(220.0)),
             );
@@ -1215,7 +1270,7 @@ fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
             if !ph1.is_empty() {
                 form = form.push(
                     text_input(ph1, &state.new_value)
-                        .on_input(Message::SetExpectationValue)
+                        .on_input(|v| Message::Expectations(Field::Value(v)))
                         .padding(8)
                         .width(Length::Fixed(190.0)),
                 );
@@ -1223,7 +1278,7 @@ fn render_hostspec_form(state: &ExpectationsState) -> Element<'_, Message> {
             if !ph2.is_empty() {
                 form = form.push(
                     text_input(ph2, &state.new_port)
-                        .on_input(Message::SetExpectationPort)
+                        .on_input(|v| Message::Expectations(Field::Port(v)))
                         .padding(8)
                         .width(Length::Fixed(150.0)),
                 );
@@ -1639,5 +1694,37 @@ mod hostspec_tests {
         assert!(!d.rows().iter().any(|r| r.rule == "mount:vt"));
         d.remove_rule("nonsense-no-colon");
         assert_eq!(d.rows().len(), 7);
+    }
+}
+
+#[cfg(test)]
+mod fields {
+    use super::*;
+
+    /// Only the target and the host make the app read anything; the form's
+    /// inputs are the pane's own.
+    #[test]
+    fn target_and_host_read_the_sentinel_the_form_does_not() {
+        let mut e = ExpectationsState {
+            status_note: Some("old".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            e.set(Field::Target(ExpTarget::Systemd)),
+            Effect::TargetChanged
+        );
+        assert_eq!(e.target, ExpTarget::Systemd);
+        assert!(e.status_note.is_none());
+        let host = ExpHost {
+            chunk: "h-000000000001".into(),
+            label: "host01 (h-000000000001)".into(),
+        };
+        assert_eq!(e.set(Field::Host(host.clone())), Effect::HostChosen);
+        assert_eq!(e.host, Some(host));
+        assert!(e.host_explicit);
+        assert_eq!(e.set(Field::Name("nginx.service".into())), Effect::None);
+        assert_eq!(e.new_name, "nginx.service");
+        assert_eq!(e.set(Field::Value("90".into())), Effect::None);
+        assert_eq!(e.set(Field::Kind(ExpKind::LinkUp)), Effect::None);
     }
 }

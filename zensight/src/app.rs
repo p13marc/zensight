@@ -1538,6 +1538,32 @@ impl ZenSight {
                 return self.logs_effect(effect);
             }
 
+            Message::Expectations(field) => {
+                use crate::view::expectations::Effect;
+                match self.expectations.set(field) {
+                    Effect::None => {}
+                    Effect::TargetChanged => {
+                        self.refresh_expectation_hosts();
+                        self.refresh_security_hosts();
+                        return self.refresh_expectations_for_target();
+                    }
+                    Effect::HostChosen => return self.refresh_expectations_for_target(),
+                }
+            }
+
+            Message::Settings(field) => {
+                self.settings.set(field);
+            }
+
+            Message::Security(action) => {
+                use crate::view::security::Effect;
+                match self.security.update(action, &mut self.detection_tuning) {
+                    Effect::None => {}
+                    Effect::ReadStatus => return self.security_status_calls(),
+                    Effect::FetchCaptures => return self.query_anomaly_captures(),
+                }
+            }
+
             Message::PromoteMetricToAlert {
                 device,
                 metric,
@@ -2763,38 +2789,6 @@ impl ZenSight {
                 self.set_view(target);
             }
 
-            Message::SetZenohMode(mode) => {
-                self.settings.set_mode(mode);
-            }
-
-            Message::SetZenohConnect(endpoints) => {
-                self.settings.set_connect(endpoints);
-            }
-
-            Message::SetZenohListen(endpoints) => {
-                self.settings.set_listen(endpoints);
-            }
-
-            Message::SetLinkProfile(profile) => {
-                self.settings.set_link_profile(profile);
-            }
-
-            Message::SubscriptionScopeChanged(scope) => {
-                self.settings.set_subscription_scope(scope);
-            }
-
-            Message::SetStaleThreshold(threshold) => {
-                self.settings.set_stale_threshold(threshold);
-            }
-
-            Message::SetMaxHistory(max_history) => {
-                self.settings.set_max_history(max_history);
-            }
-
-            Message::SetMaxLiveLatency(deadline) => {
-                self.settings.set_max_live_latency(deadline);
-            }
-
             Message::SaveSettings => {
                 self.save_settings();
             }
@@ -3326,27 +3320,8 @@ impl ZenSight {
                 self.refresh_security_hosts();
                 return self.query_expectations();
             }
-            Message::SetExpectationHost(host) => {
-                self.expectations.host = Some(host);
-                self.expectations.host_explicit = true;
-                self.expectations.status_note = None;
-                return self.refresh_expectations_for_target();
-            }
             Message::CloseExpectations => {
                 self.set_view(CurrentView::Dashboard);
-            }
-            Message::SetExpTarget(target) => {
-                self.expectations.target = target;
-                self.expectations.status_note = None;
-                self.refresh_expectation_hosts();
-                self.refresh_security_hosts();
-                return self.refresh_expectations_for_target();
-            }
-            Message::SetSystemdExpKind(kind) => {
-                self.expectations.systemd_kind = kind;
-            }
-            Message::SetHostspecExpKind(kind) => {
-                self.expectations.hostspec_kind = kind;
             }
             Message::HostspecSpecReceived(json) => {
                 // Pretty-print if it parses, so the verbatim answer is readable;
@@ -3392,27 +3367,6 @@ impl ZenSight {
                     Some(Self::reply_verdict("systemd", "expectations", &json));
                 self.expectations.systemd =
                     crate::view::expectations::SystemdExpDraft::from_status(&json);
-            }
-            Message::SetExpectationKind(kind) => {
-                self.expectations.new_kind = kind;
-            }
-            Message::SetExpectationName(name) => {
-                self.expectations.new_name = name;
-            }
-            Message::SetExpectationPort(port) => {
-                self.expectations.new_port = port;
-            }
-            Message::SetExpectationSeverity(sev) => {
-                self.expectations.new_severity = sev;
-            }
-            Message::SetExpectationMetric(metric) => {
-                self.expectations.new_metric = metric;
-            }
-            Message::SetExpectationOp(op) => {
-                self.expectations.new_op = op;
-            }
-            Message::SetExpectationValue(value) => {
-                self.expectations.new_value = value;
             }
             Message::AddExpectation => {
                 use crate::view::expectations::{ExpKind, ExpTarget, SystemdExpKind};
@@ -3762,29 +3716,6 @@ impl ZenSight {
             // makes is an armed `<topic>/set` to the chosen host (#1261), and
             // its three status reads are calls on the Security surface,
             // projected by `sync_detection_tuning`.
-            Message::SetNetringThresholdInput { detector, value } => {
-                if let Some(row) = self
-                    .detection_tuning
-                    .detectors
-                    .iter_mut()
-                    .find(|d| d.name == detector)
-                {
-                    row.threshold_input = value;
-                }
-            }
-            Message::SetNetringAllowlistInput(value) => {
-                self.detection_tuning.new_entry = value;
-            }
-            Message::SetPacketFilterInput(value) => {
-                self.detection_tuning.packet_filter_input = value;
-            }
-            Message::SetThreatIocInput(value) => {
-                self.detection_tuning.threat_ioc_input = value;
-            }
-            Message::SetThreatYaraInput(value) => {
-                self.detection_tuning.threat_yara_input = value;
-            }
-
             Message::FetchAnomalyFlows { key, src } => {
                 self.security.flows_for = Some(key.clone());
                 self.security.flows = crate::view::specialized::fetch::Fetch::Loading;
@@ -3804,33 +3735,8 @@ impl ZenSight {
                 self.refresh_security_hosts();
                 return self.security_status_calls();
             }
-            Message::SetSecurityHost(host) => {
-                self.security.host = Some(host);
-                self.security.host_explicit = true;
-                self.security.writes.disarm();
-                self.detection_tuning.forget_status();
-                return self.security_status_calls();
-            }
             Message::CloseSecurity => {
                 self.set_view(CurrentView::Dashboard);
-            }
-            Message::ToggleSecurityHideInfo => {
-                self.security.hide_info = !self.security.hide_info;
-            }
-            Message::SelectAnomaly(key) => {
-                let expanded = key.is_some();
-                self.security.selected = key;
-                // Pull the capture index once (#327) so an expanded anomaly can
-                // offer its matching triggered capture for download.
-                if expanded
-                    && matches!(
-                        self.security.captures,
-                        crate::view::specialized::fetch::Fetch::Idle
-                    )
-                {
-                    self.security.captures = crate::view::specialized::fetch::Fetch::Loading;
-                    return self.query_anomaly_captures();
-                }
             }
             Message::AnomalyCapturesReceived(result) => {
                 // A missing index is the normal case (capture.to_disk off) — keep
@@ -10499,6 +10405,7 @@ mod tier2_app_fold_tests {
 mod expectation_host_tests {
     use super::*;
     use crate::view::expectations::ExpTarget;
+    use crate::view::expectations::Field;
 
     fn info(name: &str, source: &str, origin: Option<&str>) -> zensight_common::SensorInfo {
         zensight_common::SensorInfo {
@@ -10559,7 +10466,7 @@ mod expectation_host_tests {
             "edge02",
             Some("h-bbbbbbbbbbbb"),
         )));
-        let _ = a.update(Message::SetExpTarget(ExpTarget::Netlink));
+        let _ = a.update(Message::Expectations(Field::Target(ExpTarget::Netlink)));
         assert_eq!(a.expectations.hosts.len(), 2);
         assert!(
             a.expectations.host.is_none(),
@@ -10573,7 +10480,7 @@ mod expectation_host_tests {
             "edge02",
             Some("h-bbbbbbbbbbbb"),
         )));
-        let _ = a.update(Message::SetExpTarget(ExpTarget::Systemd));
+        let _ = a.update(Message::Expectations(Field::Target(ExpTarget::Systemd)));
         assert_eq!(
             a.expectations.host.as_ref().map(|h| h.chunk.as_str()),
             Some("h-bbbbbbbbbbbb")
@@ -10591,9 +10498,11 @@ mod expectation_host_tests {
         );
 
         // Back to netlink: the systemd choice does not leak across targets.
-        let _ = a.update(Message::SetExpTarget(ExpTarget::Netlink));
+        let _ = a.update(Message::Expectations(Field::Target(ExpTarget::Netlink)));
         assert!(a.expectations.host.is_none());
-        let _ = a.update(Message::SetExpectationHost(a.expectations.hosts[0].clone()));
+        let _ = a.update(Message::Expectations(Field::Host(
+            a.expectations.hosts[0].clone(),
+        )));
         assert_eq!(
             a.expectations.host.as_ref().map(|h| h.chunk.as_str()),
             Some("h-aaaaaaaaaaaa")

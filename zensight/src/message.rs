@@ -3,9 +3,6 @@ use zensight_common::{
     SensorInfo, TelemetryPoint,
 };
 
-use crate::view::alerts::ComparisonOp;
-use crate::view::settings::ZenohMode;
-
 /// One telemetry sample, plus **who published it** (#474).
 ///
 /// The origin is chunk 3 of the sample's key. A `TelemetryPoint` has never
@@ -267,14 +264,10 @@ pub enum Message {
     OpenExpectations,
     /// Close the expectations view.
     CloseExpectations,
-    /// Select the sentinel target being authored (netlink vs systemd) (#278).
-    SetExpTarget(crate::view::expectations::ExpTarget),
-    /// The operator chose which host's sentinel the pane addresses (#1114).
-    SetExpectationHost(crate::view::expectations::ExpHost),
-    /// Set the systemd expectation kind being authored (#278).
-    SetSystemdExpKind(crate::view::expectations::SystemdExpKind),
-    /// Pick the hostspec assertion kind being authored (#821).
-    SetHostspecExpKind(crate::view::expectations::HostspecExpKind),
+    /// One field of the expectations pane (#1306): the target, the host and
+    /// the authoring form; `ExpectationsState::set` applies it and says
+    /// whether a sentinel's current set must be read.
+    Expectations(crate::view::expectations::Field),
     /// The hostspec sentinel's current assertion set (raw JSON reply).
     HostspecExpectationsReceived(String),
     /// The hostspec sensor's `@rpc/hostspec/spec` answer — "what is this host
@@ -290,20 +283,6 @@ pub enum Message {
     /// The producer's `state/<producer>/applied/thresholds` marker (#933):
     /// which writer — file, desired or rpc — is actually in force.
     ThresholdsAppliedReceived(String),
-    /// Set the kind of expectation being authored.
-    SetExpectationKind(crate::view::expectations::ExpKind),
-    /// Set the expectation name (socket) or interface (link).
-    SetExpectationName(String),
-    /// Set the expectation port.
-    SetExpectationPort(String),
-    /// Set the expectation severity.
-    SetExpectationSeverity(crate::view::alerts::Severity),
-    /// Set the metric path (metric-threshold expectation).
-    SetExpectationMetric(String),
-    /// Set the comparison operator (metric-threshold expectation).
-    SetExpectationOp(ComparisonOp),
-    /// Set the threshold value (metric-threshold expectation).
-    SetExpectationValue(String),
     /// Build + push the authored expectation to the sentinel.
     AddExpectation,
     /// Remove an expectation by rule slug.
@@ -312,28 +291,6 @@ pub enum Message {
     RefreshExpectations,
     /// A sentinel status reply (ExpectationsConfig JSON).
     ExpectationStatusReceived(String),
-
-    // Netring detection-tuning (#121): runtime allowlist + per-detector mute /
-    // threshold, pushed to the netring sensor's command channel.
-    /// Edit a detector's threshold input field (not yet applied).
-    SetNetringThresholdInput {
-        detector: String,
-        value: String,
-    },
-    /// Edit the new-allowlist-entry input field.
-    SetNetringAllowlistInput(String),
-
-    // Netring capture-focus (#225/#228): hot-swap the reloadable packet-tier
-    // BPF filter live, narrowing capture attention during an incident.
-    /// Edit the capture-focus filter expression input (not yet applied).
-    SetPacketFilterInput(String),
-
-    // Netring threat-intel (IOC / YARA) hot-reload (#328): swap the live matchers
-    // without a capture restart via `@rpc/netring/threat_intel/set`.
-    /// Edit the IOC paste box (indicators, one per line).
-    SetThreatIocInput(String),
-    /// Edit the YARA rules paste box.
-    SetThreatYaraInput(String),
 
     /// Open the unified Incidents triage view (#129).
     OpenIncidents,
@@ -456,9 +413,6 @@ pub enum Message {
         request: serde_json::Value,
         result: Result<crate::call::Reply, crate::call::WriteFailure>,
     },
-    /// Choose the host the Security pane's netring tuning reads from and
-    /// writes to (#1261) — one host's sensor, never the fleet.
-    SetSecurityHost(crate::view::expectations::ExpHost),
     /// Forget a procedure's answer on the selected device (#1261), so its
     /// panel offers the call again — a unit file hidden, a table dismissed.
     ForgetCall {
@@ -807,10 +761,10 @@ pub enum Message {
     OpenSecurity,
     /// Close the security view.
     CloseSecurity,
-    /// Toggle hiding Info-severity anomalies in the Security view (#48).
-    ToggleSecurityHideInfo,
-    /// Expand/collapse an anomaly's evidence drill-down by alert_key (#48).
-    SelectAnomaly(Option<String>),
+    /// One Security-pane interaction (#1306): the tuning inputs, the host,
+    /// the Info toggle, the anomaly drill-down; `SecurityState::update`
+    /// applies it and says what to fetch.
+    Security(crate::view::security::Action),
 
     /// Sensor came online (liveliness token appeared). Carries the protocol
     /// and, on the host-scoped key shape, the instance's `<source>` segment.
@@ -961,30 +915,8 @@ pub enum Message {
     /// Close the settings view.
     CloseSettings,
 
-    /// Set Zenoh connection mode.
-    SetZenohMode(ZenohMode),
-
-    /// Set Zenoh connect endpoints.
-    SetZenohConnect(String),
-
-    /// Set Zenoh listen endpoints.
-    SetZenohListen(String),
-
-    /// Set the link profile (#364): standard vs. constrained.
-    SetLinkProfile(zensight_common::LinkProfile),
-
-    /// Edit the telemetry subscription scope (#364), comma-separated.
-    SubscriptionScopeChanged(String),
-
-    /// Set stale threshold.
-    SetStaleThreshold(String),
-
-    /// Set max metric history per device.
-    SetMaxHistory(String),
-
-    /// Set max alerts to keep.
-    /// Set the live-video frame-age deadline in milliseconds (#716); "0" is off.
-    SetMaxLiveLatency(String),
+    /// One settings-form field (#1306); `SettingsState::set` applies it.
+    Settings(crate::view::settings::Field),
 
     /// Save settings.
     SaveSettings,

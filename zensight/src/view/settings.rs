@@ -15,6 +15,23 @@ use crate::view::icons::{self, IconSize};
 use crate::view::tokens::font;
 use zensight_common::LinkProfile;
 
+/// One settings-form field (#1306). Every one marks the form modified and
+/// clears its messages; none has an effect beyond the form.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Field {
+    Mode(ZenohMode),
+    Connect(String),
+    Listen(String),
+    /// Standard vs. constrained (#364).
+    LinkProfile(LinkProfile),
+    /// The telemetry subscription scope, comma-separated (#364).
+    SubscriptionScope(String),
+    StaleThreshold(String),
+    MaxHistory(String),
+    /// The live-video frame-age deadline in milliseconds (#716); "0" is off.
+    MaxLiveLatency(String),
+}
+
 /// Persistent settings that are saved to disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistentSettings {
@@ -403,6 +420,20 @@ impl SettingsState {
     }
 
     /// Update Zenoh mode.
+    /// One field change (#1306).
+    pub fn set(&mut self, field: Field) {
+        match field {
+            Field::Mode(mode) => self.set_mode(mode),
+            Field::Connect(v) => self.set_connect(v),
+            Field::Listen(v) => self.set_listen(v),
+            Field::LinkProfile(p) => self.set_link_profile(p),
+            Field::SubscriptionScope(v) => self.set_subscription_scope(v),
+            Field::StaleThreshold(v) => self.set_stale_threshold(v),
+            Field::MaxHistory(v) => self.set_max_history(v),
+            Field::MaxLiveLatency(v) => self.set_max_live_latency(v),
+        }
+    }
+
     pub fn set_mode(&mut self, mode: ZenohMode) {
         self.zenoh_mode = mode;
         self.modified = true;
@@ -726,11 +757,9 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
 
     // Mode picker
     let mode_label = text("Mode:").size(font::BODY);
-    let mode_picker = pick_list(
-        ZenohMode::ALL,
-        Some(state.zenoh_mode),
-        Message::SetZenohMode,
-    )
+    let mode_picker = pick_list(ZenohMode::ALL, Some(state.zenoh_mode), |m| {
+        Message::Settings(Field::Mode(m))
+    })
     .placeholder("Select mode");
 
     let mode_help = text(match state.zenoh_mode {
@@ -753,7 +782,7 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
         "tcp/localhost:7447, tcp/192.168.1.1:7447",
         &state.zenoh_connect,
     )
-    .on_input(Message::SetZenohConnect)
+    .on_input(|v| Message::Settings(Field::Connect(v)))
     .padding(8)
     .width(Length::Fixed(400.0));
 
@@ -766,7 +795,7 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
     // Listen endpoints
     let listen_label = text("Listen endpoints:").size(font::BODY);
     let listen_input = text_input("tcp/0.0.0.0:7448", &state.zenoh_listen)
-        .on_input(Message::SetZenohListen)
+        .on_input(|v| Message::Settings(Field::Listen(v)))
         .padding(8)
         .width(Length::Fixed(400.0));
 
@@ -778,11 +807,9 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
 
     // Link profile (#364): standard vs. constrained (low-bandwidth links).
     let profile_label = text("Link profile:").size(font::BODY);
-    let profile_picker = pick_list(
-        LinkProfile::ALL,
-        Some(state.link_profile),
-        Message::SetLinkProfile,
-    )
+    let profile_picker = pick_list(LinkProfile::ALL, Some(state.link_profile), |p| {
+        Message::Settings(Field::LinkProfile(p))
+    })
     .placeholder("Select profile");
     let profile_row = row![profile_label, profile_picker]
         .spacing(10)
@@ -804,7 +831,7 @@ fn render_zenoh_section(state: &SettingsState) -> Element<'_, Message> {
         "v1/*/telemetry/netring/**, zensight/v1/*/telemetry/sysinfo/**",
         &state.subscription_scope,
     )
-    .on_input(Message::SubscriptionScopeChanged)
+    .on_input(|v| Message::Settings(Field::SubscriptionScope(v)))
     .padding(8)
     .width(Length::Fixed(400.0));
     let scope_help = text(
@@ -843,7 +870,7 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
     // Stale threshold
     let threshold_label = text("Stale threshold (seconds):").size(font::BODY);
     let threshold_input = text_input("120", &state.stale_threshold_secs)
-        .on_input(Message::SetStaleThreshold)
+        .on_input(|v| Message::Settings(Field::StaleThreshold(v)))
         .padding(8)
         .width(Length::Fixed(100.0));
 
@@ -860,7 +887,7 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
     // Max history
     let history_label = text("Max metric history per device:").size(font::BODY);
     let history_input = text_input("500", &state.max_history)
-        .on_input(Message::SetMaxHistory)
+        .on_input(|v| Message::Settings(Field::MaxHistory(v)))
         .padding(8)
         .width(Length::Fixed(100.0));
 
@@ -877,7 +904,7 @@ fn render_display_section(state: &SettingsState) -> Element<'_, Message> {
     // Live-video frame-age deadline (#716).
     let latency_label = text("Live video latency deadline (ms):").size(font::BODY);
     let latency_input = text_input("1500", &state.max_live_latency_ms)
-        .on_input(Message::SetMaxLiveLatency)
+        .on_input(|v| Message::Settings(Field::MaxLiveLatency(v)))
         .padding(8)
         .width(Length::Fixed(100.0));
 
