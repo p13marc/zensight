@@ -37,8 +37,8 @@ use netring::packet::Timestamp;
 use netring::pcap_rotate::{FileNaming, RotatingConfig, RotatingPcapWriter};
 use tokio::sync::mpsc;
 use zblob::{BlobServer, BlobSpec, Manifest};
+use zensight_common::AlertSeverity;
 use zensight_common::query_detail::CaptureRecord;
-use zensight_common::{AlertSeverity, TelemetryPoint};
 
 use crate::config::{CaptureDiskMode, CaptureToDiskConfig};
 
@@ -335,7 +335,7 @@ pub async fn run_engine(
     stats: Arc<CaptureDiskStats>,
     index: CaptureIndex,
     blob: Option<CaptureBlob>,
-    events: mpsc::UnboundedSender<TelemetryPoint>,
+    events: mpsc::UnboundedSender<crate::map::Built>,
 ) {
     let Some(dir) = cfg.dir.clone() else {
         tracing::error!("netring: capture.to_disk enabled without a dir (validation gap)");
@@ -489,7 +489,7 @@ async fn handle_ctl(
     stats: &Arc<CaptureDiskStats>,
     index: &CaptureIndex,
     blob: &Option<CaptureBlob>,
-    events: &mpsc::UnboundedSender<TelemetryPoint>,
+    events: &mpsc::UnboundedSender<crate::map::Built>,
     retained: &mut Vec<RetainedFile>,
 ) {
     match msg {
@@ -621,7 +621,7 @@ async fn finalize_recording(
     stats: &Arc<CaptureDiskStats>,
     index: &CaptureIndex,
     blob: &Option<CaptureBlob>,
-    events: &mpsc::UnboundedSender<TelemetryPoint>,
+    events: &mpsc::UnboundedSender<crate::map::Built>,
     retained: &mut Vec<RetainedFile>,
 ) {
     stats.recording.store(false, Ordering::Relaxed);
@@ -1037,7 +1037,7 @@ mod tests {
         // Lifecycle events surfaced: trigger fired, then capture ready.
         let mut events = Vec::new();
         while let Ok(p) = ev_rx.try_recv() {
-            events.push(p.labels.get("event").cloned().unwrap_or_default());
+            events.push(p.1.labels.get("event").cloned().unwrap_or_default());
         }
         assert!(events.contains(&"trigger".to_string()));
         assert!(events.contains(&"ready".to_string()));
