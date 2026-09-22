@@ -65,6 +65,7 @@ a `Task`, the session or another view's state; a clock-needing action takes
 | bandwidth (`BandwidthState::update`) | `bandwidth::Action` — mode, sort, filter | `RebuildServices`, `FetchProcesses` |
 | fleet (`FleetState::update`) | `fleet::Action` — findings, sort, filter | none |
 | topology (`TopologyState::update`, takes the entity store and `now_ms`) | `topology::Action` — the canvas (select, drag, pan, zoom, hover, fit), the toolbar (lens, labels, grouping, focus, filters, layout, pins, legend, search, close), the panel (open device, open flows, copy), the ticks and the data batch | `PersistPrefs`, `Close`, `AskListenSockets`, `AskEdgeFlows`, `OpenDevice`, `OpenFlows`, `Copy` |
+| explorer (`ExplorerState::update`, takes `visible`) | `explorer::Action` — the pump's started/tick/stopped/error, the watch input and submit, unwatch, tree toggle, key select, stop | none — the state holds the pump's handle and sends the command itself |
 | logs (`SyslogFilterState::update`, takes `now_ms`) | `syslog::Action` — the panel and stats toggles, severity, time range, the facility/unit/boot lenses, row drill-down, follow/pause, the text filters, export format, paging | `RefreshHistory` (under the app's in-flight gate), `LoadOlder` (the app holds the cursor) |
 
 Kept as top-level variants by design: navigation (`Open*`/`Close*`), wire

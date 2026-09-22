@@ -10,7 +10,7 @@
 //!
 //! Throttling is the pump's other job: per-sample work (the QoS fold) stays
 //! here, off the GUI thread, and the GUI receives one
-//! [`Message::ExplorerTick`] per monitor stats tick (250 ms — the cadence
+//! [`super::Action::Tick`] per monitor stats tick (250 ms — the cadence
 //! the GUI already redraws on) regardless of bus rate.
 
 use std::sync::Arc;
@@ -91,8 +91,8 @@ pub fn run(session: Arc<zenoh::Session>) -> impl Stream<Item = Message> {
         let monitor = match Monitor::start(&session, spec()).await {
             Ok(m) => m,
             Err(e) => {
-                yield Message::ExplorerError(format!("monitor start failed: {e}"));
-                yield Message::ExplorerStopped;
+                yield super::error(format!("monitor start failed: {e}"));
+                yield super::stopped();
                 return;
             }
         };
@@ -102,7 +102,7 @@ pub fn run(session: Arc<zenoh::Session>) -> impl Stream<Item = Message> {
         });
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-        yield Message::ExplorerStarted(ExplorerCtl(tx));
+        yield super::started(ExplorerCtl(tx));
 
         let mut events = monitor.events();
         let mut core = ExplorerCore::default();
@@ -116,7 +116,7 @@ pub fn run(session: Arc<zenoh::Session>) -> impl Stream<Item = Message> {
                     Some(ExplorerCmd::Watch(selector)) => {
                         match monitor.watch(&selector).await {
                             Ok(_) => None,
-                            Err(e) => Some(Message::ExplorerError(format!(
+                            Err(e) => Some(super::error(format!(
                                 "watch {selector:?} failed: {e}"
                             ))),
                         }
@@ -124,7 +124,7 @@ pub fn run(session: Arc<zenoh::Session>) -> impl Stream<Item = Message> {
                     Some(ExplorerCmd::Unwatch(id)) => {
                         match monitor.unwatch(id).await {
                             Ok(()) => None,
-                            Err(e) => Some(Message::ExplorerError(format!(
+                            Err(e) => Some(super::error(format!(
                                 "unwatch failed: {e}"
                             ))),
                         }
@@ -148,7 +148,7 @@ pub fn run(session: Arc<zenoh::Session>) -> impl Stream<Item = Message> {
                                 latest_retained(&monitor, key, &mut core)
                             });
                             let watches = monitor.watched().await;
-                            Some(Message::ExplorerTick(Arc::new(
+                            Some(super::tick(Arc::new(
                                 core.snapshot(monitor.core(), watches, inspected),
                             )))
                         } else {
@@ -163,9 +163,9 @@ pub fn run(session: Arc<zenoh::Session>) -> impl Stream<Item = Message> {
         }
 
         if let Err(e) = monitor.shutdown().await {
-            yield Message::ExplorerError(format!("monitor shutdown: {e}"));
+            yield super::error(format!("monitor shutdown: {e}"));
         }
-        yield Message::ExplorerStopped;
+        yield super::stopped();
     }
 }
 
