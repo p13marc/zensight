@@ -325,9 +325,12 @@ pub struct DashboardState {
     /// source; each is decoded as a type once, on first read.
     pub documents:
         HashMap<(String, String), std::collections::BTreeMap<String, crate::intake::DocumentState>>,
-    /// Recent SNMP trap/event records off the events plane (#536), newest
-    /// first, deduped by ULID, capped.
-    pub snmp_events: std::collections::VecDeque<zensight_common::EventRecord>,
+    /// Events-class records from the structural intake (#1256, #1261),
+    /// newest first by id, deduped, capped at [`EVENT_RING`]. Fleet-wide,
+    /// because the overviews read them (snmp's trap feed) and a device reads
+    /// the subjects under its source; each is decoded as a type once, on
+    /// first read.
+    pub events: std::collections::VecDeque<crate::intake::EventState>,
     /// Subnet-discovery reports (#579), keyed by publishing sensor origin —
     /// LWW off `state/snmp/discovery`.
     pub snmp_discovery: HashMap<String, zensight_common::DiscoveryReport>,
@@ -363,7 +366,7 @@ impl Default for DashboardState {
             view_mode: DashboardViewMode::default(),
             status_filter: None,
             documents: HashMap::new(),
-            snmp_events: std::collections::VecDeque::new(),
+            events: std::collections::VecDeque::new(),
             snmp_discovery: HashMap::new(),
             snmp_discovery_open: false,
             snmp_targets_applied: HashMap::new(),
@@ -373,25 +376,30 @@ impl Default for DashboardState {
     }
 }
 
-/// Cap on the fleet-wide SNMP event ring (#536).
-pub const SNMP_EVENT_RING: usize = 500;
+/// Cap on the fleet-wide event ring (#536, #1256).
+pub const EVENT_RING: usize = 500;
 
 impl DashboardState {
-    /// Insert an SNMP event newest-first, deduped by ULID (backfill overlaps
-    /// the live subscriber), capped at [`SNMP_EVENT_RING`].
-    pub fn push_snmp_event(&mut self, record: zensight_common::EventRecord) {
-        if self.snmp_events.iter().any(|e| e.id == record.id) {
-            return;
+    /// Insert an event newest-first by id, deduped on its key (the backfills
+    /// overlap the live subscriber), capped at [`EVENT_RING`]. `false` when
+    /// the ring already held it.
+    pub fn push_event(&mut self, event: crate::intake::EventState) -> bool {
+        if self.events.iter().any(|e| {
+            e.subject == event.subject && e.origin == event.origin && e.producer == event.producer
+        }) {
+            return false;
         }
-        // ULIDs sort chronologically; records arrive roughly ordered, so a
-        // front-insert with a positional fix keeps newest-first cheaply.
+        // Ids are ULIDs and sort chronologically; records arrive roughly
+        // ordered, so a front-insert with a positional fix keeps newest-first
+        // cheaply.
         let pos = self
-            .snmp_events
+            .events
             .iter()
-            .position(|e| e.id < record.id)
-            .unwrap_or(self.snmp_events.len());
-        self.snmp_events.insert(pos, record);
-        self.snmp_events.truncate(SNMP_EVENT_RING);
+            .position(|e| e.id() < event.id())
+            .unwrap_or(self.events.len());
+        self.events.insert(pos, event);
+        self.events.truncate(EVENT_RING);
+        true
     }
 }
 
@@ -708,7 +716,7 @@ pub fn dashboard_view<'a>(
         &state.devices,
         crate::view::overview::snmp::SnmpOverviewData {
             interfaces: crate::view::overview::snmp::interface_documents(&state.documents),
-            events: &state.snmp_events,
+            events: crate::view::overview::snmp::event_records(&state.events),
             event_filter: &state.snmp_event_filter,
             discovery: &state.snmp_discovery,
             discovery_open: state.snmp_discovery_open,

@@ -385,9 +385,26 @@ overview ranks the fleet's interfaces straight from the store
 and the device view rebuilds its joined rows when its documents change
 (`specialized::on_documents` → `snmp::project_documents`). A retired
 device's documents go with it (`forget_documents`, the rule `documents_for`
-reads by). What remains per producer on the device state is netring's
+reads by).
+
+**And an events record, the same way** (#1261). The intake's ring is on the
+dashboard state too (`DashboardState::events`, fleet-wide, newest first by
+the subject's last chunk — the record's id, a ULID for every events subject
+the registry declares — deduped on the key, cap 500), and
+`EventState::decoded::<T>()` decodes a record once. snmp's traps were the
+last typed events arm: `<device>/trap/<ulid>` now arrives as a
+`Message::Event` like any other producer's record, the overview's trap feed
+reads the fleet's records straight from the ring
+(`overview::snmp::event_records`), and the device view rebuilds its trap
+card when its events change (`specialized::on_events` →
+`snmp::project_events`, scoped by origin *and* source, which the old
+per-device seed by source alone was not). A retired device's events go with
+it (`forget_events`). The cold store keeps the row with its key
+(`zensight_store::StoredEvent`: origin, producer, subject, value) so a boot
+backfill (`Message::EventHistory`) puts each record back on the device that
+published it. What remains per producer on the device state is netring's
 flow↔process join slot, parallax's tiles and controllers, and snmp's
-projected rows and its event ring.
+projected rows and records.
 
 ## Routing: `CurrentView`
 
@@ -1052,13 +1069,14 @@ from the day of the keyspace cutover and had no caller until #469:
 - **SNMP trap/event feed** (#536) — the GUI subscribes to the events plane
 (`v1/*/events/**`, narrowed under focus) with a startup GET on the same
 selector that backfills history when a Zenoh storage is aligned on the
-events tree. Decoded `EventRecord`s land newest-first (ULID-ordered,
-deduped) in a fleet ring (`DashboardState::snmp_events`, cap 500) and the
-open SNMP device's own ring; the device view renders an Events card
+events tree. Records land newest-first (ULID-ordered, deduped) in the
+intake's fleet ring (`DashboardState::events`, cap 500 — since #1261 the
+same ring every producer's events use, each decoded as an `EventRecord`
+once where a view wants one); the device view renders an Events card
 (time, severity-colored kind, translated varbind fields) and the fleet
 overview shows a Recent Traps section with the loudest senders (trap-storm
-spotting). Local redb persistence of events is a follow-up — restart
-continuity currently comes from the storage backfill.
+spotting). The local redb store keeps every record with its key (#578) so
+the feed survives a GUI restart without a bus-side storage.
 
 **SNMP fleet overview** (`view/overview/snmp.rs`, #533) — fleet-wide
 aggregation over the typed `InterfaceTable` docs (stored per device in

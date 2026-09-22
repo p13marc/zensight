@@ -172,7 +172,7 @@ pub struct DeviceDetailState {
     pub slice_known: Option<bool>,
     /// State documents held for this device, by subject (#1256).
     pub documents: std::collections::BTreeMap<String, crate::intake::DocumentState>,
-    /// Events-class records for this device, oldest first (#1256).
+    /// Events-class records for this device, newest first (#1256).
     pub events: VecDeque<crate::intake::EventState>,
     /// The producer's family model (#1257), from the slice the fleet served
     /// or, failing that, the one this build compiled in. `None` when neither
@@ -1914,7 +1914,7 @@ fn render_documents(state: &DeviceDetailState) -> Element<'_, Message> {
 }
 
 /// The events-class records held for a device (#1256): caption rows,
-/// newest last, the value on one line.
+/// newest first, the value on one line.
 fn render_events(state: &DeviceDetailState) -> Element<'_, Message> {
     const CLIP: usize = 200;
     let mut col =

@@ -1537,10 +1537,7 @@ impl PersistentStore {
     /// Persist a batch of event records keyed by ULID. Idempotent — a record
     /// that arrives twice (live subscriber overlapping the storage backfill)
     /// overwrites itself. Records with an empty id are skipped. Blocking I/O.
-    pub fn write_events(
-        &self,
-        events: &[zensight_common::EventRecord],
-    ) -> Result<usize, redb::Error> {
+    pub fn write_events(&self, events: &[StoredEvent]) -> Result<usize, redb::Error> {
         if events.is_empty() {
             return Ok(0);
         }
@@ -1549,13 +1546,13 @@ impl PersistentStore {
         {
             let mut table = txn.open_table(EVENTS_TABLE)?;
             for event in events {
-                if event.id.is_empty() {
+                if event.id().is_empty() {
                     continue;
                 }
                 let Ok(bytes) = serde_json::to_vec(event) else {
                     continue;
                 };
-                table.insert(event.id.as_str(), bytes.as_slice())?;
+                table.insert(event.id(), bytes.as_slice())?;
                 written += 1;
             }
         }
@@ -1566,17 +1563,13 @@ impl PersistentStore {
     /// Read the `limit` most recent persisted events, newest-first. ULID keys
     /// sort chronologically, so this is a bounded reverse range walk.
     /// Blocking I/O.
-    pub fn query_events(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<zensight_common::EventRecord>, redb::Error> {
+    pub fn query_events(&self, limit: usize) -> Result<Vec<StoredEvent>, redb::Error> {
         let txn = self.db.begin_read()?;
         let table = txn.open_table(EVENTS_TABLE)?;
         let mut out = Vec::new();
         for entry in table.range::<&str>(..)?.rev() {
             let (_key, value) = entry?;
-            let Ok(event) = serde_json::from_slice::<zensight_common::EventRecord>(value.value())
-            else {
+            let Ok(event) = serde_json::from_slice::<StoredEvent>(value.value()) else {
                 continue;
             };
             out.push(event);
@@ -1761,6 +1754,33 @@ impl zblob::ContentStore for RedbContentStore {
     }
 }
 
+/// One events-class record as the cold store keeps it (#578, #1261): the
+/// key's three coordinates beside the value as it came, so a reader can put
+/// the record back on the device that published it. Keyed by the subject's
+/// last chunk — the record's id, a ULID for every events subject the registry
+/// declares — which sorts chronologically and dedups a record that arrives
+/// twice (the live subscriber overlapping a storage backfill).
+///
+/// Rows written before #1261 held a typed `EventRecord` without its origin;
+/// they do not decode as this and a read skips them until retention prunes
+/// them — one restart's worth of feed history, traded for a row that says who
+/// published it.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StoredEvent {
+    pub origin: String,
+    pub producer: String,
+    /// The subject tail (chunks 5.. of the key, joined).
+    pub subject: String,
+    pub value: serde_json::Value,
+}
+
+impl StoredEvent {
+    /// The record's id: the subject's last chunk.
+    pub fn id(&self) -> &str {
+        self.subject.rsplit('/').next().unwrap_or("")
+    }
+}
+
 /// A persisted log line (#107, C9). The compact, restart-surviving form of a
 /// per-line log event — the fields the Logs view needs to render and filter a
 /// row. The richer journald drill-down structure isn't persisted (it stays in
@@ -1929,7 +1949,7 @@ pub struct MetricStore {
     /// Template-aware sampler gating what enters `log_pending`.
     log_retention: LogRetention,
     /// Event records buffered for the next flush to the cold store (#578).
-    event_pending: Vec<zensight_common::EventRecord>,
+    event_pending: Vec<StoredEvent>,
     timeline_pending: Vec<crate::timeline::TimelineRow>,
     /// Samples buffered across every series, maintained rather than counted
     /// (#1211). See [`pending_sample_count`](Self::pending_sample_count).
@@ -2321,7 +2341,7 @@ impl MetricStore {
     /// Offer an event record to the cold store (#578). Unlike logs there is no
     /// sampler: an event is already a rare, deliberate record, and dropping a
     /// trap would defeat the point of persisting them. No-op without a DB.
-    pub fn record_event(&mut self, event: zensight_common::EventRecord) {
+    pub fn record_event(&mut self, event: StoredEvent) {
         if self.persistent.is_none() {
             return;
         }
@@ -2330,9 +2350,7 @@ impl MetricStore {
 
     /// Drain buffered event records into a persist batch (#578). Same shape as
     /// [`take_log_flush_batch`](Self::take_log_flush_batch).
-    pub fn take_event_flush_batch(
-        &mut self,
-    ) -> Option<(PersistentStore, Vec<zensight_common::EventRecord>)> {
+    pub fn take_event_flush_batch(&mut self) -> Option<(PersistentStore, Vec<StoredEvent>)> {
         let store = self.persistent.clone()?;
         if self.event_pending.is_empty() {
             return None;
@@ -3126,18 +3144,42 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    fn event(id: &str, ts: i64, source: &str, kind: &str) -> zensight_common::EventRecord {
-        zensight_common::EventRecord {
-            id: id.to_string(),
-            timestamp: ts,
-            source: source.to_string(),
-            protocol: zensight_common::Protocol::Snmp,
-            kind: kind.to_string(),
-            severity: zensight_common::AlertSeverity::Warning,
-            summary: format!("{kind} on {source}"),
-            alert_key: None,
-            fields: Default::default(),
+    fn event(id: &str, ts: i64, source: &str, kind: &str) -> StoredEvent {
+        StoredEvent {
+            origin: "h-3fa9c2d41b7e".to_string(),
+            producer: "snmp".to_string(),
+            subject: format!("{source}/trap/{id}"),
+            value: serde_json::json!({
+                "id": id, "timestamp": ts, "source": source, "kind": kind,
+                "severity": "warning", "summary": format!("{kind} on {source}"),
+            }),
         }
+    }
+
+    /// A row written before #1261 — a typed `EventRecord` with no origin —
+    /// is skipped on read rather than decoded into a record on no device.
+    #[test]
+    fn a_pre_1261_event_row_is_skipped_on_read() {
+        let path = temp_db_path("events-old-row");
+        let store = PersistentStore::open(&path).expect("open");
+        {
+            let txn = store.db.begin_write().unwrap();
+            {
+                let mut table = txn.open_table(EVENTS_TABLE).unwrap();
+                let old = br#"{"id":"01aaa","timestamp":100,"source":"r1","protocol":"snmp","kind":"trap/a","severity":"warning","summary":"x","fields":{}}"#;
+                table.insert("01aaa", old.as_slice()).unwrap();
+            }
+            txn.commit().unwrap();
+        }
+        store
+            .write_events(&[event("01aab", 200, "r1", "trap/b")])
+            .unwrap();
+        let got = store.query_events(10).unwrap();
+        assert_eq!(
+            got.iter().map(StoredEvent::id).collect::<Vec<_>>(),
+            vec!["01aab"]
+        );
+        let _ = std::fs::remove_file(&path);
     }
 
     /// #578: events round-trip through redb newest-first, and a re-delivered
@@ -3160,7 +3202,7 @@ mod tests {
 
         let got = store.query_events(10).unwrap();
         assert_eq!(
-            got.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            got.iter().map(StoredEvent::id).collect::<Vec<_>>(),
             vec!["01aac", "01aab", "01aaa"],
             "newest-first, deduped by ULID"
         );
@@ -3180,7 +3222,7 @@ mod tests {
         assert_eq!(store.prune_events(2).unwrap(), 3);
         let got = store.query_events(10).unwrap();
         assert_eq!(
-            got.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            got.iter().map(StoredEvent::id).collect::<Vec<_>>(),
             vec!["01aa5", "01aa4"]
         );
         assert_eq!(store.prune_events(2).unwrap(), 0);

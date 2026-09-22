@@ -148,4 +148,14 @@ has never seen.
 The `events` table is seeded at **boot** rather than on view open, because the
 trap feed is on the dashboard — the first screen — so waiting for a view switch
 would show an empty feed on every launch (#578). It arrives as
-`Message::SnmpEventHistoryLoaded`.
+`Message::EventHistory` and folds into the intake's ring like a live
+`Message::Event`, without being written back.
+
+Each row is a `zensight_store::StoredEvent` (#1261): the key's origin,
+producer and subject beside the value as it came, keyed by the subject's last
+chunk (the record's ULID). The row used to be a typed `EventRecord` with no
+origin, which could not be put back on the device that published it once two
+pollers could each have a `switch01` (#1118); rows written before #1261 do not
+decode as the new shape and are skipped on read until retention prunes them —
+one restart's worth of feed history, traded for a row that says who published
+it. The historian's events table shares the type.

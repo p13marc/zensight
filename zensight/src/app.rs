@@ -343,8 +343,6 @@ pub struct ZenSight {
     /// The fleet's served view definitions by producer, from `views`
     /// (#1259). A served definition wins over the bundled one.
     served_views: std::collections::HashMap<String, zensight_common::views::ViewSet>,
-    /// Events-class records from the structural intake (#1256), a ring.
-    events: std::collections::VecDeque<crate::intake::EventState>,
     /// Whether this process has ever been connected (#1116), so the freshness
     /// indicator can tell a *re*connect from the first one.
     has_connected: bool,
@@ -625,7 +623,6 @@ impl ZenSight {
             fleet_swept: false,
             schemas: std::collections::HashMap::new(),
             served_views: std::collections::HashMap::new(),
-            events: std::collections::VecDeque::new(),
             has_connected: false,
             persisted: persistent.clone(),
             persisted_dirty: false,
@@ -674,12 +671,12 @@ impl ZenSight {
             Some(store) => Task::future(async move {
                 let events = tokio::task::spawn_blocking(move || {
                     store
-                        .query_events(crate::view::dashboard::SNMP_EVENT_RING)
+                        .query_events(crate::view::dashboard::EVENT_RING)
                         .unwrap_or_default()
                 })
                 .await
                 .unwrap_or_default();
-                Message::SnmpEventHistoryLoaded(events)
+                Message::EventHistory(events)
             }),
             None => Task::none(),
         };
@@ -1642,35 +1639,6 @@ impl ZenSight {
                     device.parallax_detail.apply_stream_status(&status);
                 }
             }
-            Message::SnmpEventReceived { origin, record } => {
-                // Selected SNMP device gets its own ring for the Events card.
-                //
-                // Matched on the triple (#1118). `record.source` alone routed
-                // one poller's trap about its `switch01` to another poller's
-                // open view of a different `switch01`.
-                let id = DeviceId {
-                    producer: "snmp".into(),
-                    origin,
-                    source: record.source.clone(),
-                };
-                if let Some(selected) = self.selected_device.as_mut()
-                    && selected.device_id == id
-                {
-                    let events = &mut selected.snmp_detail.events;
-                    if !events.iter().any(|e| e.id == record.id) {
-                        let pos = events
-                            .iter()
-                            .position(|e| e.id < record.id)
-                            .unwrap_or(events.len());
-                        events.insert(pos, record.clone());
-                        events.truncate(crate::view::specialized::snmp::DEVICE_EVENT_RING);
-                    }
-                }
-                // Persist (#578): the feed survives a GUI restart without
-                // requiring a bus-side storage on `**/events/**`.
-                self.store.record_event(record.clone());
-                self.dashboard.push_snmp_event(record);
-            }
             Message::ToggleSnmpEventFilters => {
                 let filter = &mut self.dashboard.snmp_event_filter;
                 filter.open = !filter.open;
@@ -1795,12 +1763,20 @@ impl ZenSight {
             Message::ClearAlertFocus => {
                 self.alerts.focused_external = None;
             }
-            Message::SnmpEventHistoryLoaded(events) => {
-                // Cold-store backfill on open; push_snmp_event dedups by ULID
-                // against whatever the live subscriber already delivered.
-                for record in events {
-                    self.dashboard.push_snmp_event(record);
+            Message::EventHistory(events) => {
+                // Cold-store backfill at boot (#578); `push_event` dedups
+                // against whatever the live subscriber already delivered, and
+                // a row that came from the store is not written back to it.
+                for row in events {
+                    self.dashboard.push_event(crate::intake::EventState::new(
+                        row.origin,
+                        row.producer,
+                        row.subject,
+                        row.value,
+                        now_ms(),
+                    ));
                 }
+                self.sync_selected_intake();
             }
             Message::SnmpDiscoveryReport { origin, report } => {
                 // LWW per publishing sensor origin (#579).
@@ -2956,16 +2932,25 @@ impl ZenSight {
                 subject,
                 value,
             } => {
-                self.events.push_back(crate::intake::EventState {
-                    origin,
-                    producer,
-                    subject,
-                    value,
-                    received_ms: now_ms(),
-                });
-                while self.events.len() > EVENT_RING {
-                    self.events.pop_front();
+                let event =
+                    crate::intake::EventState::new(origin, producer, subject, value, now_ms());
+                // Persist (#578): the feed survives a GUI restart without
+                // requiring a bus-side storage on `**/events/**` — a record
+                // the ring already held (the bus backfill overlapping the
+                // live subscriber) is not written twice.
+                if self.dashboard.events.iter().all(|e| {
+                    e.subject != event.subject
+                        || e.origin != event.origin
+                        || e.producer != event.producer
+                }) {
+                    self.store.record_event(zensight_store::StoredEvent {
+                        origin: event.origin.clone(),
+                        producer: event.producer.clone(),
+                        subject: event.subject.clone(),
+                        value: event.value.clone(),
+                    });
                 }
+                self.dashboard.push_event(event);
                 self.sync_selected_intake();
             }
             Message::ToggleFleetFindings(id) => {
@@ -7704,6 +7689,17 @@ impl ZenSight {
         self.sync_selected_intake();
     }
 
+    /// Drop the events a retired device published (#1261) — the rule
+    /// `events_for` reads by.
+    fn forget_events(&mut self, id: &DeviceId) {
+        let sole = self.sole_device_of(id);
+        self.dashboard.events.retain(|e| {
+            !(e.origin == id.origin
+                && e.producer == id.producer
+                && (sole || subject_is_under(&e.subject, &id.source)))
+        });
+    }
+
     /// Drop the documents a retired device published (#1261): the subjects
     /// under its source, or every subject when it was the only device this
     /// producer had on this origin — the same rule `documents_for` reads by.
@@ -7739,9 +7735,12 @@ impl ZenSight {
             .unwrap_or_default()
     }
 
+    /// The events held for a device, newest first — the same rule as
+    /// [`Self::documents_for`].
     fn events_for(&self, id: &DeviceId) -> std::collections::VecDeque<crate::intake::EventState> {
         let sole = self.sole_device_of(id);
-        self.events
+        self.dashboard
+            .events
             .iter()
             .filter(|e| {
                 e.origin == id.origin
@@ -7801,8 +7800,10 @@ impl ZenSight {
             selected.family = family;
             selected.definition = definition;
             // A view that projects a document into borrowed rows (snmp's
-            // interface table) rebuilds them now (#1261).
+            // interface table) or its events into typed records (snmp's
+            // trap card) rebuilds them now (#1261).
             crate::view::specialized::on_documents(selected);
+            crate::view::specialized::on_events(selected);
         }
     }
 
@@ -8900,20 +8901,6 @@ impl ZenSight {
         // the Focus control is armed the moment a device can be selected at all.
         detail_state.focused = self.link.focus.as_deref() == Some(device_id.origin.as_str());
         detail_state.origin = Some(device_id.origin.clone());
-        // Seed the device's Events card from the fleet ring (#578). Without
-        // this a freshly-opened SNMP device shows "no records yet" even when
-        // the fleet feed is holding its traps — the per-device ring only ever
-        // filled from records that arrived *while* it was selected.
-        if device_id.is(Protocol::Snmp) {
-            detail_state.snmp_detail.events = self
-                .dashboard
-                .snmp_events
-                .iter()
-                .filter(|e| e.source == device_id.source)
-                .take(crate::view::specialized::snmp::DEVICE_EVENT_RING)
-                .cloned()
-                .collect();
-        }
         self.selected_device = Some(detail_state);
         // The intake's findings and documents for this device (#1256).
         self.sync_selected_intake();
@@ -9242,6 +9229,7 @@ impl ZenSight {
                 // hotlists — now that the map is keyed on the triple, the
                 // eviction can reach it.
                 self.forget_documents(id);
+                self.forget_events(id);
             }
             tracing::info!(
                 evicted = gone.len(),
@@ -9333,8 +9321,6 @@ fn sensor_liveliness_matches(key: &str, protocol: &str, source: Option<&str>) ->
 }
 
 /// Current wall-clock time in epoch milliseconds.
-/// The bound on events-class records the structural intake holds (#1256).
-const EVENT_RING: usize = 256;
 /// The bound on state documents held per `(origin, producer)` (#1256).
 const DOCUMENTS_PER_PRODUCER: usize = 512;
 

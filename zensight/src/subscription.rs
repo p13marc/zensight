@@ -825,7 +825,7 @@ pub fn zenoh_subscription(config: LinkConfig) -> Subscription<Message> {
 
 /// Cap on how many event records the startup backfill GET decodes (#583).
 ///
-/// Comfortably above `dashboard::SNMP_EVENT_RING` (500), so a full ring can
+/// Comfortably above `dashboard::EVENT_RING` (500), so a full ring can
 /// still be filled from history, but bounded: with an events storage aligned on
 /// the tree the GET is answered by the entire stored log, and the registry
 /// bounds SNMP trap records at 100k *per device*. Nothing narrower is
@@ -1034,30 +1034,14 @@ pub(crate) fn decode_sample(key: &str, payload: &[u8]) -> Option<Message> {
         return decode_structural(key, payload, class, origin, producer, &tail);
     };
 
-    // Events class (#536): append-only records — SNMP trap records today.
+    // Events class (#536): append-only records. No typed arm is left (#1261):
+    // a registered events subject is held as a structural record like an
+    // unregistered producer's, and the view that wants it as a type (snmp's
+    // trap card, `EventRecord`) decodes it once from the ring. The publishing
+    // origin rides on the message (#1118): two pollers polling one `switch01`
+    // are two devices.
     if matches!(class, Class::Events) {
-        return match subject {
-            zensight_common::registry::AnySubject::Snmp(
-                zensight_common::registry::snmp::Subject::Trap { .. },
-            ) => match decode_auto::<zensight_common::EventRecord>(payload) {
-                // The publishing poller's origin rides along (#1118): two
-                // pollers polling one `switch01` are two devices, and matching
-                // a trap on `record.source` alone routes one's trap to the
-                // other's open view.
-                Ok(record) => Some(Message::SnmpEventReceived {
-                    origin: origin.clone(),
-                    record,
-                }),
-                Err(e) => {
-                    tracing::warn!(error = %e, key = %key, "Failed to decode EventRecord");
-                    None
-                }
-            },
-            // #1128 made this drop loud; #1256 makes it not a drop: a
-            // registered events subject without a typed arm is held as a
-            // structural record, like an unregistered producer's.
-            _ => decode_structural(key, payload, class, origin, producer, &tail),
-        };
+        return decode_structural(key, payload, class, origin, producer, &tail);
     }
 
     // One typed match over the framework state set, instead of a string match
@@ -1774,6 +1758,32 @@ mod tests {
                 assert_eq!(value["device"], serde_json::json!("router01"));
             }
             other => panic!("expected a Document, got {other:?}"),
+        }
+    }
+
+    /// A registered producer's events record that no typed arm claims —
+    /// snmp's `<device>/trap/<ulid>` since #1261 — is held as an event, the
+    /// origin and the subject naming the device, and the view decodes it as
+    /// an `EventRecord` once.
+    #[test]
+    fn the_snmp_trap_is_an_event() {
+        let payload = br#"{"id":"01J9ZK6R2M3N4P5Q6R7S8T9V0W","timestamp":1,"source":"router01","protocol":"snmp","kind":"trap/link_down","severity":"warning","summary":"x","fields":{}}"#;
+        match decode_sample(
+            "v1/h-3fa9c2d41b7e/events/snmp/router01/trap/01J9ZK6R2M3N4P5Q6R7S8T9V0W",
+            payload,
+        ) {
+            Some(Message::Event {
+                origin,
+                producer,
+                subject,
+                value,
+            }) => {
+                assert_eq!(origin, "h-3fa9c2d41b7e");
+                assert_eq!(producer, "snmp");
+                assert_eq!(subject, "router01/trap/01J9ZK6R2M3N4P5Q6R7S8T9V0W");
+                assert_eq!(value["kind"], serde_json::json!("trap/link_down"));
+            }
+            other => panic!("expected an Event, got {other:?}"),
         }
     }
 

@@ -70,6 +70,14 @@ pub fn on_documents(state: &mut DeviceDetailState) {
     }
 }
 
+/// A device's held events changed (#1261): a view that reads them as a
+/// type — snmp's trap card, `EventRecord`s — rebuilds that projection here.
+pub fn on_events(state: &mut DeviceDetailState) {
+    if state.device_id.producer == "snmp" {
+        snmp::project_events(state);
+    }
+}
+
 /// How a finished write reads in a toast (#1261): the producer's own
 /// phrasing when its view has one (systemd's job results, snmp's outlet
 /// outcome), else the generic reading of the reply's `accepted`, `error`,

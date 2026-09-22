@@ -197,8 +197,9 @@ pub struct SnmpOverviewData<'a> {
     /// devices (#1118). From the intake's document store (#1261), decoded
     /// once: see [`interface_documents`].
     pub interfaces: Vec<(&'a str, &'a InterfaceTable)>,
-    /// Fleet trap/event ring, newest first (#536).
-    pub events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
+    /// The fleet's trap/event records, newest first (#536) — from the
+    /// intake's ring (#1261), decoded once: see [`event_records`].
+    pub events: Vec<&'a zensight_common::EventRecord>,
     /// Filter/search state for that feed (#578).
     pub event_filter: &'a EventFilterState,
     /// Subnet-discovery reports keyed by publishing sensor origin (#579).
@@ -243,6 +244,20 @@ pub fn interface_documents<'a>(
     // Deterministic order: the map is a hash map.
     out.sort_by(|(oa, ta), (ob, tb)| (ta.device.as_str(), *oa).cmp(&(tb.device.as_str(), *ob)));
     out
+}
+
+/// The fleet's `snmp` events from the intake's ring (#1261), each decoded
+/// once through `EventState::decoded`, in the ring's order (newest first by
+/// id). A record that is not an `EventRecord` is left out here; the device
+/// view says so.
+pub fn event_records(
+    events: &std::collections::VecDeque<crate::intake::EventState>,
+) -> Vec<&zensight_common::EventRecord> {
+    events
+        .iter()
+        .filter(|e| e.producer == "snmp")
+        .filter_map(|e| e.decoded::<zensight_common::EventRecord>().ok())
+        .collect()
 }
 
 /// Render the SNMP network overview.
@@ -315,7 +330,7 @@ pub fn snmp_overview<'a>(
     let top_talkers = render_top_talkers(&fleet, &ambiguous);
     let down_hotlist = render_down_hotlist(&fleet, &ambiguous);
     let error_hotspots = render_error_hotspots(&fleet, &ambiguous);
-    let trap_feed = render_trap_feed(events, event_filter, devices);
+    let trap_feed = render_trap_feed(&events, event_filter, devices);
 
     let mut content = column![summary_row].spacing(space::MD).width(Length::Fill);
     if let Some(card) = render_discovery(discovery, discovery_open, desired_alive, applied_targets)
@@ -492,7 +507,7 @@ fn render_discovery<'a>(
 /// / time-range facets and a free-text box — and lists everything that
 /// passes, with each row linking to the device view and the device's alerts.
 fn render_trap_feed<'a>(
-    events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
+    events: &[&'a zensight_common::EventRecord],
     filter: &'a EventFilterState,
     devices: &HashMap<&DeviceId, &DeviceState>,
 ) -> Element<'a, Message> {
@@ -520,8 +535,11 @@ fn render_trap_feed<'a>(
         .collect::<Vec<_>>()
         .join(", ");
 
-    let matched: Vec<&zensight_common::EventRecord> =
-        events.iter().filter(|e| filter.matches(e)).collect();
+    let matched: Vec<&zensight_common::EventRecord> = events
+        .iter()
+        .copied()
+        .filter(|e| filter.matches(e))
+        .collect();
 
     let heading = if filter.is_active() {
         format!(
@@ -686,7 +704,7 @@ impl<T> std::fmt::Display for Facet<T> {
 /// The facet row: device / severity / kind pick-lists built from what the
 /// ring actually holds, a time-range picker, a search box and Clear.
 fn render_event_filters<'a>(
-    events: &'a std::collections::VecDeque<zensight_common::EventRecord>,
+    events: &[&'a zensight_common::EventRecord],
     filter: &'a EventFilterState,
 ) -> Element<'a, Message> {
     use iced::widget::{pick_list, text_input};

@@ -688,18 +688,10 @@ pub enum Message {
         source: String,
         status: zensight_common::stream::StreamStatus,
     },
-    /// A durable SNMP trap/inform record off the events plane (#536).
-    ///
-    /// `origin` for the same reason as [`Message::SnmpInterfaceTable`]
-    /// (#1118): matching a trap on `record.source` alone routes one poller's
-    /// trap to another poller's open device view.
-    SnmpEventReceived {
-        origin: String,
-        record: zensight_common::EventRecord,
-    },
-    /// Event records read back from the local redb store on open (#578) —
-    /// the feed's restart survival when no bus-side storage is aligned.
-    SnmpEventHistoryLoaded(Vec<zensight_common::EventRecord>),
+    /// The cold store's event rows at boot (#578, #1261): the feed survives a
+    /// GUI restart without a bus-side storage. Folded into the ring like a
+    /// live `Event`, and not written back.
+    EventHistory(Vec<zensight_store::StoredEvent>),
     /// Expand/collapse the trap feed's filter row and full listing (#578).
     ToggleSnmpEventFilters,
     /// Trap-feed facets (#578). `None` clears that facet.
