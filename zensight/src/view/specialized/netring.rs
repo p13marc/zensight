@@ -1057,13 +1057,15 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
                 let action: Element<'_, Message> = match (&rec.artifact_id, &rec.artifact_prefix) {
                     (Some(id), Some(prefix)) => button(text("Download").size(font::CAPTION))
                         .padding([3, 9])
-                        .on_press(Message::DownloadCaptureBlob {
-                            producer: "netring".to_string(),
-                            artifact_id: id.clone(),
-                            blob_prefix: prefix.clone(),
-                            root: rec.artifact_root.clone(),
-                            filename: rec.filename.clone(),
-                        })
+                        .on_press(Message::Artifact(
+                            crate::view::artifact_fetch::Action::DownloadBlob {
+                                producer: "netring".to_string(),
+                                artifact_id: id.clone(),
+                                blob_prefix: prefix.clone(),
+                                root: rec.artifact_root.clone(),
+                                filename: rec.filename.clone(),
+                            },
+                        ))
                         .into(),
                     (Some(_), None) => text("sensor too old").size(font::CAPTION).style(dim).into(),
                     (None, _) => text(if rec.mode == "rotating" {
@@ -2513,7 +2515,7 @@ mod tests {
         // anchored (§2.1).
         assert!(msgs.iter().any(|m| matches!(
             m,
-            Message::DownloadCaptureBlob { artifact_id, filename, blob_prefix, root, .. }
+            Message::Artifact(crate::view::artifact_fetch::Action::DownloadBlob { artifact_id, filename, blob_prefix, root, .. })
                 if artifact_id == "01J00000000000000000000000"
                     && filename.contains("BeaconRita")
                     && !blob_prefix.contains('*')
@@ -2523,7 +2525,10 @@ mod tests {
         // have produced a message at all, or the guard above is decorative.
         assert_eq!(
             msgs.iter()
-                .filter(|m| matches!(m, Message::DownloadCaptureBlob { .. }))
+                .filter(|m| matches!(
+                    m,
+                    Message::Artifact(crate::view::artifact_fetch::Action::DownloadBlob { .. })
+                ))
                 .count(),
             1,
             "a record without an origin must offer no download"

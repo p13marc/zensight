@@ -2664,8 +2664,10 @@ fn test_artifact_holder_pick() {
     let _ = ui.click("h-3fa9c2d41b7e · 2.0 KB");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
-        msgs.iter()
-            .any(|m| matches!(m, Message::ArtifactHolderChosen(0))),
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::Artifact(zensight::view::artifact_fetch::Action::HolderChosen(0))
+        )),
         "clicking a holder dispatches its index"
     );
 }
@@ -2742,8 +2744,10 @@ fn test_artifact_tree_confirm_card() {
     let _ = ui.click("Choose folder & download");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
-        msgs.iter()
-            .any(|m| matches!(m, Message::ArtifactTreeConfirmed)),
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::Artifact(zensight::view::artifact_fetch::Action::TreeConfirmed)
+        )),
         "confirming dispatches the folder-picker step"
     );
 
@@ -2830,7 +2834,7 @@ fn test_sensors_snapshot_dirs() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(msgs.iter().any(|m| matches!(
         m,
-        Message::StartArtifact { producer, kind: ArtifactKind::Snapshot { dir }, target_source: None }
+        Message::Artifact(zensight::view::artifact_fetch::Action::Start { producer, kind: ArtifactKind::Snapshot { dir }, target_source: None })
             if producer == "sysinfo" && dir == "etc"
     )));
 
@@ -3991,7 +3995,9 @@ fn test_logs_filtered_export_button_carries_filter() {
 
     let msgs: Vec<Message> = ui.into_messages().collect();
     let kind = msgs.iter().find_map(|m| match m {
-        Message::StartArtifact { producer, kind, .. } if producer == "logs" => Some(kind.clone()),
+        Message::Artifact(zensight::view::artifact_fetch::Action::Start {
+            producer, kind, ..
+        }) if producer == "logs" => Some(kind.clone()),
         _ => None,
     });
     match kind {
@@ -4168,10 +4174,10 @@ fn test_logs_export_format_choice() {
     ui.click("Export filtered logs").expect("click export");
     let msgs: Vec<Message> = ui.into_messages().collect();
     let format = msgs.iter().find_map(|m| match m {
-        Message::StartArtifact {
+        Message::Artifact(zensight::view::artifact_fetch::Action::Start {
             kind: ArtifactKind::LogBundle { format, .. },
             ..
-        } => Some(*format),
+        }) => Some(*format),
         _ => None,
     });
     assert_eq!(format, Some(LogBundleFormat::Text));
@@ -5391,7 +5397,7 @@ fn netring_capture_tab_hosts_capture_form() {
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(messages.iter().any(|m| matches!(
         m,
-        Message::StartArtifact { producer, kind: ArtifactKind::Capture { .. }, .. }
+        Message::Artifact(zensight::view::artifact_fetch::Action::Start { producer, kind: ArtifactKind::Capture { .. }, .. })
             if producer == "netring"
     )));
 }
@@ -5504,11 +5510,10 @@ fn capture_form_over_cap_duration_blocks_submit() {
     // … and the disabled submit emits no StartArtifact message.
     let _ = ui.click("Start capture");
     let msgs: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        !msgs
-            .iter()
-            .any(|m| matches!(m, Message::StartArtifact { .. }))
-    );
+    assert!(!msgs.iter().any(|m| matches!(
+        m,
+        Message::Artifact(zensight::view::artifact_fetch::Action::Start { .. })
+    )));
 }
 
 #[test]

@@ -2672,13 +2672,10 @@ impl ZenSight {
             },
 
             // Unified artifact download (report / snapshot / capture) via the artifact channel.
-            Message::LoadArtifactKinds => {
-                if let Some(task) = self.load_artifact_kinds() {
-                    return task;
-                }
-            }
-
-            Message::ArtifactKindsLoaded { producer, kinds } => {
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::KindsLoaded {
+                producer,
+                kinds,
+            }) => {
                 // Seed a default capture form for a sensor that advertises the
                 // Capture kind, so the form renders before the operator edits it.
                 if kinds
@@ -2690,11 +2687,11 @@ impl ZenSight {
                 self.artifact_kinds.insert(producer, kinds);
             }
 
-            Message::CaptureFormEdited {
+            Message::Artifact(crate::view::artifact_fetch::Action::FormEdited {
                 producer,
                 field,
                 value,
-            } => {
+            }) => {
                 use crate::view::artifact_fetch::CaptureField;
                 let form = self.capture_forms.entry(producer).or_default();
                 match field {
@@ -2704,7 +2701,10 @@ impl ZenSight {
                 }
             }
 
-            Message::CaptureFormToggled { producer, field } => {
+            Message::Artifact(crate::view::artifact_fetch::Action::FormToggled {
+                producer,
+                field,
+            }) => {
                 use crate::view::artifact_fetch::CaptureToggle;
                 let form = self.capture_forms.entry(producer).or_default();
                 match field {
@@ -2715,23 +2715,23 @@ impl ZenSight {
                 }
             }
 
-            Message::StartArtifact {
+            Message::Artifact(crate::view::artifact_fetch::Action::Start {
                 producer,
                 kind,
                 target_source,
-            } => {
+            }) => {
                 if let Some(task) = self.start_artifact(producer, kind, target_source) {
                     return task;
                 }
             }
 
-            Message::DownloadCaptureBlob {
+            Message::Artifact(crate::view::artifact_fetch::Action::DownloadBlob {
                 producer,
                 artifact_id,
                 blob_prefix,
                 root,
                 filename,
-            } => {
+            }) => {
                 if let Some(task) =
                     self.download_capture_blob(producer, artifact_id, blob_prefix, root, filename)
                 {
@@ -2739,20 +2739,22 @@ impl ZenSight {
                 }
             }
 
-            Message::ArtifactTreeVerified(result) => match result {
-                Ok(verify) => {
-                    self.artifact_fetch =
-                        crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { verify };
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::TreeVerified(result)) => {
+                match result {
+                    Ok(verify) => {
+                        self.artifact_fetch =
+                            crate::view::artifact_fetch::ArtifactFetch::ConfirmingTree { verify };
+                    }
+                    Err(e) => {
+                        self.artifact_fetch =
+                            crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
+                        self.toasts
+                            .push(ToastSeverity::Error, format!("Snapshot verify failed: {e}"));
+                    }
                 }
-                Err(e) => {
-                    self.artifact_fetch =
-                        crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
-                    self.toasts
-                        .push(ToastSeverity::Error, format!("Snapshot verify failed: {e}"));
-                }
-            },
+            }
 
-            Message::ArtifactTreeConfirmed => {
+            Message::Artifact(crate::view::artifact_fetch::Action::TreeConfirmed) => {
                 // The verify stays on screen while the picker is open; the
                 // state advances only once a folder is actually chosen.
                 if matches!(
@@ -2764,18 +2766,20 @@ impl ZenSight {
                             .pick_folder()
                             .await
                             .map(|h| h.path().to_path_buf());
-                        Message::ArtifactTreeDestChosen { dest }
+                        Message::ArtifactEvent(crate::view::artifact_fetch::Event::TreeDestChosen {
+                            dest,
+                        })
                     });
                 }
             }
 
-            Message::ArtifactTreeDestChosen { dest } => {
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::TreeDestChosen { dest }) => {
                 if let Some(task) = self.on_tree_dest_chosen(dest) {
                     return task;
                 }
             }
 
-            Message::ArtifactHolderChosen(idx) => {
+            Message::Artifact(crate::view::artifact_fetch::Action::HolderChosen(idx)) => {
                 // Take the holder list out of the pick state; a stale index
                 // (state moved on) is ignored.
                 if let crate::view::artifact_fetch::ArtifactFetch::PickingHolder { holders } =
@@ -2787,13 +2791,16 @@ impl ZenSight {
                 }
             }
 
-            Message::ArtifactRequested(result) => {
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::Requested(result)) => {
                 if let Some(task) = self.on_artifact_requested(result) {
                     return task;
                 }
             }
 
-            Message::ArtifactGenerating { detail, progress } => {
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::Generating {
+                detail,
+                progress,
+            }) => {
                 // Only update while the produce phase is running (ignore a stale
                 // poll landing after Ready flipped the state to Downloading).
                 if matches!(
@@ -2806,7 +2813,7 @@ impl ZenSight {
                 }
             }
 
-            Message::ArtifactProgress { got, total } => {
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::Progress { got, total }) => {
                 // Only update while actively downloading (ignore stale progress
                 // from a paused/cancelled job).
                 if matches!(
@@ -2818,7 +2825,7 @@ impl ZenSight {
                 }
             }
 
-            Message::ArtifactVerifying => {
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::Verifying) => {
                 // Only while actively downloading (a stale event from a
                 // cancelled job must not resurrect the busy state). The
                 // post-resolve assignment in `on_artifact_downloaded` keeps
@@ -2832,43 +2839,47 @@ impl ZenSight {
                 }
             }
 
-            Message::ArtifactDownloaded(result) => {
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::Downloaded(result)) => {
                 if let Some(task) = self.on_artifact_downloaded(result) {
                     return task;
                 }
             }
 
-            Message::BlobCacheTagged(result) => match result {
-                Ok(()) => tracing::debug!("Tagged the downloaded snapshot in the chunk cache"),
-                Err(e) => tracing::debug!(
-                    error = %e,
-                    "Could not tag the downloaded snapshot (cache stays cold for it)"
-                ),
-            },
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::BlobCacheTagged(result)) => {
+                match result {
+                    Ok(()) => tracing::debug!("Tagged the downloaded snapshot in the chunk cache"),
+                    Err(e) => tracing::debug!(
+                        error = %e,
+                        "Could not tag the downloaded snapshot (cache stays cold for it)"
+                    ),
+                }
+            }
 
-            Message::ArtifactSaved(result) => match result {
-                Ok(Some(path)) => {
-                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Saved {
-                        path: path.clone(),
-                        note: self.artifact_job.as_ref().and_then(|j| j.note.clone()),
-                    };
-                    self.toasts
-                        .push(ToastSeverity::Success, format!("Artifact saved to {path}"));
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::Saved(result)) => {
+                match result {
+                    Ok(Some(path)) => {
+                        self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Saved {
+                            path: path.clone(),
+                            note: self.artifact_job.as_ref().and_then(|j| j.note.clone()),
+                        };
+                        self.toasts
+                            .push(ToastSeverity::Success, format!("Artifact saved to {path}"));
+                    }
+                    Ok(None) => {
+                        // User cancelled the save dialog — discard, back to idle.
+                        self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Idle;
+                        self.artifact_job = None;
+                    }
+                    Err(e) => {
+                        self.artifact_fetch =
+                            crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
+                        self.toasts
+                            .push(ToastSeverity::Error, format!("Save failed: {e}"));
+                    }
                 }
-                Ok(None) => {
-                    // User cancelled the save dialog — discard, back to idle.
-                    self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Idle;
-                    self.artifact_job = None;
-                }
-                Err(e) => {
-                    self.artifact_fetch =
-                        crate::view::artifact_fetch::ArtifactFetch::Failed(e.clone());
-                    self.toasts
-                        .push(ToastSeverity::Error, format!("Save failed: {e}"));
-                }
-            },
+            }
 
-            Message::PauseArtifact => {
+            Message::Artifact(crate::view::artifact_fetch::Action::Pause) => {
                 if let crate::view::artifact_fetch::ArtifactFetch::Downloading { got, total } =
                     self.artifact_fetch
                 {
@@ -2881,13 +2892,13 @@ impl ZenSight {
                 }
             }
 
-            Message::ResumeArtifact => {
+            Message::Artifact(crate::view::artifact_fetch::Action::Resume) => {
                 if let Some(task) = self.resume_artifact() {
                     return task;
                 }
             }
 
-            Message::CancelArtifact => {
+            Message::Artifact(crate::view::artifact_fetch::Action::Cancel) => {
                 let task = self.cancel_artifact();
                 self.artifact_fetch = crate::view::artifact_fetch::ArtifactFetch::Idle;
                 self.artifact_job = None;
@@ -3839,7 +3850,7 @@ impl ZenSight {
                         progress: None,
                     };
                     return Some(Task::future(async move {
-                        Message::ArtifactTreeVerified(
+                        Message::ArtifactEvent(crate::view::artifact_fetch::Event::TreeVerified(
                             crate::view::artifact_fetch::verify_tree(
                                 session,
                                 root,
@@ -3847,7 +3858,7 @@ impl ZenSight {
                                 tree_prefix,
                             )
                             .await,
-                        )
+                        ))
                     }));
                 }
                 let job = self.artifact_job.as_mut()?;
@@ -4022,7 +4033,7 @@ impl ZenSight {
                     id
                 ))
                 .await;
-            Message::ArtifactSaved(Ok(None))
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::Saved(Ok(None)))
         }))
     }
 
@@ -4128,7 +4139,9 @@ impl ZenSight {
                 .await
                 .map_err(|e| e.to_string())?
             };
-            Message::BlobCacheTagged(run.await)
+            Message::ArtifactEvent(crate::view::artifact_fetch::Event::BlobCacheTagged(
+                run.await,
+            ))
         }))
     }
 
@@ -4186,7 +4199,10 @@ impl ZenSight {
                 let kinds =
                     crate::view::artifact_fetch::load_artifact_kinds(session, producer.clone())
                         .await;
-                Message::ArtifactKindsLoaded { producer, kinds }
+                Message::ArtifactEvent(crate::view::artifact_fetch::Event::KindsLoaded {
+                    producer,
+                    kinds,
+                })
             })
         });
         Some(Task::batch(tasks))
@@ -8654,7 +8670,7 @@ fn save_blob_dialog(
         let Some(handle) = dialog.save_file().await else {
             // Cancelled: discard the temp artifact.
             let _ = tokio::fs::remove_file(&src).await;
-            return Message::ArtifactSaved(Ok(None));
+            return Message::ArtifactEvent(crate::view::artifact_fetch::Event::Saved(Ok(None)));
         };
         let dst = handle.path().to_path_buf();
         // Rename first (same filesystem); fall back to a streamed copy on EXDEV.
@@ -8690,7 +8706,7 @@ fn save_blob_dialog(
             }
             other => other,
         };
-        Message::ArtifactSaved(result.map(Some))
+        Message::ArtifactEvent(crate::view::artifact_fetch::Event::Saved(result.map(Some)))
     })
 }
 

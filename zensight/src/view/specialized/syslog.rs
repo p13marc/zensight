@@ -1172,11 +1172,13 @@ fn render_filter_panel<'a>(
             button(row![text(label).size(font::BODY)].align_y(Alignment::Center))
                 .style(iced::widget::button::secondary);
         if !exp.busy {
-            export_button = export_button.on_press(Message::StartArtifact {
-                producer: Protocol::Logs.as_str().to_string(),
-                kind: log_bundle_kind_from_filter(filter_state),
-                target_source: None,
-            });
+            export_button = export_button.on_press(Message::Artifact(
+                crate::view::artifact_fetch::Action::Start {
+                    producer: Protocol::Logs.as_str().to_string(),
+                    kind: log_bundle_kind_from_filter(filter_state),
+                    target_source: None,
+                },
+            ));
         }
         // Format choice (#602) sits next to the button that uses it: JSONL for
         // a machine, text for a ticket.
