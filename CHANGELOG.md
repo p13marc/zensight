@@ -367,6 +367,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shutdown commands itself, so `update` has no effect to hand back. The
   pump and the demo stream yield through `explorer::{started, tick, error,
   stopped}`. `Message` is 207 variants.
+  **The artifact channel follows**: `Message::Artifact(artifact_fetch::
+  Action)` (a request, a capture-blob download, the confirm / holder /
+  pause / resume / cancel controls, the two capture-form edits) and
+  `Message::ArtifactEvent(artifact_fetch::Event)` (the kinds sweep, the
+  request/poll stream's progress and outcome, the download stream's
+  progress, verify and outcome, the save dialog, the cache tag) replace 20
+  variants with two; the state machine stays in the app, which matches the
+  sub-enums directly. `LoadArtifactKinds` had no sender and is gone (the
+  sweep runs from the fleet load). `Message` is 189 variants — under the
+  200 #1261 set.
 
 - **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
   writes — netring's detector toggles, thresholds, allowlist, capture filter,

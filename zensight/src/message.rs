@@ -417,22 +417,6 @@ pub enum Message {
     /// node's listening sockets and the edge's flows are keyed `Call`s on
     /// `CallSurface::Topology`, no longer variants of their own.
     Topology(crate::view::topology::Action),
-    /// Download a finished triggered capture by its blob id (#327). Unlike
-    /// `StartArtifact` there is no request/produce phase — the file is already
-    /// registered on the sensor's `@blob/artifact` server.
-    DownloadCaptureBlob {
-        producer: String,
-        artifact_id: String,
-        /// The **concrete** `@blob/artifact` prefix of the host holding the
-        /// file, straight off the capture record. A bulk fetch must name a
-        /// literal origin (RFC 07 §3); this is where the GUI learns which one
-        /// instead of wildcarding because it does not know.
-        blob_prefix: String,
-        /// BLAKE3 root to pin the transfer to (RFC 07 §2.1), when the sensor
-        /// served one — already hex-validated at the wire (`ContentHash`).
-        root: Option<zenkey::ContentHash>,
-        filename: String,
-    },
     /// Call a read procedure (#1261, design §5.5):
     /// `@rpc/<producer>/<procedure>?<params>` on the selected device's
     /// origin, or fleet-wide when the request names another producer. The
@@ -895,95 +879,13 @@ pub enum Message {
     ExportFinished(Result<Option<String>, String>),
 
     // Unified artifact download messages (report / snapshot / capture) via the artifact channel.
-    /// Discover the artifact kinds each connected sensor produces (queries every
-    /// sensor's `artifact/status` read procedure), so the GUI knows which affordances to render.
-    LoadArtifactKinds,
-    /// The advertised artifact kinds (+ bounds/adverts) for one producer.
-    ArtifactKindsLoaded {
-        /// Producer name, e.g. `sysinfo`.
-        producer: String,
-        /// The kinds this sensor produces and their per-kind status.
-        kinds: Vec<zensight_common::KindStatus>,
-    },
-    /// Request + download an artifact of `kind` from the sensor at `producer`
-    /// (e.g. `netlink`).
-    StartArtifact {
-        /// Producer name.
-        producer: String,
-        /// What to produce (report / snapshot / capture).
-        kind: zensight_common::ArtifactKind,
-        /// Target one sensor instance (`ArtifactRequest.opts.target_source`).
-        /// `None` fans out to every host running this protocol.
-        target_source: Option<String>,
-    },
-    /// A Ready tree artifact was verified pre-download (root-fetched index +
-    /// holder probe) — or the verification failed, before any folder picker
-    /// opened or any chunk moved.
-    ArtifactTreeVerified(Result<crate::view::artifact_fetch::TreeVerify, String>),
-    /// The operator confirmed the verified tree — open the folder picker.
-    ArtifactTreeConfirmed,
-    /// The destination-folder picker resolved for a confirmed tree artifact
-    /// (`None` = the user cancelled). Blobs never pick a folder — they stage
-    /// to a temp dir then a Save-as dialog.
-    ArtifactTreeDestChosen {
-        /// Chosen destination folder, or `None` if cancelled.
-        dest: Option<std::path::PathBuf>,
-    },
-    /// The sensor reported production progress (streamed from the status poll
-    /// while the request is in flight): an optional human-readable line (e.g.
-    /// `"capturing 12s/30s"`) and an optional fraction in `0.0..=1.0`.
-    ArtifactGenerating {
-        /// Producer-reported progress line, if any.
-        detail: Option<String>,
-        /// Producer-reported fraction in `0.0..=1.0`, if any.
-        progress: Option<f32>,
-    },
-    /// The artifact request resolved: a `Ready` state to download, or an error.
-    ArtifactRequested(Result<Vec<zensight_common::ArtifactState>, String>),
-    /// The operator picked which host's artifact to download (index into the
-    /// `PickingHolder` state's holder list).
-    ArtifactHolderChosen(usize),
-    /// Streaming download progress (units resolved / total).
-    ArtifactProgress {
-        /// Units resolved so far.
-        got: u64,
-        /// Total units.
-        total: u64,
-    },
-    /// The transfer entered its verify/materialize phase (#624): zblob emits
-    /// `Progress::Verifying` after a tree download's last chunk, before
-    /// `reconstruct_tree` — which can take a while on a large snapshot.
-    ArtifactVerifying,
-    /// The artifact finished downloading (a temp file for a blob, the chosen
-    /// folder for a tree), or failed.
-    ArtifactDownloaded(Result<std::path::PathBuf, String>),
-    /// Outcome of the "Save as…" dialog for a downloaded blob artifact.
-    ArtifactSaved(Result<Option<String>, String>),
-    /// Outcome of tagging a downloaded snapshot in the local chunk cache
-    /// (keeps its chunks warm for re-download dedup; log-only either way).
-    BlobCacheTagged(Result<(), String>),
-    /// Pause the in-flight artifact download (keeps the partial; resumable).
-    PauseArtifact,
-    /// Resume a paused artifact download.
-    ResumeArtifact,
-    /// Cancel the in-flight artifact download (discards the partial).
-    CancelArtifact,
-    /// Edit a text field of a sensor's capture form (#333).
-    CaptureFormEdited {
-        /// Sensor key prefix the form belongs to.
-        producer: String,
-        /// Which field changed.
-        field: crate::view::artifact_fetch::CaptureField,
-        /// The new text value.
-        value: String,
-    },
-    /// Toggle a boolean of a sensor's capture form (#333).
-    CaptureFormToggled {
-        /// Sensor key prefix the form belongs to.
-        producer: String,
-        /// Which toggle flipped.
-        field: crate::view::artifact_fetch::CaptureToggle,
-    },
+    /// One operator interaction with the artifact channel (#1306): a
+    /// request, a capture-blob download, the confirm/holder/pause/resume/
+    /// cancel controls, the capture forms.
+    Artifact(crate::view::artifact_fetch::Action),
+    /// One event from the artifact channel's own tasks (#1306): the kinds
+    /// sweep, the request/poll stream, the download stream, the dialogs.
+    ArtifactEvent(crate::view::artifact_fetch::Event),
 
     // Theme messages
     /// Toggle between light and dark theme.

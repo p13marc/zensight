@@ -25,6 +25,96 @@ use crate::view::components::fraction_bar;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
+/// One operator interaction with the artifact channel (#1306): what the
+/// sensor cards, the capture forms, the netring capture tab and the
+/// in-flight controls emit.
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// Request an artifact of `kind` from a sensor; `target_source` scopes
+    /// the request to one host.
+    Start {
+        producer: String,
+        kind: ArtifactKind,
+        target_source: Option<String>,
+    },
+    /// Download a finished triggered capture by its blob id (#327). Unlike
+    /// `Start` there is no request/produce phase — the file is already
+    /// registered on the sensor's `@blob/artifact` server.
+    DownloadBlob {
+        producer: String,
+        artifact_id: String,
+        /// The **concrete** `@blob/artifact` prefix of the host holding the
+        /// file, straight off the capture record. A bulk fetch must name a
+        /// literal origin (RFC 07 §3); this is where the GUI learns which one
+        /// instead of wildcarding because it does not know.
+        blob_prefix: String,
+        /// The blob's root hash from the record, when the sensor sent one
+        /// (§2.1: an anchored fetch verifies against it).
+        root: Option<zenkey::ContentHash>,
+        filename: String,
+    },
+    /// The operator confirmed the verified tree — open the folder picker.
+    TreeConfirmed,
+    /// The operator picked which host's artifact to download (index into
+    /// the `PickingHolder` state's holder list).
+    HolderChosen(usize),
+    /// Pause the in-flight download (keeps the partial; resumable).
+    Pause,
+    /// Resume a paused download.
+    Resume,
+    /// Cancel the in-flight download (discards the partial).
+    Cancel,
+    /// Edit a text field of a sensor's capture form (#333).
+    FormEdited {
+        producer: String,
+        field: CaptureField,
+        value: String,
+    },
+    /// Toggle a boolean of a sensor's capture form (#333).
+    FormToggled {
+        producer: String,
+        field: CaptureToggle,
+    },
+}
+
+/// One event from the artifact channel's own tasks (#1306): the kinds
+/// sweep, the request/poll stream, the download stream, the dialogs.
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// A sensor answered the kinds sweep.
+    KindsLoaded {
+        producer: String,
+        kinds: Vec<KindStatus>,
+    },
+    /// A Ready tree artifact was verified pre-download (the root-fetched
+    /// index and the holder probe) — or the verification failed, before any
+    /// folder picker opened or any chunk moved.
+    TreeVerified(Result<TreeVerify, String>),
+    /// The destination-folder picker resolved for a confirmed tree artifact
+    /// (`None` = the user cancelled).
+    TreeDestChosen { dest: Option<PathBuf> },
+    /// The sensor reported production progress: an optional human-readable
+    /// line (`"capturing 12s/30s"`) and an optional fraction in `0.0..=1.0`.
+    Generating {
+        detail: Option<String>,
+        progress: Option<f32>,
+    },
+    /// The request resolved: a `Ready` state to download, or an error.
+    Requested(Result<Vec<ArtifactState>, String>),
+    /// Streaming download progress (units resolved / total).
+    Progress { got: u64, total: u64 },
+    /// The transfer entered its verify/materialize phase (#624).
+    Verifying,
+    /// The artifact finished downloading (a temp file for a blob, the
+    /// chosen folder for a tree), or failed.
+    Downloaded(Result<PathBuf, String>),
+    /// Outcome of the "Save as…" dialog for a downloaded blob artifact.
+    Saved(Result<Option<String>, String>),
+    /// Outcome of tagging a downloaded snapshot in the local chunk cache
+    /// (log-only either way).
+    BlobCacheTagged(Result<(), String>),
+}
+
 /// Client-side lifecycle of one artifact download. Kind-agnostic: the wording of
 /// [`ArtifactFetch::label`] varies by the artifact kind slug, not the state.
 #[derive(Debug, Clone, Default)]
@@ -418,7 +508,7 @@ pub fn request_and_stream_ready(
         let payload = match serde_json::to_vec(&req) {
             Ok(p) => p,
             Err(e) => {
-                yield Message::ArtifactRequested(Err(e.to_string()));
+                yield Message::ArtifactEvent(Event::Requested(Err(e.to_string())));
                 return;
             }
         };
@@ -437,19 +527,19 @@ pub fn request_and_stream_ready(
                 Ok(reply) => {
                     if let Err(err) = reply.result() {
                         let msg = String::from_utf8_lossy(&err.payload().to_bytes()).to_string();
-                        yield Message::ArtifactRequested(Err(format!("request refused: {msg}")));
+                        yield Message::ArtifactEvent(Event::Requested(Err(format!("request refused: {msg}"))));
                         return;
                     }
                 }
                 Err(_) => {
-                    yield Message::ArtifactRequested(Err(
+                    yield Message::ArtifactEvent(Event::Requested(Err(
                         "request unanswered — sensor offline or artifacts disabled".to_string(),
-                    ));
+                    )));
                     return;
                 }
             },
             Err(e) => {
-                yield Message::ArtifactRequested(Err(format!("request failed: {e}")));
+                yield Message::ArtifactEvent(Event::Requested(Err(format!("request failed: {e}"))));
                 return;
             }
         }
@@ -468,21 +558,21 @@ pub fn request_and_stream_ready(
             let states = poll_status_all(&session, &status_key, &slug, id).await;
             match poll_round_outcome(states) {
                 RoundOutcome::Ready(ready) => {
-                    yield Message::ArtifactRequested(Ok(ready));
+                    yield Message::ArtifactEvent(Event::Requested(Ok(ready)));
                     return;
                 }
                 RoundOutcome::Generating { detail, progress } => {
-                    yield Message::ArtifactGenerating { detail, progress };
+                    yield Message::ArtifactEvent(Event::Generating { detail, progress });
                 }
                 RoundOutcome::Failed(reason) => {
-                    yield Message::ArtifactRequested(Err(reason));
+                    yield Message::ArtifactEvent(Event::Requested(Err(reason)));
                     return;
                 }
                 RoundOutcome::Pending => {}
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
-        yield Message::ArtifactRequested(Err("timed out waiting for artifact".into()));
+        yield Message::ArtifactEvent(Event::Requested(Err("timed out waiting for artifact".into())));
     }
 }
 
@@ -820,20 +910,20 @@ pub fn download_stream(
                 // the first fresh chunk (and never moves if zero chunks
                 // remain).
                 | Progress::Resumed { received, total } => {
-                    yield Message::ArtifactProgress { got: received as u64, total: total as u64 };
+                    yield Message::ArtifactEvent(Event::Progress { got: received as u64, total: total as u64 });
                 }
                 // Tree downloads verify + materialize after the last chunk
                 // (zblob emits this before `reconstruct_tree`); blob
                 // downloads verify as they write and never emit it.
-                Progress::Verifying => yield Message::ArtifactVerifying,
+                Progress::Verifying => yield Message::ArtifactEvent(Event::Verifying),
                 // `Progress` is #[non_exhaustive].
                 _ => {}
             }
         }
         match dl.await {
-            Ok(Ok(path)) => yield Message::ArtifactDownloaded(Ok(path)),
-            Ok(Err(e)) => yield Message::ArtifactDownloaded(Err(e.to_string())),
-            Err(e) => yield Message::ArtifactDownloaded(Err(format!("download task failed: {e}"))),
+            Ok(Ok(path)) => yield Message::ArtifactEvent(Event::Downloaded(Ok(path))),
+            Ok(Err(e)) => yield Message::ArtifactEvent(Event::Downloaded(Err(e.to_string()))),
+            Err(e) => yield Message::ArtifactEvent(Event::Downloaded(Err(format!("download task failed: {e}")))),
         }
     }
 }
@@ -875,15 +965,15 @@ pub fn download_blob_direct(
         let prefix = match zblob::QueryPrefix::new(blob_prefix.clone()) {
             Ok(p) if p.is_concrete() => p,
             Ok(_) => {
-                yield Message::ArtifactDownloaded(Err(format!(
+                yield Message::ArtifactEvent(Event::Downloaded(Err(format!(
                     "refusing a wildcard-origin bulk fetch on {blob_prefix:?} (RFC 07 §3)"
-                )));
+                ))));
                 return;
             }
             Err(e) => {
-                yield Message::ArtifactDownloaded(Err(format!(
+                yield Message::ArtifactEvent(Event::Downloaded(Err(format!(
                     "`{blob_prefix}` is not a fetchable prefix: {e}"
-                )));
+                ))));
                 return;
             }
         };
@@ -924,7 +1014,7 @@ pub fn download_blob_direct(
                 Progress::Chunk { received, total, .. }
                 // Seed the bar on resume (#624) — see `download_stream`.
                 | Progress::Resumed { received, total } => {
-                    yield Message::ArtifactProgress { got: received as u64, total: total as u64 };
+                    yield Message::ArtifactEvent(Event::Progress { got: received as u64, total: total as u64 });
                 }
                 // Blob downloads never emit `Verifying`; `Progress` is
                 // #[non_exhaustive].
@@ -932,9 +1022,9 @@ pub fn download_blob_direct(
             }
         }
         match dl.await {
-            Ok(Ok(path)) => yield Message::ArtifactDownloaded(Ok(path)),
-            Ok(Err(e)) => yield Message::ArtifactDownloaded(Err(e.to_string())),
-            Err(e) => yield Message::ArtifactDownloaded(Err(format!("download task failed: {e}"))),
+            Ok(Ok(path)) => yield Message::ArtifactEvent(Event::Downloaded(Ok(path))),
+            Ok(Err(e)) => yield Message::ArtifactEvent(Event::Downloaded(Err(e.to_string()))),
+            Err(e) => yield Message::ArtifactEvent(Event::Downloaded(Err(format!("download task failed: {e}")))),
         }
     }
 }
@@ -971,10 +1061,12 @@ pub fn capture_form_view<'a>(
 
     let edit = |field: CaptureField| {
         let kp = kp.clone();
-        move |value: String| Message::CaptureFormEdited {
-            producer: kp.clone(),
-            field,
-            value,
+        move |value: String| {
+            Message::Artifact(Action::FormEdited {
+                producer: kp.clone(),
+                field,
+                value,
+            })
         }
     };
 
@@ -1008,9 +1100,11 @@ pub fn capture_form_view<'a>(
     let compress = checkbox(form.compress)
         .label("Compress (zstd)")
         .text_size(font::CAPTION)
-        .on_toggle(move |_| Message::CaptureFormToggled {
-            producer: kp_c.clone(),
-            field: CaptureToggle::Compress,
+        .on_toggle(move |_| {
+            Message::Artifact(Action::FormToggled {
+                producer: kp_c.clone(),
+                field: CaptureToggle::Compress,
+            })
         });
     let mut toggles = row![compress].spacing(space::MD).align_y(Alignment::Center);
     if form.compress {
@@ -1019,9 +1113,11 @@ pub fn capture_form_view<'a>(
             checkbox(form.decompress_on_save)
                 .label("Decompress on save")
                 .text_size(font::CAPTION)
-                .on_toggle(move |_| Message::CaptureFormToggled {
-                    producer: kp_d.clone(),
-                    field: CaptureToggle::DecompressOnSave,
+                .on_toggle(move |_| {
+                    Message::Artifact(Action::FormToggled {
+                        producer: kp_d.clone(),
+                        field: CaptureToggle::DecompressOnSave,
+                    })
                 }),
         );
     }
@@ -1029,11 +1125,11 @@ pub fn capture_form_view<'a>(
     let validation = form.validate(advert, ks);
     let mut submit = button(text("Start capture").size(font::CAPTION));
     if !disabled && let Ok(kind) = &validation {
-        submit = submit.on_press(Message::StartArtifact {
+        submit = submit.on_press(Message::Artifact(Action::Start {
             producer: kp.clone(),
             kind: kind.clone(),
             target_source: target_source.map(str::to_string),
-        });
+        }));
     }
 
     let mut col = column![
@@ -1093,11 +1189,13 @@ pub fn artifact_section<'a>(
                 };
                 btns = btns.push(
                     button(text(format!("{} · {size}", h.origin)).size(font::CAPTION))
-                        .on_press(Message::ArtifactHolderChosen(i)),
+                        .on_press(Message::Artifact(Action::HolderChosen(i))),
                 );
             }
-            btns = btns
-                .push(button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact));
+            btns = btns.push(
+                button(text("Cancel").size(font::CAPTION))
+                    .on_press(Message::Artifact(Action::Cancel)),
+            );
             return col.push(btns).into();
         }
         // The verified pre-download confirm: what the snapshot actually
@@ -1136,8 +1234,9 @@ pub fn artifact_section<'a>(
             }
             let controls = row![
                 button(text("Choose folder & download").size(font::CAPTION))
-                    .on_press(Message::ArtifactTreeConfirmed),
-                button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact),
+                    .on_press(Message::Artifact(Action::TreeConfirmed)),
+                button(text("Cancel").size(font::CAPTION))
+                    .on_press(Message::Artifact(Action::Cancel)),
             ]
             .spacing(space::SM)
             .align_y(Alignment::Center);
@@ -1149,18 +1248,21 @@ pub fn artifact_section<'a>(
         match fetch {
             ArtifactFetch::Downloading { .. } => {
                 controls = controls.push(
-                    button(text("Pause").size(font::CAPTION)).on_press(Message::PauseArtifact),
+                    button(text("Pause").size(font::CAPTION))
+                        .on_press(Message::Artifact(Action::Pause)),
                 );
             }
             ArtifactFetch::Paused { .. } => {
                 controls = controls.push(
-                    button(text("Resume").size(font::CAPTION)).on_press(Message::ResumeArtifact),
+                    button(text("Resume").size(font::CAPTION))
+                        .on_press(Message::Artifact(Action::Resume)),
                 );
             }
             _ => {}
         }
-        controls = controls
-            .push(button(text("Cancel").size(font::CAPTION)).on_press(Message::CancelArtifact));
+        controls = controls.push(
+            button(text("Cancel").size(font::CAPTION)).on_press(Message::Artifact(Action::Cancel)),
+        );
         let mut job = column![controls].spacing(space::XS);
         if let Some(frac) = fetch.progress_frac() {
             job = job.push(fraction_bar(frac));
@@ -1179,11 +1281,11 @@ pub fn artifact_section<'a>(
                 any = true;
                 let mut btn = button(text("Download debug report").size(font::CAPTION));
                 if !other_busy {
-                    btn = btn.on_press(Message::StartArtifact {
+                    btn = btn.on_press(Message::Artifact(Action::Start {
                         producer: this_prefix.to_string(),
                         kind: ArtifactKind::Report {},
                         target_source: target_source.map(str::to_string),
-                    });
+                    }));
                 }
                 col = col.push(btn);
             }
@@ -1194,11 +1296,11 @@ pub fn artifact_section<'a>(
                 for d in dirs {
                     let mut b = button(text(format!("Download {d}")).size(font::CAPTION));
                     if !other_busy {
-                        b = b.on_press(Message::StartArtifact {
+                        b = b.on_press(Message::Artifact(Action::Start {
                             producer: this_prefix.to_string(),
                             kind: ArtifactKind::Snapshot { dir: d.clone() },
                             target_source: target_source.map(str::to_string),
-                        });
+                        }));
                     }
                     btns = btns.push(b);
                 }
@@ -1231,7 +1333,7 @@ pub fn artifact_section<'a>(
                 };
                 let mut btn = button(text(label).size(font::CAPTION));
                 if !other_busy {
-                    btn = btn.on_press(Message::StartArtifact {
+                    btn = btn.on_press(Message::Artifact(Action::Start {
                         producer: this_prefix.to_string(),
                         kind: ArtifactKind::LogBundle {
                             from: None,
@@ -1244,7 +1346,7 @@ pub fn artifact_section<'a>(
                             format: LogBundleFormat::default(),
                         },
                         target_source: target_source.map(str::to_string),
-                    });
+                    }));
                 }
                 col = col.push(btn);
             }

@@ -611,13 +611,15 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
                 button(text("Download").size(font::DENSE))
                     .padding([3, 9])
                     .style(iced::widget::button::secondary)
-                    .on_press(Message::DownloadCaptureBlob {
-                        producer: "netring".to_string(),
-                        artifact_id: id.clone(),
-                        blob_prefix: prefix.clone(),
-                        root: cap.artifact_root.clone(),
-                        filename: cap.filename.clone(),
-                    }),
+                    .on_press(Message::Artifact(
+                        crate::view::artifact_fetch::Action::DownloadBlob {
+                            producer: "netring".to_string(),
+                            artifact_id: id.clone(),
+                            blob_prefix: prefix.clone(),
+                            root: cap.artifact_root.clone(),
+                            filename: cap.filename.clone(),
+                        },
+                    )),
             );
         } else if cap.artifact_id.is_some() {
             line = line.push(
