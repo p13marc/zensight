@@ -531,34 +531,15 @@ pub enum Message {
         >,
     ),
 
-    /// Fetch an on-demand netlink detail table (sockets/routes/neighbors).
-    FetchNetlinkDetail(crate::view::specialized::netlink_detail::NetlinkDetailTopic),
-    /// A netlink detail reply for a topic: the decoded table, or an error message.
-    NetlinkDetailReceived(
-        crate::view::specialized::netlink_detail::NetlinkDetailTopic,
-        Result<crate::view::specialized::netlink_detail::NetlinkDetailData, String>,
-    ),
-    /// Socket explorer (#112): set the TCP-state filter (`None` = all states).
-    SetNetlinkSocketStateFilter(Option<String>),
-    /// Socket explorer (#112): set the port substring filter.
-    SetNetlinkSocketPortFilter(String),
-    /// Socket explorer (#112): set the sort order.
-    SetNetlinkSocketSort(crate::view::specialized::netlink_detail::SocketSort),
-    /// Socket explorer (#261): reveal another page of socket rows (replaces the
-    /// old silent `.take(200)` cutoff).
-    NetlinkSocketsMore,
-    /// Netlink detail-table (#244): toggle the sort column.
-    NetlinkTableSort(
-        crate::view::specialized::netlink_detail::NetlinkTable,
-        usize,
-    ),
-    /// Netlink detail-table: set the substring filter.
-    NetlinkTableFilter(
-        crate::view::specialized::netlink_detail::NetlinkTable,
-        String,
-    ),
-    /// Netlink detail-table: reveal another page of rows.
-    NetlinkTableMore(crate::view::specialized::netlink_detail::NetlinkTable),
+    /// Set one of a device view's own filter controls (#1261) — the socket
+    /// explorer's state chip, port substring or sort — kept in
+    /// `DeviceDetailState::filters` as `<table>/<key>`; `""` clears it. The
+    /// table's page resets, so a narrowed filter never hides matches.
+    SetDetailFilter {
+        table: String,
+        key: String,
+        value: String,
+    },
 
     /// Select the active tab of a tabbed specialized view (#243). Remembered
     /// per device in `DeviceDetailState`.

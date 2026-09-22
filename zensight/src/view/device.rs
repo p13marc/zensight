@@ -105,9 +105,6 @@ pub struct DeviceDetailState {
     pub merge_target: String,
     /// Timestamp when pending filter was last updated.
     pub pending_filter_time: i64,
-    /// On-demand netlink detail tables (sockets/routes/neighbors), fetched lazily
-    /// from the sensor's query channel when the user drills in.
-    pub netlink_detail: crate::view::specialized::netlink_detail::NetlinkDetailState,
     /// On-demand netring flow detail, fetched lazily from `@rpc/netring/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
     pub systemd_detail: crate::view::specialized::systemd_detail::SystemdDetailState,
@@ -122,6 +119,11 @@ pub struct DeviceDetailState {
     /// UI state (sort, filter, page) of the on-demand tables a view draws,
     /// by the name the view gives each (#1261).
     pub tables: std::collections::BTreeMap<String, crate::view::components::TableState>,
+    /// A view's own filter controls (#1261) — a socket explorer's state chip,
+    /// port substring and sort — keyed `<table>/<key>`, set by
+    /// `Message::SetDetailFilter`; `""` is unset. Setting one resets the
+    /// table's page, so a narrowed filter never hides matches behind "more".
+    pub filters: std::collections::BTreeMap<String, String>,
     /// How the user arrived, when it was a pivot (#313): the process
     /// explorer's pid filter with its stale-generation guard. `None` is the
     /// plain view.
@@ -193,12 +195,12 @@ impl DeviceDetailState {
             pending_filter: String::new(),
             merge_target: String::new(),
             pending_filter_time: 0,
-            netlink_detail: Default::default(),
             netring_detail: Default::default(),
             systemd_detail: Default::default(),
             parallax_detail: Default::default(),
             calls: Default::default(),
             tables: Default::default(),
+            filters: Default::default(),
             pivot: None,
             snmp_detail: Default::default(),
             chart_expanded: false,
@@ -216,6 +218,22 @@ impl DeviceDetailState {
             family: None,
             definition: None,
         }
+    }
+
+    /// An on-demand table's UI state, a shared default when untouched (#1261).
+    pub fn table(&self, name: &str) -> &crate::view::components::TableState {
+        static DEFAULT: std::sync::OnceLock<crate::view::components::TableState> =
+            std::sync::OnceLock::new();
+        self.tables
+            .get(name)
+            .unwrap_or_else(|| DEFAULT.get_or_init(Default::default))
+    }
+
+    /// A view filter's value, `""` when unset (#1261).
+    pub fn filter(&self, table: &str, key: &str) -> &str {
+        self.filters
+            .get(&format!("{table}/{key}"))
+            .map_or("", String::as_str)
     }
 
     /// Replace the favorited-metric set for this device (#27). Called on selection

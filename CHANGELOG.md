@@ -247,6 +247,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `DetailTable{Sort,Filter,More} { table }`, `DeviceDetailState::{calls,
   tables, pivot}`, `FamilyModel::{procedures, callable}`. The `Message` enum
   is 433 variants (437 before).
+- **netlink retired onto `Call`/`Reply`** (#1261, the third producer). Its
+  eleven `@rpc/netlink/*` topics are calls keyed by procedure; the view
+  reads them as `Answer<Vec<Record>>` (`Calls::answer`/`answer_with` — the
+  newest-first and worst-first orders the old arms applied on arrival now
+  run once at decode). The socket explorer's state chip, port substring and
+  sort are `DeviceDetailState::filters` set by `SetDetailFilter { table,
+  key, value }`, and a tab's prefetch is the view's own list
+  (`netlink::tab_procedures`) asked once each by `prefetch_calls`. Gone:
+  `FetchNetlinkDetail`, `NetlinkDetailReceived`,
+  `SetNetlinkSocket{StateFilter,PortFilter,Sort}`, `NetlinkSocketsMore`,
+  `NetlinkTable{Sort,Filter,More}`, `NetlinkDetailState`,
+  `NetlinkDetailData`, `NetlinkTable`, `query_netlink_detail`. `Message` is
+  424 variants.
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in
