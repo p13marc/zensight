@@ -76,7 +76,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fourteen families (guest gauges and counters, node, ceph, storage, backup,
   backup job, cluster) build their subjects, a local pool's chunk is slugged
   once by the builder from the raw `node-storage` pair, and its
-  `telemetry_guard.rs` is gone.
+  `telemetry_guard.rs` is gone. **probe, container and hostspec** follow: an
+  operator's target name and a container's name go to the builder raw and
+  come back slugged as before, and the counter-as-gauge guard container alone
+  ran (#1071) now runs in `TelemetryPoint::for_subject` for every sensor on
+  the typed path. Three more `telemetry_guard.rs` copies are gone.
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green

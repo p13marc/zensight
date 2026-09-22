@@ -147,6 +147,20 @@ mod tests {
         );
     }
 
+    /// The guard the registry could not run before #1071, now on the typed
+    /// path for every sensor: a cumulative counter published as a `Gauge`.
+    /// Both exporters derive the wire type from the variant and nothing
+    /// else, so this is what a scrape sees.
+    #[test]
+    #[should_panic(expected = "declared kind = \"counter\" but published as gauge")]
+    fn a_counter_published_as_a_gauge_panics_in_debug() {
+        let _ = crate::TelemetryPoint::for_subject(
+            "h",
+            &registry::container::Subject::oom_kills_total("caddy"),
+            crate::TelemetryValue::Gauge(3.0),
+        );
+    }
+
     /// A state subject is refused by the telemetry path, by name.
     #[test]
     fn a_state_subject_is_not_a_telemetry_key() {

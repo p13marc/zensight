@@ -10,14 +10,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::probe::{ProbeOutcome, ProbeResult};
-use zensight_common::{QosClass, TelemetryValue};
+use zensight_common::registry::probe::Subject;
+use zensight_common::{QosClass, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{
     AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth, SweepOpts,
 };
 
 use crate::alerts;
 use crate::config::{ProbeConfig, Target};
-use crate::telemetry_guard::checked_point;
 
 pub const STATE_QOS: QosClass = QosClass::HealthLiveness;
 
@@ -340,14 +340,14 @@ impl Poller {
             labels.insert("kind".to_string(), r.kind.to_string());
             labels.insert("vantage".to_string(), r.vantage.clone());
 
-            let mut points: Vec<(String, f64)> = vec![
-                (
-                    format!("{slug}/up"),
-                    if r.outcome.is_ok() { 1.0 } else { 0.0 },
-                ),
+            // The builders slug the operator's name themselves (#1274); the
+            // chunk above is what the state document's key carries.
+            let t = r.name.as_str();
+            let mut points: Vec<(Subject, f64)> = vec![
+                (Subject::up(t), if r.outcome.is_ok() { 1.0 } else { 0.0 }),
                 // Published on a timeout too: the duration IS the diagnosis.
                 (
-                    format!("{slug}/timeout"),
+                    Subject::timeout(t),
                     if r.outcome == ProbeOutcome::Timeout {
                         1.0
                     } else {
@@ -356,69 +356,73 @@ impl Poller {
                 ),
             ];
             if let Some(d) = r.duration_ms {
-                points.push((format!("{slug}/duration_ms"), d));
+                points.push((Subject::duration_ms(t), d));
             }
             if let Some(h) = &r.http {
                 if let Some(s) = h.status {
-                    points.push((format!("{slug}/http_status"), s as f64));
+                    points.push((Subject::http_status(t), s as f64));
                 }
-                if let Some(t) = h.ttfb_ms {
-                    points.push((format!("{slug}/http_ttfb_ms"), t));
+                if let Some(tt) = h.ttfb_ms {
+                    points.push((Subject::http_ttfb_ms(t), tt));
                 }
             }
             if let Some(b) = &r.burst {
                 // Loss is always published — a total loss is a measurement.
-                points.push((format!("{slug}/loss_pct"), b.loss_pct));
+                points.push((Subject::loss_pct(t), b.loss_pct));
                 // The RTT series are published only when something was
                 // actually measured. A zero here would be indistinguishable
                 // from a perfect link, and a dashboard averaging it would
                 // silently improve every time a link died.
-                for (metric, value) in [
-                    ("rtt_min_ms", b.rtt_min_ms),
-                    ("rtt_avg_ms", b.rtt_avg_ms),
-                    ("rtt_max_ms", b.rtt_max_ms),
-                    ("rtt_p95_ms", b.rtt_p95_ms),
-                    ("jitter_ms", b.jitter_ms),
+                for (subject, value) in [
+                    (Subject::rtt_min_ms(t), b.rtt_min_ms),
+                    (Subject::rtt_avg_ms(t), b.rtt_avg_ms),
+                    (Subject::rtt_max_ms(t), b.rtt_max_ms),
+                    (Subject::rtt_p95_ms(t), b.rtt_p95_ms),
+                    (Subject::jitter_ms(t), b.jitter_ms),
                 ] {
                     if let Some(v) = value {
-                        points.push((format!("{slug}/{metric}"), v));
+                        points.push((subject, v));
                     }
                 }
             }
             if let Some(n) = &r.ntp {
-                points.push((format!("{slug}/ntp_offset_ms"), n.offset_ms));
-                points.push((format!("{slug}/ntp_delay_ms"), n.delay_ms));
-                points.push((format!("{slug}/ntp_stratum"), n.stratum as f64));
+                points.push((Subject::ntp_offset_ms(t), n.offset_ms));
+                points.push((Subject::ntp_delay_ms(t), n.delay_ms));
+                points.push((Subject::ntp_stratum(t), n.stratum as f64));
                 // A boolean the SERVER stated, not a threshold this sensor
                 // invented: leap indicator 3, or stratum 0.
                 points.push((
-                    format!("{slug}/ntp_synchronised"),
+                    Subject::ntp_synchronised(t),
                     if n.unusable() { 0.0 } else { 1.0 },
                 ));
             }
-            if let Some(t) = &r.tls {
-                if let Some(d) = t.days_to_expiry {
-                    points.push((format!("{slug}/tls_days_to_expiry"), d as f64));
+            if let Some(tls) = &r.tls {
+                if let Some(d) = tls.days_to_expiry {
+                    points.push((Subject::tls_days_to_expiry(t), d as f64));
                 }
                 // Only when something actually validated a chain. A PEM on
                 // disk has none, and a 0 would read as "invalid".
-                if let Some(v) = t.chain_valid {
-                    points.push((format!("{slug}/tls_chain_valid"), if v { 1.0 } else { 0.0 }));
+                if let Some(v) = tls.chain_valid {
+                    points.push((Subject::tls_chain_valid(t), if v { 1.0 } else { 0.0 }));
                 }
             }
             if let Some(d) = &r.dns {
-                points.push((format!("{slug}/dns_answers"), d.answers.len() as f64));
+                points.push((Subject::dns_answers(t), d.answers.len() as f64));
             }
 
-            for (metric, value) in points {
+            for (subject, value) in points {
                 // `source` is the vantage point, never the target (#883). A
                 // probe result is by construction *an observation made from
                 // somewhere*: filing it under the target discards the one
                 // thing this sensor exists to record, and makes two hosts
                 // probing the same URL collide on one identity.
-                let p = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                    .with_labels(labels.clone());
-                if self.publisher.publish(&metric, &p).await.is_ok() {
+                let p = TelemetryPoint::for_subject(
+                    &self.source,
+                    &subject,
+                    TelemetryValue::Gauge(value),
+                )
+                .with_labels(labels.clone());
+                if self.publisher.publish_subject(&subject, &p).await.is_ok() {
                     published += 1;
                 }
             }
@@ -460,12 +464,13 @@ impl Poller {
 
         let enabled = self.targets.snapshot().iter().filter(|t| t.enabled).count();
         let failing = self.last.values().filter(|r| !r.outcome.is_ok()).count();
-        for (metric, value) in [
-            ("targets/total", enabled as f64),
-            ("targets/failing", failing as f64),
+        for (subject, value) in [
+            (Subject::TargetsTotal, enabled as f64),
+            (Subject::TargetsFailing, failing as f64),
         ] {
-            let p = checked_point(&self.source, metric, TelemetryValue::Gauge(value));
-            if self.publisher.publish(metric, &p).await.is_ok() {
+            let p =
+                TelemetryPoint::for_subject(&self.source, &subject, TelemetryValue::Gauge(value));
+            if self.publisher.publish_subject(&subject, &p).await.is_ok() {
                 published += 1;
             }
         }

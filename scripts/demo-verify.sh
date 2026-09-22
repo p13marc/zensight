@@ -197,7 +197,53 @@ multicast — and every demo path turns multicast off. Check that
 ZENSIGHT_ZENOH_{LISTEN,CONNECT,SCOUTING} are set on both processes.$(logs_note "$tmp" "$tmp/exporter.log" "$tmp/sysinfo.log")"
 fi
 
+# The names a provisioned dashboard queries that this scrape does not serve,
+# one per line — the check below, factored out so the wait can ask it too.
+# The deferral list is printed to stderr on every call; the caller decides
+# which call's output is the one to show.
+stale_names() {
+    python3 - "$1" <<'PY'
+import glob, re, sys
+
+live = set(re.findall(r'(?m)^(zensight_[a-z_0-9]+)', sys.argv[1]))
+
+used = set()
+for f in glob.glob("demo/prometheus/dashboards/*.json"):
+    used |= set(re.findall(r'zensight_[a-z_0-9]+', open(f).read()))
+
+# `zensight_systemd_`: the systemd sensor is not run here — it needs a session
+# bus this job has not got. `zensight_netring_` is NOT in this list any more:
+# it matched nothing in any dashboard, so it deferred nothing and only made the
+# list look more complete than it was.
+OTHER_SENSORS = ("zensight_systemd_",)
+deferred = {m for m in used if m.startswith(OTHER_SENSORS)}
+# The harness fires no alerts, so the alert family has nothing to be.
+deferred.add("zensight_alert")
+
+# Say what is being taken on trust, every run. A deferral nobody sees is how
+# `zensight_netlink_` sat in this list long enough to cover a whole dashboard.
+if deferred:
+    print("DEFERRED:" + ",".join(sorted(deferred)), file=sys.stderr)
+
+print("\n".join(sorted(used - live - deferred)))
+PY
+}
+
 echo "==> scraping /metrics"
+# The FIRST point to reach the exporter flips /ready, and it is usually
+# sysinfo's. netlink publishes its families one collector at a time inside a
+# tick — interfaces, then sockets, neighbours, routes, addresses — so a scrape
+# taken the moment /ready flips can land mid-tick and see the interface half
+# of the network dashboard and none of the rest. That read as "the
+# exposition renamed something" on a PR that touched no exposition. Wait,
+# bounded, until every name a dashboard queries is served; whatever is still
+# missing at the deadline is the failure, reported below with its names.
+for _ in $(seq 45); do
+    metrics=$(curl -sf "http://$SCRAPE/metrics") || die "/metrics did not answer"
+    [[ -z "$(stale_names "$metrics" 2>/dev/null)" ]] && break
+    still_running "${pids[@]:-}" || break
+    sleep 1
+done
 metrics=$(curl -sf "http://$SCRAPE/metrics") || die "/metrics did not answer"
 
 # --- Every `# TYPE` token must be legal (the #752 invariant) ----------------
@@ -256,32 +302,7 @@ naming regressed, and per-entity subjects are back in metric names"
 # unchecked, and across the three dashboards 21 of 33 names were. The dashboard
 # `dashboards-blocked/README.md` describes as "checked against a real netlink
 # scrape" was the one with zero coverage.
-stale=$(python3 - "$metrics" <<'PY'
-import glob, re, sys
-
-live = set(re.findall(r'(?m)^(zensight_[a-z_0-9]+)', sys.argv[1]))
-
-used = set()
-for f in glob.glob("demo/prometheus/dashboards/*.json"):
-    used |= set(re.findall(r'zensight_[a-z_0-9]+', open(f).read()))
-
-# `zensight_systemd_`: the systemd sensor is not run here — it needs a session
-# bus this job has not got. `zensight_netring_` is NOT in this list any more:
-# it matched nothing in any dashboard, so it deferred nothing and only made the
-# list look more complete than it was.
-OTHER_SENSORS = ("zensight_systemd_",)
-deferred = {m for m in used if m.startswith(OTHER_SENSORS)}
-# The harness fires no alerts, so the alert family has nothing to be.
-deferred.add("zensight_alert")
-
-# Say what is being taken on trust, every run. A deferral nobody sees is how
-# `zensight_netlink_` sat in this list long enough to cover a whole dashboard.
-if deferred:
-    print("DEFERRED:" + ",".join(sorted(deferred)), file=sys.stderr)
-
-print("\n".join(sorted(used - live - deferred)))
-PY
-)
+stale=$(stale_names "$metrics")
 [[ -z "$stale" ]] || die "provisioned dashboards query metrics that no longer exist:
 $stale
 

@@ -45,5 +45,33 @@ pub mod config;
 pub mod inspect;
 pub mod poller;
 pub mod runtime;
-mod telemetry_guard;
 pub mod upstream;
+
+#[cfg(test)]
+mod typed_subjects {
+    use zensight_common::registry::container::Subject;
+    use zensight_common::subject::TelemetrySubject;
+
+    /// The generated subjects render the tails this sensor published by hand
+    /// (#1274): byte-identical keys, so every consumer's series carries over.
+    /// The counter-as-gauge guard (#1071) now runs in
+    /// `TelemetryPoint::for_subject` for every sensor — see
+    /// `zensight_common::subject::tests`.
+    #[test]
+    fn the_registered_families_render_their_tails() {
+        for (subject, tail) in [
+            (Subject::memory_bytes("caddy"), "caddy/memory_bytes"),
+            (Subject::healthy("caddy"), "caddy/healthy"),
+            (Subject::oom_kills_total("caddy"), "caddy/oom_kills_total"),
+            (Subject::restart_count("caddy"), "caddy/restart_count"),
+            (Subject::ContainersTotal, "containers/total"),
+        ] {
+            assert_eq!(subject.tail(), tail);
+        }
+        let chunk = zensight_sensor_core::key::device_chunk("zensight-sensor-logs");
+        assert_eq!(
+            Subject::pids("zensight-sensor-logs").tail(),
+            format!("{}/pids", chunk.as_str())
+        );
+    }
+}
