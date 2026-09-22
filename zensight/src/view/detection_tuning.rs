@@ -13,7 +13,7 @@ use iced_anim::widget::button;
 use crate::call::{Armed, CallSurface, Confirmation, Request};
 use crate::message::Message;
 use crate::view::components::card;
-use crate::view::security::SecurityState;
+use crate::view::security::{Action as SecurityAction, SecurityState};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
@@ -343,11 +343,9 @@ pub fn detection_tuning_panel<'a>(
     };
 
     // The host chooser (#1261): one host's sensor, chosen or alone.
-    let host_pick = pick_list(
-        sec.hosts.clone(),
-        sec.host.clone(),
-        Message::SetSecurityHost,
-    )
+    let host_pick = pick_list(sec.hosts.clone(), sec.host.clone(), |h| {
+        Message::Security(SecurityAction::Host(h))
+    })
     .placeholder("pick a netring host")
     .text_size(font::CAPTION);
     let refresh = btn(
@@ -421,9 +419,11 @@ pub fn detection_tuning_panel<'a>(
             r = r.push(text("threshold").size(font::DENSE).style(muted));
             r = r.push(
                 text_input("", &d.threshold_input)
-                    .on_input(move |v| Message::SetNetringThresholdInput {
-                        detector: name.clone(),
-                        value: v,
+                    .on_input(move |v| {
+                        Message::Security(SecurityAction::ThresholdInput {
+                            detector: name.clone(),
+                            value: v,
+                        })
                     })
                     .size(font::CAPTION)
                     .padding(4)
@@ -478,7 +478,7 @@ pub fn detection_tuning_panel<'a>(
         })
         .flatten();
     let input = text_input("host or SLD to allowlist", &state.new_entry)
-        .on_input(Message::SetNetringAllowlistInput)
+        .on_input(|v| Message::Security(SecurityAction::AllowlistInput(v)))
         .size(font::CAPTION)
         .padding(5)
         .width(Length::Fixed(220.0));
@@ -581,7 +581,7 @@ fn capture_focus_card<'a>(
         "BPF expr, e.g. host 10.0.0.5 and port 443",
         &state.packet_filter_input,
     )
-    .on_input(Message::SetPacketFilterInput)
+    .on_input(|v| Message::Security(SecurityAction::PacketFilterInput(v)))
     .size(font::CAPTION)
     .padding(5)
     .width(Length::Fixed(320.0));
@@ -680,7 +680,7 @@ fn threat_intel_card<'a>(
         .flatten();
     let ioc_row = row![
         text_input("IOCs, one per line (IP or domain)", &state.threat_ioc_input)
-            .on_input(Message::SetThreatIocInput)
+            .on_input(|v| Message::Security(SecurityAction::ThreatIocInput(v)))
             .size(font::CAPTION)
             .padding(5)
             .width(Length::Fixed(320.0)),
@@ -719,7 +719,7 @@ fn threat_intel_card<'a>(
         .flatten();
     let yara_row = row![
         text_input("YARA rules source", &state.threat_yara_input)
-            .on_input(Message::SetThreatYaraInput)
+            .on_input(|v| Message::Security(SecurityAction::ThreatYaraInput(v)))
             .size(font::CAPTION)
             .padding(5)
             .width(Length::Fixed(320.0)),

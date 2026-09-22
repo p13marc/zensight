@@ -20,6 +20,81 @@ use crate::view::components::{badge, empty_state};
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
+
+/// One interaction with the Security pane and its netring tuning panel
+/// (#1306).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// A detector's threshold input (not yet applied, #121).
+    ThresholdInput { detector: String, value: String },
+    /// The new-allowlist-entry input (#121).
+    AllowlistInput(String),
+    /// The capture-focus filter expression (not yet applied, #225).
+    PacketFilterInput(String),
+    /// The IOC paste box (#328).
+    ThreatIocInput(String),
+    /// The YARA paste box (#328).
+    ThreatYaraInput(String),
+    /// The host the tuning panel reads from and writes to (#1261) — one
+    /// host's sensor, never the fleet.
+    Host(crate::view::expectations::ExpHost),
+    /// Hide/show Info-severity anomalies (#48).
+    ToggleHideInfo,
+    /// Expand/collapse an anomaly's evidence drill-down by alert_key (#48).
+    SelectAnomaly(Option<String>),
+}
+
+/// What the app has to do after a security action.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    /// The host changed: read the tuning panel's three status documents there.
+    ReadStatus,
+    /// An anomaly was expanded for the first time: pull the capture index
+    /// (#327) so it can offer its matching triggered capture.
+    FetchCaptures,
+}
+
+impl SecurityState {
+    /// One pane interaction (#1306). The tuning panel's inputs live on
+    /// `DetectionTuningState`, so it is handed in; what the app must fetch
+    /// comes back as the [`Effect`].
+    pub fn update(
+        &mut self,
+        action: Action,
+        tuning: &mut crate::view::detection_tuning::DetectionTuningState,
+    ) -> Effect {
+        match action {
+            Action::ThresholdInput { detector, value } => {
+                if let Some(row) = tuning.detectors.iter_mut().find(|d| d.name == detector) {
+                    row.threshold_input = value;
+                }
+            }
+            Action::AllowlistInput(value) => tuning.new_entry = value,
+            Action::PacketFilterInput(value) => tuning.packet_filter_input = value,
+            Action::ThreatIocInput(value) => tuning.threat_ioc_input = value,
+            Action::ThreatYaraInput(value) => tuning.threat_yara_input = value,
+            Action::Host(host) => {
+                self.host = Some(host);
+                self.host_explicit = true;
+                self.writes.disarm();
+                tuning.forget_status();
+                return Effect::ReadStatus;
+            }
+            Action::ToggleHideInfo => self.hide_info = !self.hide_info,
+            Action::SelectAnomaly(key) => {
+                let expanded = key.is_some();
+                self.selected = key;
+                if expanded && matches!(self.captures, Fetch::Idle) {
+                    self.captures = Fetch::Loading;
+                    return Effect::FetchCaptures;
+                }
+            }
+        }
+        Effect::None
+    }
+}
 use crate::view::tokens::font;
 
 /// View-local state for the Security view (#48): a severity filter and the
@@ -253,7 +328,7 @@ fn render_header<'a>(count: usize, sec: &SecurityState) -> Element<'a, Message> 
         })
         .size(font::BODY),
     )
-    .on_press(Message::ToggleSecurityHideInfo)
+    .on_press(Message::Security(Action::ToggleHideInfo))
     .style(if sec.hide_info {
         iced::widget::button::primary
     } else {
@@ -454,11 +529,11 @@ fn render_anomaly_row<'a>(a: &'a Alert, sec: &'a SecurityState) -> Element<'a, M
 
     // Clicking toggles the drill-down (select, or deselect if already open).
     let toggle = button(summary_line)
-        .on_press(Message::SelectAnomaly(if expanded {
+        .on_press(Message::Security(Action::SelectAnomaly(if expanded {
             None
         } else {
             Some(key.clone())
-        }))
+        })))
         .style(iced::widget::button::text)
         .padding(2);
 
@@ -752,5 +827,64 @@ mod tests {
         c.mode = "rotating".into();
         c.trigger_kind = None;
         assert!(matching_capture(&anomaly("manual", 1000), Some(&vec![c])).is_none());
+    }
+}
+
+#[cfg(test)]
+mod actions {
+    use super::*;
+    use crate::view::detection_tuning::DetectionTuningState;
+
+    /// Choosing a host disarms any pending write, forgets the old host's
+    /// status and asks for the new one's.
+    #[test]
+    fn set_host_reads_status_and_disarms() {
+        let mut sec = SecurityState::default();
+        let mut tuning = DetectionTuningState {
+            loaded: true,
+            ..Default::default()
+        };
+        let host = crate::view::expectations::ExpHost {
+            chunk: "h-000000000001".into(),
+            label: "host01 (h-000000000001)".into(),
+        };
+        assert_eq!(
+            sec.update(Action::Host(host.clone()), &mut tuning),
+            Effect::ReadStatus
+        );
+        assert_eq!(sec.host, Some(host));
+        assert!(sec.host_explicit);
+        assert!(!tuning.loaded, "the old host's status is forgotten");
+    }
+
+    /// The capture index is pulled on the first expansion only.
+    #[test]
+    fn select_anomaly_fetches_captures_once() {
+        let mut sec = SecurityState::default();
+        let mut tuning = DetectionTuningState::default();
+        assert_eq!(
+            sec.update(Action::SelectAnomaly(Some("a1".into())), &mut tuning),
+            Effect::FetchCaptures
+        );
+        assert!(matches!(sec.captures, Fetch::Loading));
+        assert_eq!(
+            sec.update(Action::SelectAnomaly(Some("a2".into())), &mut tuning),
+            Effect::None
+        );
+        assert_eq!(
+            sec.update(Action::SelectAnomaly(None), &mut tuning),
+            Effect::None
+        );
+        assert!(sec.selected.is_none());
+        assert_eq!(
+            sec.update(Action::ToggleHideInfo, &mut tuning),
+            Effect::None
+        );
+        assert!(sec.hide_info);
+        assert_eq!(
+            sec.update(Action::AllowlistInput("10.0.0.0/8".into()), &mut tuning),
+            Effect::None
+        );
+        assert_eq!(tuning.new_entry, "10.0.0.0/8");
     }
 }

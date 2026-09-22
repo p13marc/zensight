@@ -977,31 +977,13 @@ impl ZenSight {
         ControlFlow::Break(Task::none())
     }
 
-    /// #132: syslog/journald filter panel and its apply-to-sensor command.
-    ///
-    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
-    /// can fall through to the next handler.
-    fn update_syslog(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
-        match message {
-            // Syslog filter messages
-            Message::ToggleSyslogFilterPanel => {
-                self.syslog_filter.panel_open = !self.syslog_filter.panel_open;
-            }
-
-            Message::ToggleLogStatsPanel => {
-                self.syslog_filter.stats_open = !self.syslog_filter.stats_open;
-            }
-
-            Message::ToggleLogStatsAllUnits => {
-                self.syslog_filter.stats_all_units = !self.syslog_filter.stats_all_units;
-            }
-
-            Message::SetSyslogMinSeverity(severity) => {
-                self.syslog_filter.set_min_severity(severity);
-            }
-
-            Message::SetLogTimeRange(range) => {
-                self.syslog_filter.set_time_range(range, now_ms());
+    /// Act on what a logs-feed action reported (#1306): the fetch gates and
+    /// the paging cursor are the app's, the filter is the view's.
+    fn logs_effect(&mut self, effect: crate::view::specialized::syslog::Effect) -> Task<Message> {
+        use crate::view::specialized::syslog::Effect;
+        match effect {
+            Effect::None => Task::none(),
+            Effect::RefreshHistory => {
                 // Re-query so the feed's history depth reflects the new lower
                 // bound — from the durable store, since a widened range is
                 // exactly a request for history the ring no longer holds
@@ -1010,45 +992,36 @@ impl ZenSight {
                 if !self.log_fetch_inflight {
                     self.log_fetch_inflight = true;
                     self.last_log_fetch_ms = Some(now_ms());
-                    return ControlFlow::Break(self.query_log_history());
+                    return self.query_log_history();
                 }
+                Task::none()
             }
-
-            Message::ToggleSyslogFacility(facility) => {
-                self.syslog_filter.toggle_facility(facility);
+            Effect::LoadOlder => {
+                // The cursor is the oldest line the buffer holds: the sensor
+                // returns records strictly older than it, so pages abut
+                // without overlapping.
+                let Some(cursor) = self
+                    .recent_logs
+                    .iter()
+                    .map(|m| m.uid())
+                    .filter(|uid| !uid.is_empty())
+                    .min()
+                    .map(str::to_string)
+                else {
+                    // Nothing buffered (or nothing with a uid — pre-#556
+                    // lines): a plain history fetch is the right fallback.
+                    self.syslog_filter.loading_older = true;
+                    return self.query_log_history();
+                };
+                // Never stack page fetches: a second click while one is in
+                // flight would race two merges into the same buffer.
+                if !self.syslog_filter.loading_older {
+                    self.syslog_filter.loading_older = true;
+                    return self.query_older_logs(cursor);
+                }
+                Task::none()
             }
-
-            Message::ToggleSyslogUnit(unit) => {
-                self.syslog_filter.toggle_unit(unit);
-            }
-
-            Message::ToggleSyslogBoot(boot) => {
-                self.syslog_filter.toggle_boot(boot);
-            }
-
-            Message::ToggleLogRow(key) => {
-                self.syslog_filter.toggle_row(key);
-            }
-
-            Message::ToggleLogFollow => {
-                self.syslog_filter.toggle_follow(now_ms());
-            }
-
-            Message::LogsJumpToNow => {
-                self.syslog_filter.resume();
-            }
-
-            Message::SetSyslogAppFilter(filter) => {
-                self.syslog_filter.set_app_filter(filter);
-            }
-
-            Message::SetSyslogMessageFilter(filter) => {
-                self.syslog_filter.set_message_filter(filter);
-            }
-
-            other => return ControlFlow::Continue(other),
         }
-        ControlFlow::Break(Task::none())
     }
 
     /// #132: per-device specialized detail fetch/apply (netlink / netring / sysinfo).
@@ -1383,33 +1356,6 @@ impl ZenSight {
             Message::SetSnmpEventSearch(search) => {
                 self.dashboard.snmp_event_filter.search = search;
             }
-            Message::ShowMoreLogs => {
-                self.syslog_filter.extra_rows += crate::view::specialized::syslog::LOG_PAGE_STEP;
-            }
-            Message::LoadOlderLogs => {
-                // The cursor is the oldest line the buffer holds: the sensor
-                // returns records strictly older than it, so pages abut
-                // without overlapping.
-                let Some(cursor) = self
-                    .recent_logs
-                    .iter()
-                    .map(|m| m.uid())
-                    .filter(|uid| !uid.is_empty())
-                    .min()
-                    .map(str::to_string)
-                else {
-                    // Nothing buffered (or nothing with a uid — pre-#556
-                    // lines): a plain history fetch is the right fallback.
-                    self.syslog_filter.loading_older = true;
-                    return ControlFlow::Break(self.query_log_history());
-                };
-                // Never stack page fetches: a second click while one is in
-                // flight would race two merges into the same buffer.
-                if !self.syslog_filter.loading_older {
-                    self.syslog_filter.loading_older = true;
-                    return ControlFlow::Break(self.query_older_logs(cursor));
-                }
-            }
             Message::LogOlderPageLoaded(result) => {
                 self.syslog_filter.loading_older = false;
                 match result {
@@ -1452,17 +1398,6 @@ impl ZenSight {
                         self.log_fetch_error = Some(e);
                     }
                 }
-            }
-            Message::ToggleLogExportFormat => {
-                let fmt = &mut self.syslog_filter.export_format;
-                *fmt = match fmt {
-                    zensight_common::LogBundleFormat::Jsonl => {
-                        zensight_common::LogBundleFormat::Text
-                    }
-                    zensight_common::LogBundleFormat::Text => {
-                        zensight_common::LogBundleFormat::Jsonl
-                    }
-                };
             }
             Message::ClearSnmpEventFilters => {
                 self.dashboard.snmp_event_filter.clear();
@@ -1578,10 +1513,6 @@ impl ZenSight {
             ControlFlow::Break(t) => return t,
             ControlFlow::Continue(m) => m,
         };
-        let message = match self.update_syslog(message) {
-            ControlFlow::Break(t) => return t,
-            ControlFlow::Continue(m) => m,
-        };
         let message = match self.update_detail(message) {
             ControlFlow::Break(t) => return t,
             ControlFlow::Continue(m) => m,
@@ -1599,6 +1530,37 @@ impl ZenSight {
             Message::Groups(action) => {
                 if self.groups.update(action) == crate::view::groups::Effect::Persist {
                     self.save_groups();
+                }
+            }
+
+            Message::Logs(action) => {
+                let effect = self.syslog_filter.update(action, now_ms());
+                return self.logs_effect(effect);
+            }
+
+            Message::Expectations(field) => {
+                use crate::view::expectations::Effect;
+                match self.expectations.set(field) {
+                    Effect::None => {}
+                    Effect::TargetChanged => {
+                        self.refresh_expectation_hosts();
+                        self.refresh_security_hosts();
+                        return self.refresh_expectations_for_target();
+                    }
+                    Effect::HostChosen => return self.refresh_expectations_for_target(),
+                }
+            }
+
+            Message::Settings(field) => {
+                self.settings.set(field);
+            }
+
+            Message::Security(action) => {
+                use crate::view::security::Effect;
+                match self.security.update(action, &mut self.detection_tuning) {
+                    Effect::None => {}
+                    Effect::ReadStatus => return self.security_status_calls(),
+                    Effect::FetchCaptures => return self.query_anomaly_captures(),
                 }
             }
 
@@ -2827,38 +2789,6 @@ impl ZenSight {
                 self.set_view(target);
             }
 
-            Message::SetZenohMode(mode) => {
-                self.settings.set_mode(mode);
-            }
-
-            Message::SetZenohConnect(endpoints) => {
-                self.settings.set_connect(endpoints);
-            }
-
-            Message::SetZenohListen(endpoints) => {
-                self.settings.set_listen(endpoints);
-            }
-
-            Message::SetLinkProfile(profile) => {
-                self.settings.set_link_profile(profile);
-            }
-
-            Message::SubscriptionScopeChanged(scope) => {
-                self.settings.set_subscription_scope(scope);
-            }
-
-            Message::SetStaleThreshold(threshold) => {
-                self.settings.set_stale_threshold(threshold);
-            }
-
-            Message::SetMaxHistory(max_history) => {
-                self.settings.set_max_history(max_history);
-            }
-
-            Message::SetMaxLiveLatency(deadline) => {
-                self.settings.set_max_live_latency(deadline);
-            }
-
             Message::SaveSettings => {
                 self.save_settings();
             }
@@ -3390,27 +3320,8 @@ impl ZenSight {
                 self.refresh_security_hosts();
                 return self.query_expectations();
             }
-            Message::SetExpectationHost(host) => {
-                self.expectations.host = Some(host);
-                self.expectations.host_explicit = true;
-                self.expectations.status_note = None;
-                return self.refresh_expectations_for_target();
-            }
             Message::CloseExpectations => {
                 self.set_view(CurrentView::Dashboard);
-            }
-            Message::SetExpTarget(target) => {
-                self.expectations.target = target;
-                self.expectations.status_note = None;
-                self.refresh_expectation_hosts();
-                self.refresh_security_hosts();
-                return self.refresh_expectations_for_target();
-            }
-            Message::SetSystemdExpKind(kind) => {
-                self.expectations.systemd_kind = kind;
-            }
-            Message::SetHostspecExpKind(kind) => {
-                self.expectations.hostspec_kind = kind;
             }
             Message::HostspecSpecReceived(json) => {
                 // Pretty-print if it parses, so the verbatim answer is readable;
@@ -3456,27 +3367,6 @@ impl ZenSight {
                     Some(Self::reply_verdict("systemd", "expectations", &json));
                 self.expectations.systemd =
                     crate::view::expectations::SystemdExpDraft::from_status(&json);
-            }
-            Message::SetExpectationKind(kind) => {
-                self.expectations.new_kind = kind;
-            }
-            Message::SetExpectationName(name) => {
-                self.expectations.new_name = name;
-            }
-            Message::SetExpectationPort(port) => {
-                self.expectations.new_port = port;
-            }
-            Message::SetExpectationSeverity(sev) => {
-                self.expectations.new_severity = sev;
-            }
-            Message::SetExpectationMetric(metric) => {
-                self.expectations.new_metric = metric;
-            }
-            Message::SetExpectationOp(op) => {
-                self.expectations.new_op = op;
-            }
-            Message::SetExpectationValue(value) => {
-                self.expectations.new_value = value;
             }
             Message::AddExpectation => {
                 use crate::view::expectations::{ExpKind, ExpTarget, SystemdExpKind};
@@ -3826,29 +3716,6 @@ impl ZenSight {
             // makes is an armed `<topic>/set` to the chosen host (#1261), and
             // its three status reads are calls on the Security surface,
             // projected by `sync_detection_tuning`.
-            Message::SetNetringThresholdInput { detector, value } => {
-                if let Some(row) = self
-                    .detection_tuning
-                    .detectors
-                    .iter_mut()
-                    .find(|d| d.name == detector)
-                {
-                    row.threshold_input = value;
-                }
-            }
-            Message::SetNetringAllowlistInput(value) => {
-                self.detection_tuning.new_entry = value;
-            }
-            Message::SetPacketFilterInput(value) => {
-                self.detection_tuning.packet_filter_input = value;
-            }
-            Message::SetThreatIocInput(value) => {
-                self.detection_tuning.threat_ioc_input = value;
-            }
-            Message::SetThreatYaraInput(value) => {
-                self.detection_tuning.threat_yara_input = value;
-            }
-
             Message::FetchAnomalyFlows { key, src } => {
                 self.security.flows_for = Some(key.clone());
                 self.security.flows = crate::view::specialized::fetch::Fetch::Loading;
@@ -3868,33 +3735,8 @@ impl ZenSight {
                 self.refresh_security_hosts();
                 return self.security_status_calls();
             }
-            Message::SetSecurityHost(host) => {
-                self.security.host = Some(host);
-                self.security.host_explicit = true;
-                self.security.writes.disarm();
-                self.detection_tuning.forget_status();
-                return self.security_status_calls();
-            }
             Message::CloseSecurity => {
                 self.set_view(CurrentView::Dashboard);
-            }
-            Message::ToggleSecurityHideInfo => {
-                self.security.hide_info = !self.security.hide_info;
-            }
-            Message::SelectAnomaly(key) => {
-                let expanded = key.is_some();
-                self.security.selected = key;
-                // Pull the capture index once (#327) so an expanded anomaly can
-                // offer its matching triggered capture for download.
-                if expanded
-                    && matches!(
-                        self.security.captures,
-                        crate::view::specialized::fetch::Fetch::Idle
-                    )
-                {
-                    self.security.captures = crate::view::specialized::fetch::Fetch::Loading;
-                    return self.query_anomaly_captures();
-                }
             }
             Message::AnomalyCapturesReceived(result) => {
                 // A missing index is the normal case (capture.to_disk off) — keep
@@ -3903,10 +3745,6 @@ impl ZenSight {
                     Ok(records) => crate::view::specialized::fetch::Fetch::Ready(records),
                     Err(_) => crate::view::specialized::fetch::Fetch::Ready(Vec::new()),
                 };
-            }
-
-            Message::ClearSyslogFilters => {
-                self.syslog_filter.clear();
             }
 
             Message::SyslogFilterStatusReceived(status) => {
@@ -9830,11 +9668,11 @@ mod update_routing_tests {
         // for nothing (#1306).
         let _ = a.update(Message::Chart(crate::view::chart::Action::ZoomIn));
         assert!(a.selected_device.is_none());
-        // Syslog panel toggle is owned by update_syslog.
-        assert!(matches!(
-            a.update_syslog(Message::ToggleSyslogFilterPanel),
-            ControlFlow::Break(_)
+        // A logs action lands on the filter state (#1306).
+        let _ = a.update(Message::Logs(
+            crate::view::specialized::syslog::Action::TogglePanel,
         ));
+        assert!(a.syslog_filter.panel_open);
         // A detail filter is owned by update_detail.
         assert!(matches!(
             a.update_detail(Message::SetDetailFilter {
@@ -10567,6 +10405,7 @@ mod tier2_app_fold_tests {
 mod expectation_host_tests {
     use super::*;
     use crate::view::expectations::ExpTarget;
+    use crate::view::expectations::Field;
 
     fn info(name: &str, source: &str, origin: Option<&str>) -> zensight_common::SensorInfo {
         zensight_common::SensorInfo {
@@ -10627,7 +10466,7 @@ mod expectation_host_tests {
             "edge02",
             Some("h-bbbbbbbbbbbb"),
         )));
-        let _ = a.update(Message::SetExpTarget(ExpTarget::Netlink));
+        let _ = a.update(Message::Expectations(Field::Target(ExpTarget::Netlink)));
         assert_eq!(a.expectations.hosts.len(), 2);
         assert!(
             a.expectations.host.is_none(),
@@ -10641,7 +10480,7 @@ mod expectation_host_tests {
             "edge02",
             Some("h-bbbbbbbbbbbb"),
         )));
-        let _ = a.update(Message::SetExpTarget(ExpTarget::Systemd));
+        let _ = a.update(Message::Expectations(Field::Target(ExpTarget::Systemd)));
         assert_eq!(
             a.expectations.host.as_ref().map(|h| h.chunk.as_str()),
             Some("h-bbbbbbbbbbbb")
@@ -10659,9 +10498,11 @@ mod expectation_host_tests {
         );
 
         // Back to netlink: the systemd choice does not leak across targets.
-        let _ = a.update(Message::SetExpTarget(ExpTarget::Netlink));
+        let _ = a.update(Message::Expectations(Field::Target(ExpTarget::Netlink)));
         assert!(a.expectations.host.is_none());
-        let _ = a.update(Message::SetExpectationHost(a.expectations.hosts[0].clone()));
+        let _ = a.update(Message::Expectations(Field::Host(
+            a.expectations.hosts[0].clone(),
+        )));
         assert_eq!(
             a.expectations.host.as_ref().map(|h| h.chunk.as_str()),
             Some("h-aaaaaaaaaaaa")

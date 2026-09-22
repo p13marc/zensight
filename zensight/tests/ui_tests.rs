@@ -34,6 +34,7 @@ use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
 use zensight::view::overview::snmp::{EventFilterState, SnmpOverviewData};
 use zensight::view::settings::{SettingsState, settings_view};
+use zensight::view::specialized::syslog::Action as LogsAction;
 use zensight::view::specialized::{SyslogFilterState, specialized_view};
 use zensight::view::topology::{TopologyState, topology_view};
 
@@ -2027,8 +2028,10 @@ fn test_security_drilldown_and_filter() {
     let _ = ui.click("PortScanTRW from 10.0.0.5");
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
-        msgs.iter()
-            .any(|m| matches!(m, Message::SelectAnomaly(Some(_)))),
+        msgs.iter().any(|m| matches!(
+            m,
+            Message::Security(zensight::view::security::Action::SelectAnomaly(Some(_)))
+        )),
         "row click should emit SelectAnomaly, got {msgs:?}"
     );
 
@@ -3938,7 +3941,7 @@ fn test_logs_unit_filter_and_source_badge() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::ToggleSyslogUnit(u) if u == "nginx.service"))
+            .any(|m| matches!(m, Message::Logs(LogsAction::ToggleUnit(u)) if u == "nginx.service"))
     );
 }
 
@@ -4034,7 +4037,10 @@ fn test_logs_pagination_affordances() {
     assert!(ui.find("Showing 100 of 150 matching lines").is_ok());
     ui.click("Show 100 more").expect("reveal button");
     let msgs: Vec<Message> = ui.into_messages().collect();
-    assert!(msgs.iter().any(|m| matches!(m, Message::ShowMoreLogs)));
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::Logs(LogsAction::ShowMore)))
+    );
 
     // Revealed: the count stops qualifying and the button goes away.
     filter.extra_rows = 100;
@@ -4046,7 +4052,10 @@ fn test_logs_pagination_affordances() {
         // Deeper history is a separate, round-trip-costing affordance.
         ui.click("Load older").expect("load-older button");
         let msgs: Vec<Message> = ui.into_messages().collect();
-        assert!(msgs.iter().any(|m| matches!(m, Message::LoadOlderLogs)));
+        assert!(
+            msgs.iter()
+                .any(|m| matches!(m, Message::Logs(LogsAction::LoadOlder)))
+        );
     }
 
     // In flight, and once exhausted, it stops offering.
@@ -4132,7 +4141,7 @@ fn test_logs_export_format_choice() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::ToggleLogExportFormat))
+            .any(|m| matches!(m, Message::Logs(LogsAction::ToggleExportFormat)))
     );
 
     // Flipped to text, the request carries it.
@@ -4238,7 +4247,7 @@ fn test_logs_rollup_panel_renders() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::ToggleLogStatsPanel))
+            .any(|m| matches!(m, Message::Logs(LogsAction::ToggleStats)))
     );
 
     // Expanded: KPI tiles + the top-3 by-unit list appear.
@@ -4287,7 +4296,7 @@ fn test_logs_rollup_show_all_units() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::ToggleLogStatsAllUnits))
+            .any(|m| matches!(m, Message::Logs(LogsAction::ToggleStatsAllUnits)))
     );
 
     // With the flag set, every unit renders and the toggle collapses back.
