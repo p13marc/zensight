@@ -57,16 +57,7 @@ async fn main() -> Result<()> {
         runner.health(),
     ));
     let artifacts = runner.config().artifact_limits();
-    let runner = runner.with_identity();
-    let mut runner = runner.with_artifacts(vec![
-        Arc::new(zensight_sensor_core::ReportProducer::new(
-            report_source,
-            &artifacts.report,
-        )) as Arc<dyn zensight_sensor_core::ArtifactProducer>,
-        Arc::new(zensight_sensor_core::SnapshotProducer::new(
-            &artifacts.snapshot,
-        )),
-    ]);
+    let mut runner = runner.with_identity();
 
     let parallax_config = runner.config().parallax.clone();
     let session = runner.session().clone();
@@ -199,6 +190,35 @@ async fn main() -> Result<()> {
         Some(runner.health()),
         Some(alerts.clone()),
     );
+
+    // The artifact channel (`@rpc/parallax/artifact/*`): the framework's
+    // report and snapshot producers, plus this sensor's own stills and clips
+    // (#414) — registered here rather than at the top because a still or a
+    // clip opens a one-shot pipeline off the catalogue and asks the session
+    // actor which exclusive devices are busy. Every kind is a no-op unless
+    // its config block enables it.
+    runner = runner.with_artifacts(vec![
+        Arc::new(zensight_sensor_core::ReportProducer::new(
+            report_source,
+            &artifacts.report,
+        )) as Arc<dyn zensight_sensor_core::ArtifactProducer>,
+        Arc::new(zensight_sensor_core::SnapshotProducer::new(
+            &artifacts.snapshot,
+        )),
+        Arc::new(zensight_sensor_parallax::artifact::StillProducer::new(
+            &parallax_config.artifacts.still,
+            catalog.clone(),
+            session_handle.clone(),
+            source.clone(),
+        )),
+        Arc::new(zensight_sensor_parallax::artifact::ClipProducer::new(
+            &parallax_config.artifacts.clip,
+            &parallax_config.video,
+            catalog.clone(),
+            session_handle.clone(),
+            source.clone(),
+        )),
+    ]);
 
     // Stream control channel (`@rpc/parallax/stream/set` + `@rpc/parallax/streams`).
     {

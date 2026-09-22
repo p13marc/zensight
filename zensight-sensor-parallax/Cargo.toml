@@ -41,8 +41,12 @@ parallax-pipeline = { workspace = true, features = [
     "v4l2",
     "rtsp",
     "image-jpeg",
+    # The MP4 muxer behind the `clip` artifact (#414); the feature name is
+    # upstream's — it gates the muxer and the demuxer together.
+    "mp4-demux",
 ] }
 
+async-trait.workspace = true
 mdns-sd = { workspace = true }
 quick-xml = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
@@ -61,3 +65,7 @@ hostname = { workspace = true }
 # Reads registry/parallax.toml as data, for the one field zenkey-build does not
 # lint — see tests/registry_conformance.rs.
 toml.workspace = true
+# The still/clip producers' tests (#414): a workdir per produce, a cancel token.
+tempfile.workspace = true
+zblob.workspace = true
+ulid.workspace = true

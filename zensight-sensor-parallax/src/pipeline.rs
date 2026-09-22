@@ -61,6 +61,46 @@ const SINK_QUEUE: usize = 4;
 /// `set_output_budget` — and re-deriving it was never a good use of a
 /// measurement when the engine that owns both the queue and the arenas is
 /// willing to state the number itself. This is that.
+/// The encoder parameters `build_video` needs for one tier of the ladder:
+/// the rung's advertised numbers plus its shaping resolved over the shared
+/// `video.encoder` defaults (#509). The session actor resolves an open's
+/// tier this way; the clip producer (#414) resolves a requested tier the
+/// same way, which is what keeps a recorded clip identical to a live one.
+pub fn tier_video_params(
+    video: &crate::config::VideoConfig,
+    tier: &crate::config::TierConfig,
+) -> VideoParams {
+    let tuning = video.tuning_for(tier);
+    VideoParams {
+        bitrate_kbps: tier.spec.bitrate_kbps,
+        gop_frames: tuning.gop_frames.unwrap_or(video.gop_frames),
+        fps: tier.spec.fps,
+        max_height: tier.spec.max_height,
+        tuning,
+    }
+}
+
+/// The dimensions a JPEG's SOF segment declares — what a test pins a
+/// still's size by (#414).
+#[cfg(test)]
+pub(crate) fn jpeg_sof_dimensions(jpeg: &[u8]) -> Option<(u32, u32)> {
+    let mut i = 2; // past SOI
+    while i + 9 <= jpeg.len() {
+        if jpeg[i] != 0xFF {
+            return None; // lost sync — not a marker
+        }
+        let marker = jpeg[i + 1];
+        if (0xC0..=0xC3).contains(&marker) {
+            let h = u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]) as u32;
+            let w = u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]) as u32;
+            return Some((w, h));
+        }
+        let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
+        i += 2 + len;
+    }
+    None
+}
+
 pub fn executor() -> Executor {
     Executor::with_config(UnifiedExecutorConfig::live_video())
 }
@@ -1202,25 +1242,6 @@ mod tests {
             // Every JPEG is a sync point.
             assert!(frame.keyframe);
         }
-    }
-
-    /// The dimensions a JPEG's SOF segment declares.
-    fn jpeg_sof_dimensions(jpeg: &[u8]) -> Option<(u32, u32)> {
-        let mut i = 2; // past SOI
-        while i + 9 <= jpeg.len() {
-            if jpeg[i] != 0xFF {
-                return None; // lost sync — not a marker
-            }
-            let marker = jpeg[i + 1];
-            if (0xC0..=0xC3).contains(&marker) {
-                let h = u16::from_be_bytes([jpeg[i + 5], jpeg[i + 6]]) as u32;
-                let w = u16::from_be_bytes([jpeg[i + 7], jpeg[i + 8]]) as u32;
-                return Some((w, h));
-            }
-            let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
-            i += 2 + len;
-        }
-        None
     }
 
     /// `preview.max_height` genuinely shrinks the preview: the encoded JPEG's

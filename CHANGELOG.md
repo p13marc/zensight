@@ -57,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **parallax serves stills and clips over the artifact channel** (#414).
+  The live `@media` plane is lossy and ephemeral by design; these are its
+  reliable complement, with the progress, status, cancel and TTL every
+  artifact gets from the framework. `kind: "still"` (one JPEG frame of a
+  stream) and `kind: "clip"` (a bounded H.264 recording in an MP4, on the
+  requested tier or the default, clamped to `max_duration_secs` and stopped
+  at `max_bytes` — both said in the status note) are new `ArtifactKind`s
+  with the stream as a field, and `KindAdvert::Still`/`Clip` tell the GUI
+  which streams and tiers to offer; the sensors card gets one button per
+  stream. Each opens its own one-shot pipeline (there is no tee, see
+  `streams.md`): free on a test source, refused on a V4L2 device a viewer
+  holds, and a follow-up for RTSP (the one-shot pipeline has no async
+  connect path yet — refused by name). Off by default under
+  `parallax.artifacts.{still,clip}`; the producers own their limits.
+  `parallax-pipeline`'s `mp4-demux` feature is on for the muxer.
+
 - **parallax claims its cameras as hosts** (#413). A camera is a host on the
   network, and until now nothing said so: its streams hung off the sensor's
   own host card. `zensight-sensor-parallax` now publishes observer-role

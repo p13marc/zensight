@@ -221,9 +221,41 @@ so a camera the operator later adopts under that name keeps its key. When
 both name the same slug the configured entry wins. Publishing is
 change-driven with the refresh above: never per tick.
 
+## `artifacts` block (#414) — stills and clips
+
+The live `@media` plane is lossy and ephemeral by design. These two kinds
+are its reliable complement, served over the artifact channel
+(`@rpc/parallax/artifact/request` → `@blob/artifact`) with the progress,
+status, cancel and TTL every artifact gets from the framework. They sit under
+`parallax.artifacts` — the producers own their limits, as netring's capture
+does; the top-level `artifacts` block stays the framework's report and
+snapshot.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `still.enabled` | `false` | serve one JPEG frame of a stream (`kind: "still"`, `stream`) |
+| `still.quality` | `85` | JPEG quality 1–100 |
+| `still.max_height` | none | aspect-preserving height cap; the source size otherwise |
+| `still.max_bytes` | `8388608` | a larger frame fails the request rather than serving it |
+| `still.cooldown_secs` / `ttl_secs` / `chunk_size` | `5` / `600` / `524288` | the channel's per-kind gap, retention and transfer chunk |
+| `clip.enabled` | `false` | serve a bounded H.264 recording in an MP4 (`kind: "clip"`, `stream`, `duration_secs`, optional `tier`) |
+| `clip.max_duration_secs` | `60` | a longer request is clamped, and the clip says so |
+| `clip.max_bytes` | `67108864` | the recording stops early at this size, and the clip says so |
+| `clip.cooldown_secs` / `ttl_secs` / `chunk_size` | `30` / `600` / `524288` | as above |
+
+**One-shot pipelines, no tee.** A still or a clip opens its own pipeline —
+the same graph a live preview or tier uses — and tears it down when done; see
+`streams.md`. A test source and an RTSP camera are unaffected by an open
+viewer; a **V4L2 device is exclusive**, so a request for a stream that is
+already open is refused ("close it first"), never queued. **RTSP stills and
+clips are a follow-up**: the one-shot pipeline has no async connect + SDP
+path yet, and the request is refused by name. A clip records the requested
+tier, or `video.default_tier`, with exactly the encoder shaping a live open of
+that tier would get.
+
 ## Validation
 
-Startup fails (with a clear message) on: `evidence.refresh_secs` of 0, duplicate or empty stream names,
+Startup fails (with a clear message) on: `evidence.refresh_secs` of 0, `artifacts.still.quality` outside 1..=100, an enabled `artifacts.clip` with `max_duration_secs` of 0 or no video tier, duplicate or empty stream names,
 names containing `/` or `*`, `preview.fps == 0`, `preview.quality` outside
 1..=100, `preview.max_height < 2`, zero test-source dimensions or fps,
 `video.gop_frames == 0`, an empty tier ladder, a tier with an empty/`/`/`*`
