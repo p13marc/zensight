@@ -52,9 +52,17 @@ use crate::view::family::{Family, FamilyModel, Instance};
 /// label.
 pub const OPERATION_BUDGET: u64 = 10_000;
 /// Wall-clock budget per evaluation. Past it `on_progress` terminates the
-/// script — this is what turns `loop {}` into a visible failure rather than
-/// a stalled frame.
-pub const WALL_BUDGET: Duration = Duration::from_millis(20);
+/// script — this is what turns a slow host function into a visible failure
+/// rather than a stalled frame (`loop {}` trips [`OPERATION_BUDGET`] first,
+/// deterministically). A frame's worth in release; two seconds in a debug
+/// build, where Rhai is an order of magnitude slower and a test runner
+/// preempts the thread — a label that took 30 ms on a loaded CI box is not
+/// a runaway script, and the operation budget still holds it to 10k ops.
+pub const WALL_BUDGET: Duration = if cfg!(debug_assertions) {
+    Duration::from_secs(2)
+} else {
+    Duration::from_millis(20)
+};
 pub const MAX_CALL_LEVELS: usize = 8;
 pub const MAX_STRING_SIZE: usize = 4_096;
 pub const MAX_ARRAY_SIZE: usize = 1_024;
