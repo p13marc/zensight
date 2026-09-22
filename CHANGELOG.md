@@ -349,6 +349,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filters and presets; `Effect::Persist`), `Inventory` (3), `Bandwidth` (3;
   `RebuildServices`/`FetchProcesses`) and `Fleet` (3). `Message` is 253
   variants.
+  **The topology follows**: `Message::Topology(topology::Action)` replaces
+  all 37 `Topology*` variants and `CloseTopology` — the canvas emits the
+  same flat action the toolbar does; `TopologyState::update` takes the
+  entity store (the batch's join key) and the clock, and answers
+  `PersistPrefs`, `Close`, `AskListenSockets`, `AskEdgeFlows`,
+  `OpenDevice`, `OpenFlows` or `Copy`. The node's listening sockets and the
+  edge's recent flows are keyed calls on `CallSurface::Topology`
+  (`listen:<node>`, `edge_flows:<index>`) — a selection that moves on
+  clears its keys, which is the staleness guard — filtered to the node's
+  addresses and the edge's endpoints at decode; `PanelData` keeps only its
+  `Calls`. `TopologyDragNodeStart` had no emitter and is gone. The
+  `update_topology_msg` stage is gone. `Message` is 216 variants.
 
 - **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
   writes — netring's detector toggles, thresholds, allowlist, capture filter,

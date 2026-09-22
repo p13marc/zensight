@@ -10,14 +10,13 @@ use iced::widget::{column, container, row, rule, text};
 use iced::{Alignment, Element, Length};
 use iced_anim::widget::button;
 
-use super::{Edge, EdgeKind, Node, NodeHealth, Provenance, TopologyState, format_rate};
-use crate::call::CallSurface;
+use super::{Action, Edge, EdgeKind, Node, NodeHealth, Provenance, TopologyState, format_rate};
+use crate::call::{Answer, CallSurface};
 use crate::entity::EntityStore;
 use crate::message::Message;
 use crate::view::components::Sparkline;
 use crate::view::icons::{self, IconSize};
 use crate::view::specialized::attribution::{self, Attribution};
-use crate::view::specialized::fetch::Fetch;
 use crate::view::tokens::font;
 use crate::view::topology::graph::format_bytes;
 use zensight_store::MetricStore;
@@ -201,7 +200,7 @@ pub fn node_panel<'a>(
         }
         items = items.push(
             button(text("Open flow table ↗").size(font::DENSE))
-                .on_press(Message::TopologyOpenFlows)
+                .on_press(Message::Topology(Action::OpenFlows))
                 .style(iced::widget::button::secondary)
                 .width(Length::Fill),
         );
@@ -211,14 +210,22 @@ pub fn node_panel<'a>(
     if node.protocols.contains("netlink") {
         items = items.push(rule::horizontal(1));
         items = items.push(section("Listening"));
-        match &state.panel.listen {
-            Fetch::Idle => {}
-            Fetch::Loading => items = items.push(note("Loading…".to_string())),
-            Fetch::Error(e) => items = items.push(note(format!("Unavailable: {e}"))),
-            Fetch::Ready(rows) if rows.is_empty() => {
+        // The keyed call this selection made (#1306); the rows are bound to
+        // this node's addresses once, at decode.
+        let listen = state
+            .panel
+            .calls
+            .answer_with(&super::listen_key(&node.id), |rows| {
+                super::listen_rows_for_node(node, rows)
+            });
+        match listen {
+            Answer::Idle => {}
+            Answer::Loading => items = items.push(note("Loading…".to_string())),
+            Answer::Error(e) => items = items.push(note(format!("Unavailable: {e}"))),
+            Answer::Ready(rows) if rows.is_empty() => {
                 items = items.push(note("No listening sockets".to_string()));
             }
-            Fetch::Ready(rows) => {
+            Answer::Ready(rows) => {
                 let mut sorted: Vec<_> = rows.iter().collect();
                 sorted.sort_by_key(|s| listen_port(&s.local));
                 let total = sorted.len();
@@ -270,7 +277,7 @@ pub fn node_panel<'a>(
             })
             .size(font::DENSE),
         )
-        .on_press(Message::TopologyTogglePin(node.id.clone()))
+        .on_press(Message::Topology(Action::TogglePin(node.id.clone())))
         .style(iced::widget::button::secondary)
         .width(Length::Fill),
     );
@@ -283,19 +290,19 @@ pub fn node_panel<'a>(
             .spacing(5)
             .align_y(Alignment::Center),
         )
-        .on_press(Message::TopologyViewDeviceDetail(node.id.clone()))
+        .on_press(Message::Topology(Action::ViewDeviceDetail(node.id.clone())))
         .style(iced::widget::button::primary)
         .width(Length::Fill),
     );
     items = items.push(
         button(text("Focus").size(font::DENSE))
-            .on_press(Message::TopologyFocusNode(node.id.clone()))
+            .on_press(Message::Topology(Action::FocusNode(node.id.clone())))
             .style(iced::widget::button::secondary)
             .width(Length::Fill),
     );
     items = items.push(
         button(text("Clear Selection").size(font::DENSE))
-            .on_press(Message::TopologyClearSelection)
+            .on_press(Message::Topology(Action::ClearSelection))
             .style(iced::widget::button::secondary)
             .width(Length::Fill),
     );
@@ -309,7 +316,11 @@ pub fn node_panel<'a>(
 
 /// The edge detail panel (#393): per-direction rates, backing flows with
 /// process attribution, community-id copy.
-pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, Message> {
+pub fn edge_panel<'a>(
+    state: &'a TopologyState,
+    entities: &'a EntityStore,
+    edge: &'a Edge,
+) -> Element<'a, Message> {
     use crate::view::formatting::format_timestamp;
 
     let from_label = node_label(state, &edge.from);
@@ -359,14 +370,24 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
     if edge.kind == EdgeKind::Flow {
         items = items.push(rule::horizontal(1));
         items = items.push(section("Flows"));
-        match &state.panel.edge_flows {
-            Fetch::Idle => {}
-            Fetch::Loading => items = items.push(note("Loading…".to_string())),
-            Fetch::Error(e) => items = items.push(note(format!("Unavailable: {e}"))),
-            Fetch::Ready(flows) if flows.is_empty() => {
+        // The keyed call this selection made (#1306); filtered to the edge's
+        // endpoints once, at decode.
+        let index = state.selected_edge.unwrap_or_default();
+        let edge_flows = state
+            .panel
+            .calls
+            .answer_with(&super::edge_flows_key(index), |flows| {
+                let ip_to_node = super::ip_to_node(state, entities);
+                super::flows_for_edge(edge, flows, &ip_to_node)
+            });
+        match edge_flows {
+            Answer::Idle => {}
+            Answer::Loading => items = items.push(note("Loading…".to_string())),
+            Answer::Error(e) => items = items.push(note(format!("Unavailable: {e}"))),
+            Answer::Ready(flows) if flows.is_empty() => {
                 items = items.push(note("No recent flows for this pair".to_string()));
             }
-            Fetch::Ready(flows) => {
+            Answer::Ready(flows) => {
                 let total = flows.len();
                 for flow in flows.iter().take(SECTION_ROWS) {
                     let attributed = attribution::lookup(&state.panel.calls, &flow.src, &flow.dst);
@@ -418,7 +439,7 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
                             row![
                                 text(format!("   {cid}")).size(font::MICRO),
                                 button(text("copy").size(font::MICRO))
-                                    .on_press(Message::TopologyCopyText(cid.clone()))
+                                    .on_press(Message::Topology(Action::CopyText(cid.clone())))
                                     .style(iced::widget::button::secondary)
                             ]
                             .spacing(6)
@@ -433,7 +454,7 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
         }
         items = items.push(
             button(text("Open flow table ↗").size(font::DENSE))
-                .on_press(Message::TopologyOpenFlows)
+                .on_press(Message::Topology(Action::OpenFlows))
                 .style(iced::widget::button::secondary)
                 .width(Length::Fill),
         );
@@ -442,7 +463,7 @@ pub fn edge_panel<'a>(state: &'a TopologyState, edge: &'a Edge) -> Element<'a, M
     items = items.push(rule::horizontal(1));
     items = items.push(
         button(text("Clear Selection").size(font::DENSE))
-            .on_press(Message::TopologyClearSelection)
+            .on_press(Message::Topology(Action::ClearSelection))
             .style(iced::widget::button::secondary)
             .width(Length::Fill),
     );

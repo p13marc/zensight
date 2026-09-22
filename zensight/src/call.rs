@@ -438,6 +438,13 @@ impl Calls {
         self.calls.remove(procedure);
     }
 
+    /// Forget every call whose key starts with `prefix` — a selection's
+    /// keyed calls when the selection moves on (#1306), which is what keeps
+    /// a late answer for the old selection from ever landing.
+    pub fn clear_prefix(&mut self, prefix: &str) {
+        self.calls.retain(|k, _| !k.starts_with(prefix));
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (&String, &CallState)> {
         self.calls.iter()
     }

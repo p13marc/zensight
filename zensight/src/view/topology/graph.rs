@@ -4,6 +4,7 @@ use iced::mouse;
 use iced::widget::canvas::{self, Canvas, Frame, Geometry, Path, Stroke, Text};
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Theme};
 
+use super::Action;
 use super::{
     EdgeKind, EdgeLabelMode, NodeHealth, NodeRole, Provenance, RenderEdge, RenderNode,
     RenderSource, TintSource, TopologyState, render_node_position,
@@ -265,14 +266,14 @@ impl<'a> TopologyGraphProgram<'a> {
                             let node_id = id.clone();
                             interaction.dragging_node = Some(node_id.clone());
                             interaction.last_pos = Some(pos);
-                            return Some(canvas::Action::publish(Message::TopologySelectNode(
-                                node_id,
+                            return Some(canvas::Action::publish(Message::Topology(
+                                Action::SelectNode(node_id),
                             )));
                         }
                         Some(RenderSource::Group(gid)) => {
                             // Clicking a collapsed group expands it (#392).
-                            return Some(canvas::Action::publish(Message::TopologyExpandGroup(
-                                gid.clone(),
+                            return Some(canvas::Action::publish(Message::Topology(
+                                Action::ExpandGroup(gid.clone()),
                             )));
                         }
                         None => {}
@@ -287,13 +288,17 @@ impl<'a> TopologyGraphProgram<'a> {
                         graph_pos,
                         tolerance,
                     ) {
-                        return Some(canvas::Action::publish(Message::TopologySelectEdge(index)));
+                        return Some(canvas::Action::publish(Message::Topology(
+                            Action::SelectEdge(index),
+                        )));
                     }
 
                     // Otherwise, start panning
                     interaction.panning = true;
                     interaction.last_pos = Some(pos);
-                    return Some(canvas::Action::publish(Message::TopologyClearSelection));
+                    return Some(canvas::Action::publish(Message::Topology(
+                        Action::ClearSelection,
+                    )));
                 }
             }
             mouse::Event::CursorMoved { position } => {
@@ -304,17 +309,19 @@ impl<'a> TopologyGraphProgram<'a> {
                     if let Some(ref node_id) = interaction.dragging_node {
                         // Update node position
                         let graph_pos = self.screen_to_graph(*position, bounds);
-                        return Some(canvas::Action::publish(Message::TopologyDragNodeUpdate(
-                            node_id.clone(),
-                            graph_pos.x,
-                            graph_pos.y,
+                        return Some(canvas::Action::publish(Message::Topology(
+                            Action::DragNode {
+                                id: node_id.clone(),
+                                x: graph_pos.x,
+                                y: graph_pos.y,
+                            },
                         )));
                     } else if interaction.panning {
                         interaction.last_pos = Some(*position);
-                        return Some(canvas::Action::publish(Message::TopologyPanUpdate(
+                        return Some(canvas::Action::publish(Message::Topology(Action::Pan(
                             dx / self.state.zoom,
                             dy / self.state.zoom,
-                        )));
+                        ))));
                     }
                 }
                 interaction.last_pos = Some(*position);
@@ -328,17 +335,21 @@ impl<'a> TopologyGraphProgram<'a> {
                         _ => None,
                     };
                     if hovered != self.state.hovered {
-                        return Some(canvas::Action::publish(Message::TopologyHover(hovered)));
+                        return Some(canvas::Action::publish(Message::Topology(Action::Hover(
+                            hovered,
+                        ))));
                     }
                 } else if self.state.hovered.is_some() {
-                    return Some(canvas::Action::publish(Message::TopologyHover(None)));
+                    return Some(canvas::Action::publish(Message::Topology(Action::Hover(
+                        None,
+                    ))));
                 }
             }
             mouse::Event::ButtonReleased(mouse::Button::Left) => {
                 if let Some(ref node_id) = interaction.dragging_node.take() {
-                    return Some(canvas::Action::publish(Message::TopologyDragNodeEnd(
+                    return Some(canvas::Action::publish(Message::Topology(Action::DragEnd(
                         node_id.clone(),
-                    )));
+                    ))));
                 }
                 interaction.panning = false;
             }
@@ -349,9 +360,9 @@ impl<'a> TopologyGraphProgram<'a> {
                 };
 
                 if scroll > 0.0 {
-                    return Some(canvas::Action::publish(Message::TopologyZoomIn));
+                    return Some(canvas::Action::publish(Message::Topology(Action::ZoomIn)));
                 } else if scroll < 0.0 {
-                    return Some(canvas::Action::publish(Message::TopologyZoomOut));
+                    return Some(canvas::Action::publish(Message::Topology(Action::ZoomOut)));
                 }
             }
             _ => {}
@@ -370,10 +381,9 @@ impl<'a> TopologyGraphProgram<'a> {
             .map(|rnode| render_node_position(rnode, &self.state.nodes))
             .collect();
         let (zoom, pan) = fit_view(&positions, bounds.width, bounds.height)?;
-        Some(canvas::Action::publish(Message::TopologyFitApplied {
-            zoom,
-            pan,
-        }))
+        Some(canvas::Action::publish(Message::Topology(
+            Action::FitApplied { zoom, pan },
+        )))
     }
 
     /// Handle keyboard events.
@@ -387,16 +397,20 @@ impl<'a> TopologyGraphProgram<'a> {
         if let Event::KeyPressed { key, .. } = event {
             match key {
                 Key::Character(c) if c.as_str() == "+" || c.as_str() == "=" => {
-                    return Some(canvas::Action::publish(Message::TopologyZoomIn));
+                    return Some(canvas::Action::publish(Message::Topology(Action::ZoomIn)));
                 }
                 Key::Character(c) if c.as_str() == "-" => {
-                    return Some(canvas::Action::publish(Message::TopologyZoomOut));
+                    return Some(canvas::Action::publish(Message::Topology(Action::ZoomOut)));
                 }
                 Key::Named(Named::Escape) => {
-                    return Some(canvas::Action::publish(Message::TopologyClearSelection));
+                    return Some(canvas::Action::publish(Message::Topology(
+                        Action::ClearSelection,
+                    )));
                 }
                 Key::Character(c) if c.as_str() == "0" => {
-                    return Some(canvas::Action::publish(Message::TopologyZoomReset));
+                    return Some(canvas::Action::publish(Message::Topology(
+                        Action::ZoomReset,
+                    )));
                 }
                 Key::Character(c) if c.as_str() == "f" => {
                     return self.fit_action(bounds);
