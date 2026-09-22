@@ -36,23 +36,7 @@ pub struct SnmpDetailState {
     pub rows: Vec<IfaceRow>,
     /// This device's recent trap/event records (#536), newest first.
     pub events: std::collections::VecDeque<zensight_common::EventRecord>,
-
     // ── Gated PDU outlet control (#956) ─────────────────────────────────
-    /// What the sensor says it will permit. Probed on drill-in, and the whole
-    /// panel is rendered from it rather than optimistically: on a default
-    /// deployment — which is every deployment until someone decides otherwise
-    /// — there is nothing to click, and learning that from an error toast a
-    /// second later is not an answer.
-    /// The outlet armed for confirmation, and what the operator has typed so
-    /// far. Typing the outlet's own name is the confirmation: a `[confirm]`
-    /// button one slip away from a live one is not a confirmation, and this
-    /// action cuts power.
-    pub pending_outlet: Option<String>,
-    pub outlet_confirm_text: String,
-    /// The outlet whose cycle is in flight — no re-arming until it resolves.
-    pub outlet_inflight: Option<String>,
-    /// The most recent outcome, for the panel's footer.
-    pub outlet_last: Option<OutletStatus>,
 }
 
 /// What the panel may offer for one outlet.
@@ -91,45 +75,86 @@ pub fn outlet_capability_key(origin: &zenkey::RemoteOrigin) -> String {
     zensight_common::origin_rpc_key(origin, "snmp", "action/capability")
 }
 
+/// The `action/set` write procedure this panel arms and sends (#956, #1261).
+const ACTION_SET: &str = "action/set";
+
+/// What this sensor will permit for `outlet` on `device`, from its own
+/// advertised gate, with `busy` the outlet whose cycle is in flight.
+///
+/// Shares [`OutletCapability::permits`] — and therefore
+/// `zensight_common::action::allows` — with the sensor's own gate, so the
+/// button and the decision cannot disagree about what a glob means.
+pub fn outlet_gate(
+    capability: Option<&OutletCapability>,
+    busy: Option<&str>,
+    device: &str,
+    outlet: &str,
+) -> OutletGate {
+    if busy == Some(outlet) {
+        return OutletGate::Busy;
+    }
+    let Some(cap) = capability else {
+        return OutletGate::Unknown;
+    };
+    if !cap.enabled {
+        return OutletGate::Disabled;
+    }
+    if cap.permits(&format!("{device}/{outlet}")) {
+        OutletGate::Allowed
+    } else {
+        OutletGate::NotAllowed
+    }
+}
+
+/// How a finished outlet cycle reads (#956): accepted and clean is the
+/// cycle; anything else is the sensor's own reason.
+pub fn write_outcome(
+    armed: &crate::call::Armed,
+    result: &Result<crate::call::Reply, crate::call::WriteFailure>,
+) -> (crate::view::toast::ToastSeverity, String) {
+    use crate::view::toast::ToastSeverity;
+    match result {
+        Ok(reply) => match reply.decode::<OutletStatus>() {
+            Ok(status) => {
+                let ok = status.accepted && status.error.is_none();
+                let message = if ok {
+                    format!("Cycling outlet {}/{}", status.device, status.outlet)
+                } else {
+                    status
+                        .error
+                        .clone()
+                        .or_else(|| status.reason.clone())
+                        .unwrap_or_else(|| "the sensor refused".to_string())
+                };
+                (
+                    if ok {
+                        ToastSeverity::Success
+                    } else {
+                        ToastSeverity::Error
+                    },
+                    message,
+                )
+            }
+            Err(e) => (
+                ToastSeverity::Error,
+                format!("{}: undecodable outlet reply — {e}", armed.label),
+            ),
+        },
+        // A refusal is an `error/gated` reply carrying the switch that
+        // refused (#866/#957) — surfaced verbatim, because "which of the four
+        // gates" is the whole answer.
+        Err(failure) => (
+            if failure.is_warning() {
+                ToastSeverity::Warning
+            } else {
+                ToastSeverity::Error
+            },
+            failure.sentence(),
+        ),
+    }
+}
+
 impl SnmpDetailState {
-    /// What this sensor will permit for `outlet` on `device`, from its own
-    /// advertised gate.
-    ///
-    /// Shares [`OutletCapability::permits`] — and therefore
-    /// `zensight_common::action::allows` — with the sensor's own gate, so the
-    /// button and the decision cannot disagree about what a glob means.
-    pub fn outlet_gate(
-        &self,
-        capability: Option<&OutletCapability>,
-        device: &str,
-        outlet: &str,
-    ) -> OutletGate {
-        if self.outlet_inflight.as_deref() == Some(outlet) {
-            return OutletGate::Busy;
-        }
-        let Some(cap) = capability else {
-            return OutletGate::Unknown;
-        };
-        if !cap.enabled {
-            return OutletGate::Disabled;
-        }
-        if cap.permits(&format!("{device}/{outlet}")) {
-            OutletGate::Allowed
-        } else {
-            OutletGate::NotAllowed
-        }
-    }
-
-    /// Whether the typed confirmation matches the armed outlet.
-    ///
-    /// Exact, and trimmed only of surrounding whitespace: the point of typing
-    /// the name is that it cannot be produced by a slip.
-    pub fn outlet_confirmation_matches(&self) -> bool {
-        self.pending_outlet
-            .as_deref()
-            .is_some_and(|o| self.outlet_confirm_text.trim() == o)
-    }
-
     /// Outlet ids this device has published, with their state — from the raw
     /// metric tree (`pdu/outlet/{index}/state`, #955).
     ///
@@ -284,7 +309,6 @@ pub fn snmp_device_view(state: &DeviceDetailState) -> Element<'_, Message> {
 /// probe has not answered and the device is not a PDU anyway. What is left is
 /// a panel that appears only where an operator can actually act.
 fn render_outlets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
-    let d = &state.snmp_detail;
     let outlets = SnmpDetailState::outlets(&state.metrics);
     if outlets.is_empty() {
         return None;
@@ -307,7 +331,7 @@ fn render_outlets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
     let device = state.device_id.source.as_str();
     let mut rows = WColumn::new().spacing(space::XS);
     for (outlet, on) in &outlets {
-        rows = rows.push(outlet_row(d, capability, device, outlet.clone(), *on));
+        rows = rows.push(outlet_row(state, capability, device, outlet.clone(), *on));
     }
 
     let mut panel = column![
@@ -330,7 +354,7 @@ fn render_outlets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
     }
     panel = panel.push(rows);
 
-    if let Some(last) = &d.outlet_last {
+    if let Some(last) = state.writes.last_as::<OutletStatus>(ACTION_SET) {
         let detail = last
             .error
             .clone()
@@ -351,7 +375,7 @@ fn render_outlets(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
 }
 
 fn outlet_row<'a>(
-    d: &'a SnmpDetailState,
+    state: &'a DeviceDetailState,
     capability: Option<&'a OutletCapability>,
     device: &str,
     // Owned: the outlet ids are derived from the metric map inside
@@ -373,31 +397,53 @@ fn outlet_row<'a>(
         None => "—",
     };
 
-    let control: Element<'a, Message> = if d.pending_outlet.as_deref() == Some(outlet.as_str()) {
+    let armed = state
+        .writes
+        .armed_for(ACTION_SET)
+        .filter(|a| a.field("outlet") == Some(outlet.as_str()));
+    let control: Element<'a, Message> = if let Some(armed) = armed {
         // Armed: the confirmation is typing the outlet's own name. A
         // `[confirm]` button one slip away from a live one is not a
         // confirmation, and this cuts power to whatever is plugged in.
-        let matches = d.outlet_confirmation_matches();
+        let matches = armed.confirmed();
         row![
             text(format!("type \"{outlet}\" to cycle:")).size(font::CAPTION),
-            iced::widget::text_input("", &d.outlet_confirm_text)
-                .on_input(Message::SnmpOutletConfirmTextChanged)
+            iced::widget::text_input("", &armed.typed)
+                .on_input(Message::ConfirmText)
                 .size(font::CAPTION)
                 .width(Length::Fixed(90.0)),
-            tiny_button(
-                "cycle".into(),
-                matches.then_some(Message::SnmpOutletConfirm)
-            ),
-            tiny_button("cancel".into(), Some(Message::SnmpOutletCancel)),
+            tiny_button("cycle".into(), matches.then_some(Message::Confirm)),
+            tiny_button("cancel".into(), Some(Message::Disarm)),
         ]
         .spacing(space::XS)
         .align_y(Alignment::Center)
         .into()
     } else {
-        match d.outlet_gate(capability, device, &outlet) {
+        let busy = state
+            .writes
+            .inflight_for(ACTION_SET)
+            .and_then(|a| a.field("outlet"));
+        match outlet_gate(capability, busy, device, &outlet) {
             OutletGate::Busy => text("cycling…").size(font::CAPTION).style(dim).into(),
             OutletGate::Allowed => {
-                tiny_button("cycle".into(), Some(Message::SnmpOutletArm(outlet.clone())))
+                let request = zensight_common::outlet::OutletAction {
+                    device: device.to_string(),
+                    outlet: outlet.clone(),
+                    verb: zensight_common::outlet::OutletVerb::Cycle,
+                };
+                tiny_button(
+                    "cycle".into(),
+                    Some(Message::Arm(crate::call::Armed {
+                        procedure: ACTION_SET.to_string(),
+                        request: serde_json::to_value(&request).unwrap_or_default(),
+                        label: format!("cycle outlet {device}/{outlet}"),
+                        confirmation: crate::call::Confirmation::Typed {
+                            expected: outlet.clone(),
+                        },
+                        typed: String::new(),
+                        timeout: std::time::Duration::from_secs(30),
+                    })),
+                )
             }
             // Outside the allowlist: say so rather than offering nothing,
             // because "this outlet, deliberately not" is different from "this
@@ -1080,60 +1126,36 @@ mod outlet_tests {
     /// matcher — so the button and the decision cannot disagree about a glob.
     #[test]
     fn the_gate_mirrors_what_the_sensor_advertises() {
-        let mut d = SnmpDetailState::default();
-        assert_eq!(d.outlet_gate(None, "pdu-a", "3"), OutletGate::Unknown);
+        assert_eq!(outlet_gate(None, None, "pdu-a", "3"), OutletGate::Unknown);
 
         let off = cap(false, &[]);
         assert_eq!(
-            d.outlet_gate(Some(&off), "pdu-a", "3"),
+            outlet_gate(Some(&off), None, "pdu-a", "3"),
             OutletGate::Disabled
         );
 
         let empty = cap(true, &[]);
         assert_eq!(
-            d.outlet_gate(Some(&empty), "pdu-a", "3"),
+            outlet_gate(Some(&empty), None, "pdu-a", "3"),
             OutletGate::NotAllowed,
             "an empty allowlist permits nothing even with the switch on"
         );
 
         let scoped = cap(true, &["pdu-a/*"]);
         assert_eq!(
-            d.outlet_gate(Some(&scoped), "pdu-a", "3"),
+            outlet_gate(Some(&scoped), None, "pdu-a", "3"),
             OutletGate::Allowed
         );
         assert_eq!(
-            d.outlet_gate(Some(&scoped), "pdu-b", "3"),
+            outlet_gate(Some(&scoped), None, "pdu-b", "3"),
             OutletGate::NotAllowed,
             "a different PDU is not covered"
         );
 
-        d.outlet_inflight = Some("3".to_string());
-        assert_eq!(d.outlet_gate(Some(&scoped), "pdu-a", "3"), OutletGate::Busy);
-    }
-
-    /// **Typing the name is the confirmation.** A `[confirm]` button one slip
-    /// away from a live one is not a confirmation, and this cuts power.
-    #[test]
-    fn the_confirmation_must_match_the_outlet_exactly() {
-        let mut d = SnmpDetailState::default();
-        d.pending_outlet = Some("3".to_string());
-
-        for typed in ["", "4", "33", "outlet 3", "  "] {
-            d.outlet_confirm_text = typed.to_string();
-            assert!(
-                !d.outlet_confirmation_matches(),
-                "{typed:?} must not arm the button"
-            );
-        }
-        d.outlet_confirm_text = "3".to_string();
-        assert!(d.outlet_confirmation_matches());
-        // Surrounding whitespace is forgiven; nothing else is.
-        d.outlet_confirm_text = " 3 ".to_string();
-        assert!(d.outlet_confirmation_matches());
-
-        // Nothing armed: nothing matches, whatever is typed.
-        d.pending_outlet = None;
-        assert!(!d.outlet_confirmation_matches());
+        assert_eq!(
+            outlet_gate(Some(&scoped), Some("3"), "pdu-a", "3"),
+            OutletGate::Busy
+        );
     }
 
     /// The raw outlet state is vendor-specific — APC off(1)/on(2), Eaton and

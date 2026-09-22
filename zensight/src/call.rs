@@ -13,9 +13,16 @@
 //! here, keyed by procedure, as a JSON value a bespoke view decodes when it
 //! wants a type and the default view renders as it is.
 //!
-//! **What this is not.** Not a write path: a write procedure goes through the
-//! audited seam and its form renders from the request schema (the next step
-//! of #1261). Not a subscription: a call is one answer, once.
+//! **Writes** are the other half (#1261, design §5.5): a write procedure is a
+//! GET *with a body* on `@rpc/<producer>/<procedure>`, answered through the
+//! producer's audited seam (`served::serve_write_queryable`, #957) — a value
+//! reply is the outcome, an `error/gated` reply error is the refusal, and it
+//! names the switch that refused. The GUI arms one ([`Armed`]: the request,
+//! how it is confirmed, how long to wait), confirms it, and lands the outcome
+//! in [`Writes`]; [`write`] is the transport. A write is addressed to one
+//! origin and nothing else: there is no fleet spelling of it here, because
+//! "restart nginx" on every host serving the sensor is not a slip a GUI may
+//! make. Not a subscription: a call is one answer, once.
 //!
 //! **Stale answers.** The old arms dropped a reply into whatever device was
 //! selected when it arrived, and a slow answer to an old sort overwrote the
@@ -452,10 +459,308 @@ pub fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// How an armed write is confirmed before it is sent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirmation {
+    /// A second click: the row swaps to confirm/cancel.
+    Click,
+    /// Typing `expected` — for an action that cuts power: a `[confirm]`
+    /// button one slip away from a live one is not a confirmation.
+    Typed { expected: String },
+}
+
+/// A write procedure the operator has armed and not yet confirmed (#1261):
+/// what will be sent, how it reads on screen, and how it is confirmed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Armed {
+    pub procedure: String,
+    /// The request body as JSON — the request type the registry declares.
+    pub request: serde_json::Value,
+    /// How the action reads in a sentence (`restart nginx.service`,
+    /// `cycle outlet pdu-a/3`).
+    pub label: String,
+    pub confirmation: Confirmation,
+    /// What the operator has typed so far, for a [`Confirmation::Typed`].
+    pub typed: String,
+    /// How long to wait for the outcome: past a producer's own job wait
+    /// (systemd blocks until the job resolves), or an action reads as a
+    /// failure while it is still succeeding.
+    pub timeout: std::time::Duration,
+}
+
+impl Armed {
+    /// Whether the confirmation holds. Typed: exact, trimmed only of
+    /// surrounding whitespace — the point of typing the name is that it
+    /// cannot be produced by a slip.
+    pub fn confirmed(&self) -> bool {
+        match &self.confirmation {
+            Confirmation::Click => true,
+            Confirmation::Typed { expected } => self.typed.trim() == expected,
+        }
+    }
+
+    /// A string field of the request, for a view matching a row to the
+    /// write that is armed or in flight on it.
+    pub fn field(&self, name: &str) -> Option<&str> {
+        self.request.get(name).and_then(|v| v.as_str())
+    }
+}
+
+/// Why a write produced no outcome value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteFailure {
+    /// The producer refused: the `error/gated` reply error it sent back,
+    /// with the switch that refused when it named one (#866, #957).
+    Refused {
+        error: String,
+        message: String,
+        refused_by: Option<String>,
+    },
+    /// Replies closed well before the deadline — nobody serves the key, so
+    /// the action is off or the producer is offline.
+    NotServed,
+    /// The deadline elapsed. The request may have been accepted and may
+    /// still be running; this is emphatically not a failure, and must not be
+    /// reported as one.
+    StillRunning {
+        waited_secs: u64,
+    },
+    Transport(String),
+}
+
+impl WriteFailure {
+    /// The sentence a toast shows.
+    pub fn sentence(&self) -> String {
+        match self {
+            WriteFailure::Refused {
+                error,
+                message,
+                refused_by,
+            } => match refused_by {
+                Some(switch) => format!("Refused — {error}: {message} (refused by {switch})"),
+                None => format!("Refused — {error}: {message}"),
+            },
+            WriteFailure::NotServed => {
+                "nothing serves this procedure on this host — the action is disabled or the sensor is offline"
+                    .to_string()
+            }
+            WriteFailure::StillRunning { waited_secs } => {
+                format!("No reply within {waited_secs}s — the job may still be running")
+            }
+            WriteFailure::Transport(e) => format!("failed: {e}"),
+        }
+    }
+
+    /// A deadline that elapsed is a warning, everything else an error.
+    pub fn is_warning(&self) -> bool {
+        matches!(self, WriteFailure::StillRunning { .. })
+    }
+}
+
+/// The write machine of a device view (#1261): one armed write, one in
+/// flight, and the last outcome per procedure.
+#[derive(Debug, Clone, Default)]
+pub struct Writes {
+    pub armed: Option<Armed>,
+    /// Issued and not yet answered. A producer's write blocks until the job
+    /// resolves, so without this a second click would queue a second job.
+    pub inflight: Option<Armed>,
+    /// The last outcome per procedure: the reply, or the failure's sentence.
+    pub last: BTreeMap<String, Result<Reply, String>>,
+}
+
+impl Writes {
+    pub fn arm(&mut self, armed: Armed) {
+        self.armed = Some(armed);
+    }
+
+    pub fn disarm(&mut self) {
+        self.armed = None;
+    }
+
+    pub fn typed(&mut self, typed: String) {
+        if let Some(armed) = &mut self.armed {
+            armed.typed = typed;
+        }
+    }
+
+    /// Take the armed write if its confirmation holds — the check the app
+    /// repeats, so a message arriving any other way cannot skip it.
+    pub fn confirm(&mut self) -> Option<Armed> {
+        if self.armed.as_ref().is_some_and(Armed::confirmed) {
+            self.armed.take()
+        } else {
+            None
+        }
+    }
+
+    /// The armed write to `procedure`, if that is what is armed.
+    pub fn armed_for(&self, procedure: &str) -> Option<&Armed> {
+        self.armed.as_ref().filter(|a| a.procedure == procedure)
+    }
+
+    /// The write to `procedure` in flight, if one is.
+    pub fn inflight_for(&self, procedure: &str) -> Option<&Armed> {
+        self.inflight.as_ref().filter(|a| a.procedure == procedure)
+    }
+
+    /// The last outcome of `procedure` as a type, when it answered.
+    pub fn last_as<T: DeserializeOwned>(&self, procedure: &str) -> Option<T> {
+        self.last
+            .get(procedure)?
+            .as_ref()
+            .ok()
+            .and_then(|reply| reply.decode::<T>().ok())
+    }
+}
+
+/// GET a write procedure with a body on one origin, and read the outcome
+/// (#1261). Iced-independent.
+///
+/// A concrete single-origin key has exactly one queryable, so BestMatching
+/// is the honest target here; QueryTarget::All is for fleet fan-in (RFC 05
+/// §2.1). Zenoh reports "nobody served the key" and "the deadline elapsed"
+/// identically, as a closed reply channel; elapsed time against the deadline
+/// is the only way to tell them apart — a heuristic, but the two need very
+/// different wording: one is an error, the other a job that may well be
+/// succeeding.
+pub async fn write(
+    session: Arc<zenoh::Session>,
+    origin: zenkey::RemoteOrigin,
+    producer: String,
+    procedure: String,
+    request: serde_json::Value,
+    timeout: std::time::Duration,
+) -> Result<Reply, WriteFailure> {
+    let key = zensight_common::origin_rpc_key(&origin, &producer, &procedure);
+    let payload = serde_json::to_vec(&request)
+        .map_err(|e| WriteFailure::Transport(format!("Failed to encode request: {e}")))?;
+    let started = std::time::Instant::now();
+    let replies = session
+        .get(&key)
+        .payload(payload)
+        .target(zenoh::query::QueryTarget::BestMatching)
+        .timeout(timeout)
+        .await
+        .map_err(|e| WriteFailure::Transport(e.to_string()))?;
+    match replies.recv_async().await {
+        Ok(reply) => match reply.result() {
+            Ok(sample) => decode_with_encoding::<serde_json::Value>(
+                sample.encoding(),
+                &sample.payload().to_bytes(),
+            )
+            .map(|value| Reply::new(value, now_ms()))
+            .map_err(|e| WriteFailure::Transport(format!("Undecodable reply: {e}"))),
+            Err(err) => {
+                let parsed: Option<zensight_common::rpc::RpcError> =
+                    serde_json::from_slice(&err.payload().to_bytes()).ok();
+                Err(match parsed {
+                    Some(e) => WriteFailure::Refused {
+                        error: e.error,
+                        message: e.message,
+                        refused_by: e.refused_by,
+                    },
+                    None => WriteFailure::Refused {
+                        error: "error".to_string(),
+                        message: "refused".to_string(),
+                        refused_by: None,
+                    },
+                })
+            }
+        },
+        Err(_) => {
+            let waited = started.elapsed();
+            if waited + std::time::Duration::from_millis(250) >= timeout {
+                Err(WriteFailure::StillRunning {
+                    waited_secs: waited.as_secs(),
+                })
+            } else {
+                Err(WriteFailure::NotServed)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn armed(confirmation: Confirmation) -> Armed {
+        Armed {
+            procedure: "action/set".into(),
+            request: json!({ "device": "pdu-a", "outlet": "3", "verb": "cycle" }),
+            label: "cycle outlet pdu-a/3".into(),
+            confirmation,
+            typed: String::new(),
+            timeout: std::time::Duration::from_secs(30),
+        }
+    }
+
+    /// **Typing the name is the confirmation.** A `[confirm]` button one slip
+    /// away from a live one is not a confirmation, and this cuts power.
+    #[test]
+    fn a_typed_confirmation_must_match_exactly() {
+        let mut a = armed(Confirmation::Typed {
+            expected: "3".into(),
+        });
+        for typed in ["", "4", "33", "outlet 3", "  "] {
+            a.typed = typed.to_string();
+            assert!(!a.confirmed(), "{typed:?} must not arm the button");
+        }
+        a.typed = "3".into();
+        assert!(a.confirmed());
+        // Surrounding whitespace is forgiven; nothing else is.
+        a.typed = " 3 ".into();
+        assert!(a.confirmed());
+        assert!(armed(Confirmation::Click).confirmed());
+        assert_eq!(a.field("outlet"), Some("3"));
+        assert_eq!(a.field("missing"), None);
+    }
+
+    #[test]
+    fn the_write_machine_confirms_only_what_holds() {
+        let mut w = Writes::default();
+        assert!(w.confirm().is_none(), "nothing armed, nothing to confirm");
+        w.arm(armed(Confirmation::Typed {
+            expected: "3".into(),
+        }));
+        assert!(w.armed_for("action/set").is_some());
+        assert!(w.armed_for("other").is_none());
+        assert!(w.confirm().is_none(), "not typed yet");
+        assert!(w.armed.is_some(), "a failed confirm keeps the arming");
+        w.typed("3".into());
+        let taken = w.confirm().expect("confirmed");
+        assert!(w.armed.is_none());
+        w.inflight = Some(taken);
+        assert!(w.inflight_for("action/set").is_some());
+        w.disarm();
+        w.last.insert(
+            "action/set".into(),
+            Ok(Reply::new(json!({ "accepted": true, "outlet": "3" }), 0)),
+        );
+        let last: serde_json::Value = w.last_as("action/set").expect("decoded");
+        assert_eq!(last["outlet"], json!("3"));
+        w.last.insert("action/set".into(), Err("boom".into()));
+        assert!(w.last_as::<serde_json::Value>("action/set").is_none());
+    }
+
+    #[test]
+    fn a_failure_has_a_sentence_and_a_severity() {
+        let refused = WriteFailure::Refused {
+            error: "error/gated".into(),
+            message: "actions are off".into(),
+            refused_by: Some("actions.enabled".into()),
+        };
+        assert_eq!(
+            refused.sentence(),
+            "Refused — error/gated: actions are off (refused by actions.enabled)"
+        );
+        assert!(!refused.is_warning());
+        let late = WriteFailure::StillRunning { waited_secs: 35 };
+        assert!(late.is_warning());
+        assert!(late.sentence().contains("35s"));
+    }
 
     fn test_origin() -> zenkey::RemoteOrigin {
         zenkey::RemoteOrigin::parse("h-3fa9c2d41b7e").expect("valid test origin")

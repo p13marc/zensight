@@ -306,6 +306,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `query_parallax_streams`, `query_snmp_outlet_capability`. `Message` is
   375 variants — 62 fewer than before #1261 began, every `Fetch*`/`*Received`
   pair gone.
+- **One write path: `Arm` / `Confirm` / `Written` replace systemd's and
+  snmp's action machines** (#1261, design §5.5). A write procedure is armed
+  with the request type the registry declares (`call::Armed`: procedure,
+  request, label, a click or typed confirmation, the deadline), confirmed
+  only when the confirmation holds — checked again in the app — and sent by
+  `call::write` to the device's own origin with no fleet fallback; the
+  outcome lands in `DeviceDetailState::writes`, is toasted in the producer's
+  own words (`specialized::write_outcome`) and re-calls what it moved
+  (`specialized::after_write`). `WriteFailure` names the refusing switch and
+  tells "nobody serves it" from "still running". Gone:
+  `SystemdUnitAction{Arm,Cancel,Confirm,Result}`,
+  `SnmpOutlet{Arm,ConfirmTextChanged,Cancel,Confirm,ActionResult}`,
+  `ActionFailure`, `SystemdDetailState::{pending_action, action_inflight}`,
+  `SnmpDetailState::{pending_outlet, outlet_confirm_text, outlet_inflight,
+  outlet_last}`, `call_systemd_action`, `call_snmp_outlet_action`,
+  `apply_systemd_action_result`, `selected_origin_for`. `Message` is 371
+  variants.
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in

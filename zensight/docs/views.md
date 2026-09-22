@@ -337,6 +337,29 @@ per-producer is navigation, the write paths and their state machines
 (systemd's action, snmp's outlet, netring's captures and tuning, parallax's
 tiles), and the projections that are not answers to a call.
 
+**Writes** are the other half (#1261, design §5.5). A write procedure is a
+GET with a body on `@rpc/<producer>/<procedure>`, answered through the
+producer's audited seam (#957): a value reply is the outcome, an
+`error/gated` reply error the refusal, naming the switch that refused. The
+GUI arms one — `Message::Arm(call::Armed { procedure, request, label,
+confirmation, timeout })`, the request being the type the registry declares
+— the row swaps to its confirmation (`Confirmation::Click`, or
+`Confirmation::Typed { expected }` for an action that cuts power, where
+typing the outlet's own name is the confirmation), and `Message::Confirm`
+sends it only when the confirmation holds, checked again in the app.
+`call::write` addresses the device's own origin and nothing else — there is
+no fleet spelling of a write here — with the deadline the view chose (past
+systemd's own job wait), and tells "nobody serves it" from "still running"
+by elapsed time, the same heuristic the old arms used. The outcome lands as
+`Message::Written` in `DeviceDetailState::writes` (`armed`, `inflight`, the
+`last` outcome per procedure), is toasted in the producer's own words
+(`specialized::write_outcome` — systemd's job results and snmp's outlet
+outcome keep their phrasing; anything else reads the reply's `accepted`,
+`error`, `reason`, `result`), and re-calls what it moved
+(`specialized::after_write` — systemd's units and the open unit). What is
+left of the two action machines is nothing: `SystemdDetailState` holds the
+job counter, `SnmpDetailState` the interface doc and its events.
+
 ## Routing: `CurrentView`
 
 `CurrentView` (in `src/app.rs`) enumerates the routable views:

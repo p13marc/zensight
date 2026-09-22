@@ -26,6 +26,76 @@ pub mod systemd_detail;
 
 use iced::{Element, Length};
 
+/// How a finished write reads in a toast (#1261): the producer's own
+/// phrasing when its view has one (systemd's job results, snmp's outlet
+/// outcome), else the generic reading of the reply's `accepted`, `error`,
+/// `reason` and `result` fields.
+pub fn write_outcome(
+    producer: &str,
+    armed: &crate::call::Armed,
+    result: &Result<crate::call::Reply, crate::call::WriteFailure>,
+) -> (crate::view::toast::ToastSeverity, String) {
+    match producer {
+        "systemd" => systemd::write_outcome(armed, result),
+        "snmp" => snmp::write_outcome(armed, result),
+        _ => generic_write_outcome(armed, result),
+    }
+}
+
+/// The reply fields every write outcome may carry, read without a type.
+fn generic_write_outcome(
+    armed: &crate::call::Armed,
+    result: &Result<crate::call::Reply, crate::call::WriteFailure>,
+) -> (crate::view::toast::ToastSeverity, String) {
+    use crate::view::toast::ToastSeverity;
+    let label = &armed.label;
+    match result {
+        Ok(reply) => {
+            let detail = ["error", "reason", "result"]
+                .iter()
+                .find_map(|k| reply.value.get(*k).and_then(|v| v.as_str()))
+                .map(str::to_string);
+            match reply.value.get("accepted").and_then(|v| v.as_bool()) {
+                Some(false) => (
+                    ToastSeverity::Error,
+                    format!(
+                        "{label} refused: {}",
+                        detail.unwrap_or_else(|| "no reason given".into())
+                    ),
+                ),
+                _ => (
+                    ToastSeverity::Success,
+                    format!("{label}: {}", detail.unwrap_or_else(|| "done".into())),
+                ),
+            }
+        }
+        Err(failure) => (
+            if failure.is_warning() {
+                ToastSeverity::Warning
+            } else {
+                ToastSeverity::Error
+            },
+            format!("{label}: {}", failure.sentence()),
+        ),
+    }
+}
+
+/// What to re-call after a write (#1261): the procedures whose answer the
+/// write may have moved, as the producer's view knows them. Refreshing
+/// immediately rather than sleeping first: a value one poll stale resolves
+/// visibly, and a sleep here is the anti-pattern this replaced.
+pub fn after_write(
+    producer: &str,
+    state: &DeviceDetailState,
+    armed: &crate::call::Armed,
+    result: &Result<crate::call::Reply, crate::call::WriteFailure>,
+) -> Vec<(String, String)> {
+    match producer {
+        "systemd" => systemd::after_write(state, armed, result),
+        _ => Vec::new(),
+    }
+}
+
 use zensight_common::Protocol;
 
 use crate::message::Message;
