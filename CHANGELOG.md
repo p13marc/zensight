@@ -361,6 +361,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   addresses and the edge's endpoints at decode; `PanelData` keeps only its
   `Calls`. `TopologyDragNodeStart` had no emitter and is gone. The
   `update_topology_msg` stage is gone. `Message` is 216 variants.
+  **The bus explorer follows**: `Message::Explorer(explorer::Action)`
+  replaces its ten variants; `ExplorerState` holds the pump's control
+  handle (it was the app's `explorer_ctl`) and sends the watch, inspect and
+  shutdown commands itself, so `update` has no effect to hand back. The
+  pump and the demo stream yield through `explorer::{started, tick, error,
+  stopped}`. `Message` is 207 variants.
 
 - **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
   writes — netring's detector toggles, thresholds, allowlist, capture filter,

@@ -1205,7 +1205,7 @@ pub mod explorer {
             }
 
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            yield Message::ExplorerStarted(ExplorerCtl::new(tx));
+            yield crate::view::explorer::started(ExplorerCtl::new(tx));
 
             let mut interval = tokio::time::interval(Duration::from_millis(250));
             let mut inspect: Option<String> = None;
@@ -1215,7 +1215,7 @@ pub mod explorer {
                     cmd = rx.recv() => match cmd {
                         Some(ExplorerCmd::Inspect(key)) => { inspect = key; None }
                         Some(ExplorerCmd::Watch(_)) | Some(ExplorerCmd::Unwatch(_)) => {
-                            Some(Message::ExplorerError(
+                            Some(crate::view::explorer::error(
                                 "demo mode publishes a fixed feed — watches need a live connection"
                                     .into(),
                             ))
@@ -1243,7 +1243,7 @@ pub mod explorer {
                             let view = retained.iter().rev().find(|v| v.key == key)?;
                             Some(InspectedSample::of(view, core.declared_type(key)))
                         });
-                        Some(Message::ExplorerTick(Arc::new(
+                        Some(crate::view::explorer::tick(Arc::new(
                             core.snapshot(&mcore, Vec::new(), inspected),
                         )))
                     }
@@ -1252,7 +1252,7 @@ pub mod explorer {
                     yield msg;
                 }
             }
-            yield Message::ExplorerStopped;
+            yield crate::view::explorer::stopped();
         }
     }
 }
@@ -1271,15 +1271,20 @@ mod explorer_demo_tests {
     async fn demo_stream_speaks_the_pump_protocol() {
         let mut stream = Box::pin(super::explorer::demo_stream());
         let first = stream.next().await.expect("a first message");
-        assert!(matches!(first, Message::ExplorerStarted(_)));
+        assert!(matches!(
+            first,
+            Message::Explorer(crate::view::explorer::Action::Started(_))
+        ));
 
         // Ticks arrive every 250ms; the 4th carries the health samples,
         // including netlink's wrong-axes offender.
         let mut last = None;
         for _ in 0..5 {
             match stream.next().await.expect("a tick") {
-                Message::ExplorerTick(snap) => last = Some(snap),
-                Message::ExplorerError(e) => panic!("demo pump errored: {e}"),
+                Message::Explorer(crate::view::explorer::Action::Tick(snap)) => last = Some(snap),
+                Message::Explorer(crate::view::explorer::Action::Error(e)) => {
+                    panic!("demo pump errored: {e}")
+                }
                 other => panic!("unexpected message: {other:?}"),
             }
         }

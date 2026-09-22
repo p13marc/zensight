@@ -348,11 +348,6 @@ pub struct ZenSight {
     persisted_dirty: bool,
     /// Bus-explorer view state (#748): the live key-tree and its ledgers.
     explorer: crate::view::explorer::ExplorerState,
-    /// Command handle on the running explorer pump (`None` = no pump). The
-    /// pump owns the `Monitor` — a monitor belongs to the session it was
-    /// declared on, so this is dropped on (dis)connect like
-    /// `fleet_queriers`.
-    explorer_ctl: Option<crate::view::explorer::pump::ExplorerCtl>,
     /// Local tiered time-series store (hot ring + redb), Plan v3-04 §A / #22.
     /// Telemetry writes through it; charts read from it so trends survive restart.
     store: zensight_store::MetricStore,
@@ -613,7 +608,6 @@ impl ZenSight {
             persisted: persistent.clone(),
             persisted_dirty: false,
             explorer: crate::view::explorer::ExplorerState::default(),
-            explorer_ctl: None,
             // In demo mode keep history in-memory only (no disk churn / restart survival
             // for synthetic data); otherwise open the persistent tiered store.
             store: {
@@ -1721,9 +1715,7 @@ impl ZenSight {
                 // Same rule for the explorer's monitor (#748): the old pump
                 // rides the old session; ask it to tear down. Re-opening the
                 // view starts a fresh one on this session.
-                if let Some(ctl) = self.explorer_ctl.take() {
-                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Shutdown);
-                }
+                self.explorer.shutdown_pump();
                 self.dashboard.connected = true;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Connected;
@@ -1781,9 +1773,7 @@ impl ZenSight {
                 // The explorer's monitor rode that session (#748). The last
                 // snapshot stays readable — a dead fleet's final tree is
                 // still evidence.
-                if let Some(ctl) = self.explorer_ctl.take() {
-                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Shutdown);
-                }
+                self.explorer.shutdown_pump();
                 self.dashboard.connected = false;
                 self.dashboard.connection_state =
                     crate::view::dashboard::ConnectionState::Disconnected;
@@ -2464,57 +2454,9 @@ impl ZenSight {
                 self.explorer.ensure_fresh();
                 return self.start_explorer();
             }
-            Message::ExplorerStarted(ctl) => {
-                self.explorer_ctl = Some(ctl);
-                self.explorer.running = true;
-                self.explorer.error = None;
-            }
-            Message::ExplorerTick(snapshot) => {
-                // The flatten is gated on the view being on screen (#1124):
-                // `recompute` walks up to 10 000 keys four times a second, and
-                // nothing reads `rows` from anywhere else. The pump itself
-                // deliberately outlives the view — that part is documented —
-                // so returning shows live data rather than a blank tree.
-                self.explorer
-                    .apply_tick(snapshot, self.current_view == CurrentView::Explorer);
-            }
-            Message::ExplorerWatchInput(input) => {
-                self.explorer.watch_input = input;
-            }
-            Message::ExplorerWatchSubmit => {
-                let selector = self.explorer.watch_input.trim().to_string();
-                if !selector.is_empty()
-                    && let Some(ctl) = &self.explorer_ctl
-                {
-                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Watch(selector));
-                    self.explorer.watch_input.clear();
-                }
-            }
-            Message::ExplorerUnwatch(id) => {
-                if let Some(ctl) = &self.explorer_ctl {
-                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Unwatch(id));
-                }
-            }
-            Message::ExplorerToggleNode(path) => {
-                self.explorer.toggle(path);
-            }
-            Message::ExplorerSelectKey(key) => {
-                self.explorer.selected = key.clone();
-                if let Some(ctl) = &self.explorer_ctl {
-                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Inspect(key));
-                }
-            }
-            Message::ExplorerStop => {
-                if let Some(ctl) = &self.explorer_ctl {
-                    ctl.send(crate::view::explorer::pump::ExplorerCmd::Shutdown);
-                }
-            }
-            Message::ExplorerStopped => {
-                self.explorer_ctl = None;
-                self.explorer.running = false;
-            }
-            Message::ExplorerError(e) => {
-                self.explorer.error = Some(e);
+            Message::Explorer(action) => {
+                let visible = self.current_view == CurrentView::Explorer;
+                self.explorer.update(action, visible);
             }
 
             Message::OpenSettings => {
@@ -6576,7 +6518,7 @@ impl ZenSight {
     /// a running pump (ctl present) is kept, so re-opening the view costs
     /// nothing and the accumulated rates/ledgers survive view switches.
     fn start_explorer(&mut self) -> Task<Message> {
-        if self.explorer_ctl.is_some() {
+        if self.explorer.ctl.is_some() {
             return Task::none();
         }
         if self.demo_mode {

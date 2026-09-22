@@ -4,7 +4,7 @@
 //! Architecture (see `docs/views.md`, "Bus Explorer"):
 //! - a **pump** ([`pump`]) owns the `zenkey_fleet::Monitor` on the GUI's
 //!   session and folds per-sample work off the GUI thread ([`core`]);
-//! - the GUI receives ~4 [`crate::message::Message::ExplorerTick`]s per
+//! - the GUI receives ~4 [`Action::Tick`]s (`Message::Explorer`) per
 //!   second, whatever the bus rate;
 //! - this module holds the per-view state and the pure render, per the
 //!   repo's view/state pattern;
@@ -33,6 +33,57 @@ use crate::view::tokens::{font, space};
 use core::ExplorerSnapshot;
 use tree::{Expansion, TreeRow, is_expanded, tree_rows};
 
+/// One explorer interaction or pump event (#1306): what the view's widgets
+/// and the pump stream emit, applied by [`ExplorerState::update`]. The
+/// state holds the pump's control handle, so a command is sent from there
+/// and the app has nothing to do afterwards.
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// The pump is up; the handle sends it watch/inspect/shutdown commands.
+    Started(pump::ExplorerCtl),
+    /// One stats tick's snapshot (~4/s regardless of bus rate): the key
+    /// tree, presence, the QoS ledger, and the four distinct loss counters.
+    Tick(Arc<ExplorerSnapshot>),
+    /// The watch-selector input changed.
+    WatchInput(String),
+    /// Declare the typed selector as a data-plane watch.
+    WatchSubmit,
+    /// Release one watch.
+    Unwatch(zenkey_fleet::WatchId),
+    /// Expand/collapse one tree node.
+    ToggleNode(String),
+    /// Select (or clear) the key the inspector shows.
+    SelectKey(Option<String>),
+    /// Ask the pump for an acknowledged teardown.
+    Stop,
+    /// The pump ended (after `Stop`, a disconnect, or a failure). The last
+    /// snapshot stays readable.
+    Stopped,
+    /// A pump-side failure worth showing (watch refused, monitor failed).
+    Error(String),
+}
+
+/// The pump's `Started` event as a message — for the two streams that
+/// yield it.
+pub fn started(ctl: pump::ExplorerCtl) -> Message {
+    Message::Explorer(Action::Started(ctl))
+}
+
+/// A tick's snapshot as a message.
+pub fn tick(snapshot: Arc<ExplorerSnapshot>) -> Message {
+    Message::Explorer(Action::Tick(snapshot))
+}
+
+/// A pump-side failure as a message.
+pub fn error(text: String) -> Message {
+    Message::Explorer(Action::Error(text))
+}
+
+/// The pump's end as a message.
+pub fn stopped() -> Message {
+    Message::Explorer(Action::Stopped)
+}
+
 /// Per-view state (the view/state pattern; `docs/views.md` L1).
 #[derive(Debug, Default)]
 pub struct ExplorerState {
@@ -51,6 +102,9 @@ pub struct ExplorerState {
     pub selected: Option<String>,
     pub watch_input: String,
     pub error: Option<String>,
+    /// The running pump's control handle (#748); `None` between pumps. A
+    /// reconnect or a disconnect takes it to ask the old pump to tear down.
+    pub ctl: Option<pump::ExplorerCtl>,
 }
 
 impl ExplorerState {
@@ -66,6 +120,62 @@ impl ExplorerState {
     ///
     /// `stale` marks that the rows no longer match the snapshot, so the next
     /// [`ensure_fresh`](Self::ensure_fresh) rebuilds them exactly once.
+    /// One interaction or pump event (#1306). `visible` gates the tick's
+    /// flatten: `recompute` walks up to 10 000 keys four times a second and
+    /// nothing reads `rows` off-screen; the pump itself outlives the view.
+    pub fn update(&mut self, action: Action, visible: bool) {
+        match action {
+            Action::Started(ctl) => {
+                self.ctl = Some(ctl);
+                self.running = true;
+                self.error = None;
+            }
+            Action::Tick(snapshot) => self.apply_tick(snapshot, visible),
+            Action::WatchInput(input) => self.watch_input = input,
+            Action::WatchSubmit => {
+                let selector = self.watch_input.trim().to_string();
+                if !selector.is_empty()
+                    && let Some(ctl) = &self.ctl
+                {
+                    ctl.send(pump::ExplorerCmd::Watch(selector));
+                    self.watch_input.clear();
+                }
+            }
+            Action::Unwatch(id) => {
+                if let Some(ctl) = &self.ctl {
+                    ctl.send(pump::ExplorerCmd::Unwatch(id));
+                }
+            }
+            Action::ToggleNode(path) => self.toggle(path),
+            Action::SelectKey(key) => {
+                self.selected = key.clone();
+                if let Some(ctl) = &self.ctl {
+                    ctl.send(pump::ExplorerCmd::Inspect(key));
+                }
+            }
+            Action::Stop => {
+                if let Some(ctl) = &self.ctl {
+                    ctl.send(pump::ExplorerCmd::Shutdown);
+                }
+            }
+            Action::Stopped => {
+                self.ctl = None;
+                self.running = false;
+            }
+            Action::Error(e) => self.error = Some(e),
+        }
+    }
+
+    /// Ask a running pump to tear down and forget its handle — on a
+    /// reconnect (the old pump rides the old session) or a disconnect. The
+    /// last snapshot stays readable: a dead fleet's final tree is still
+    /// evidence.
+    pub fn shutdown_pump(&mut self) {
+        if let Some(ctl) = self.ctl.take() {
+            ctl.send(pump::ExplorerCmd::Shutdown);
+        }
+    }
+
     pub fn apply_tick(&mut self, snapshot: Arc<ExplorerSnapshot>, visible: bool) {
         self.snapshot = Some(snapshot);
         if visible {
@@ -177,18 +287,18 @@ fn header<'a>(state: &'a ExplorerState, snapshot: &'a ExplorerSnapshot) -> Eleme
 
     let mut controls = row![
         text_input("watch selector, e.g. v1/**", &state.watch_input)
-            .on_input(Message::ExplorerWatchInput)
-            .on_submit(Message::ExplorerWatchSubmit)
+            .on_input(|v| Message::Explorer(Action::WatchInput(v)))
+            .on_submit(Message::Explorer(Action::WatchSubmit))
             .size(font::BODY)
             .width(280),
-        button(text("Watch").size(font::BODY)).on_press(Message::ExplorerWatchSubmit),
+        button(text("Watch").size(font::BODY)).on_press(Message::Explorer(Action::WatchSubmit)),
     ]
     .spacing(space::SM);
     if state.running {
         controls = controls.push(
             button(text("Stop").size(font::BODY))
                 .style(iced::widget::button::danger)
-                .on_press(Message::ExplorerStop),
+                .on_press(Message::Explorer(Action::Stop)),
         );
     }
     // Keys are shown as this session sees them: under a namespaced
@@ -208,7 +318,7 @@ fn header<'a>(state: &'a ExplorerState, snapshot: &'a ExplorerSnapshot) -> Eleme
                 r.push(
                     button(text(format!("{sel} ✕")).size(font::CAPTION))
                         .style(iced::widget::button::secondary)
-                        .on_press(Message::ExplorerUnwatch(*id)),
+                        .on_press(Message::Explorer(Action::Unwatch(*id))),
                 )
             });
         col = col.push(chips);
@@ -325,7 +435,7 @@ fn tree_row<'a>(r: &'a TreeRow, state: &'a ExplorerState) -> Element<'a, Message
         button(text(arrow).size(font::CAPTION))
             .style(iced::widget::button::text)
             .padding(0)
-            .on_press(Message::ExplorerToggleNode(r.path.clone()))
+            .on_press(Message::Explorer(Action::ToggleNode(r.path.clone())))
             .into()
     } else {
         text(arrow).size(font::CAPTION).into()
@@ -344,11 +454,11 @@ fn tree_row<'a>(r: &'a TreeRow, state: &'a ExplorerState) -> Element<'a, Message
                 iced::widget::button::text
             })
             .padding([0.0, space::XS])
-            .on_press(Message::ExplorerSelectKey(if selected {
+            .on_press(Message::Explorer(Action::SelectKey(if selected {
                 None
             } else {
                 Some(r.path.clone())
-            }))
+            })))
             .into()
     } else {
         label.into()
@@ -409,5 +519,36 @@ mod pump_tests {
         assert!(!state.stale);
         state.ensure_fresh();
         assert!(!state.stale, "and not again");
+    }
+}
+
+#[cfg(test)]
+mod actions {
+    use super::*;
+
+    /// A watch is sent to the pump and the input cleared only while a pump
+    /// runs; a submit with no pump changes nothing.
+    #[test]
+    fn watch_submit_sends_watch_and_clears_input() {
+        let mut e = ExplorerState::default();
+        e.update(Action::WatchInput(" v1/** ".into()), true);
+        e.update(Action::WatchSubmit, true);
+        assert_eq!(
+            e.watch_input, " v1/** ",
+            "no pump: nothing sent, nothing cleared"
+        );
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        e.update(Action::Started(pump::ExplorerCtl::new(tx)), true);
+        assert!(e.running);
+        e.update(Action::WatchSubmit, true);
+        assert!(e.watch_input.is_empty());
+        assert!(matches!(rx.try_recv(), Ok(pump::ExplorerCmd::Watch(s)) if s == "v1/**"));
+        e.update(Action::SelectKey(Some("v1/x".into())), true);
+        assert!(matches!(rx.try_recv(), Ok(pump::ExplorerCmd::Inspect(Some(k))) if k == "v1/x"));
+        e.shutdown_pump();
+        assert!(matches!(rx.try_recv(), Ok(pump::ExplorerCmd::Shutdown)));
+        assert!(e.ctl.is_none());
+        e.update(Action::Stopped, true);
+        assert!(!e.running);
     }
 }

@@ -353,29 +353,9 @@ pub enum Message {
 
     /// Open the bus-explorer view (#748) and start its monitor if none runs.
     OpenExplorer,
-    /// The explorer pump is up; the handle sends it watch/inspect/shutdown
-    /// commands.
-    ExplorerStarted(crate::view::explorer::pump::ExplorerCtl),
-    /// One stats tick's snapshot (~4/s regardless of bus rate): the key
-    /// tree, presence, the QoS ledger, and the four distinct loss counters.
-    ExplorerTick(std::sync::Arc<crate::view::explorer::core::ExplorerSnapshot>),
-    /// The watch-selector input changed.
-    ExplorerWatchInput(String),
-    /// Declare the typed selector as a data-plane watch.
-    ExplorerWatchSubmit,
-    /// Release one watch.
-    ExplorerUnwatch(zenkey_fleet::WatchId),
-    /// Expand/collapse one tree node.
-    ExplorerToggleNode(String),
-    /// Select (or clear) the key the inspector shows.
-    ExplorerSelectKey(Option<String>),
-    /// Ask the pump for an acknowledged teardown.
-    ExplorerStop,
-    /// The pump ended (after `ExplorerStop`, a disconnect, or a failure).
-    /// The last snapshot stays readable.
-    ExplorerStopped,
-    /// A pump-side failure worth showing (watch refused, monitor failed).
-    ExplorerError(String),
+    /// One bus-explorer interaction or pump event (#1306);
+    /// `ExplorerState::update` applies it and sends the pump its commands.
+    Explorer(crate::view::explorer::Action),
 
     /// Arm a write procedure on the selected device (#1261): what will be
     /// sent, how it reads, how it is confirmed. The row swaps to its
