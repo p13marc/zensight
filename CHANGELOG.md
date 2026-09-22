@@ -57,6 +57,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **parallax claims its cameras as hosts** (#413). A camera is a host on the
+  network, and until now nothing said so: its streams hung off the sensor's
+  own host card. `zensight-sensor-parallax` now publishes observer-role
+  `HostEvidence` on `state/parallax/evidence/device/<stream>` for every
+  configured RTSP target (what the URL says about the host — an IP, a bare or
+  `.local` name, or an FQDN — never the credentials) and, with a `discovery`
+  block, for every responder (address, advertised name, the ONVIF `hardware`
+  scope as a display-only `vendor`), keyed by the slug the proposal suggests
+  so an adopted camera keeps its key. Neither probe yields a MAC or a serial,
+  so the claims sit on the ip/fqdn/hostname rungs and add no correlator rule;
+  `host_id` is always absent, and local V4L2 devices get no claim (they are
+  `evidence/self`). Change-driven with a liveness refresh
+  (`parallax.evidence.refresh_secs`, 300 s; `enabled` and
+  `include_discovered` default on). Registry `parallax` 1.11 → 1.12
+  (`evidence/device/{device}`).
+
 - **`Publisher::publish_subject` — a telemetry key is rendered from the
   generated subject, not spelled** (#1274, the bullet #1153 deferred).
   `zensight_common::subject::TelemetrySubject` is implemented by every

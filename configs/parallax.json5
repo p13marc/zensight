@@ -70,6 +70,19 @@
     //   interval_secs: 3600,  // between rounds
     // },
 
+    // Identity evidence for the cameras (#413): an observer-role HostEvidence
+    // claim per configured RTSP target (and per discovered responder) on
+    // state/parallax/evidence/device/<stream>, so the correlator files a camera
+    // as a host and its streams become attributable. What a URL says about the
+    // host — IP or name — and nothing else: credentials never leave the process,
+    // and no MAC or host_id is ever claimed. On by default, like every other
+    // remote sensor's evidence.
+    // evidence: {
+    //   enabled: true,
+    //   refresh_secs: 300,          // liveness refresh (the consumer TTL is 900 s)
+    //   include_discovered: true,   // also claim what the discovery block finds
+    // },
+
     // Remote RTSP cameras. Each entry becomes one catalogue stream.
     rtsp: [
       // { name: "door", url: "rtsp://cam.local:554/stream1",

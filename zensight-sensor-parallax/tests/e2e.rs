@@ -35,6 +35,10 @@ fn isolated_config() -> zenoh::Config {
     config
         .insert_json5("scouting/gossip/enabled", "false")
         .unwrap();
+    // As `zensight_common::session` sets it in production: a cache-only
+    // advanced publisher (the evidence feed, #413) sequences by sample
+    // timestamp, and zenoh enables timestamping by default only for routers.
+    config.insert_json5("timestamping/enabled", "true").unwrap();
     config
 }
 
@@ -1922,6 +1926,74 @@ async fn rtsp_connect_does_not_block_stream_queries() {
     // The pending reservation resolves (here: fails) on its own; it never
     // leaks past the bounded connect timeout.
     wait_until_closed(&handle).await;
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Identity evidence for cameras (#413)
+// ---------------------------------------------------------------------------
+
+/// A configured RTSP target is claimed as an observed host on
+/// `state/parallax/evidence/device/<stream>`: the URL's address, the observer
+/// role, no host_id, no MAC — and never the credentials.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn configured_rtsp_targets_publish_device_evidence() {
+    let (sensor, viewer) = isolated_pair().await;
+    let config: ParallaxConfig = json5::from_str(
+        r#"{
+            enumerate_v4l2: false,
+            rtsp: [{ name: "door", url: "rtsp://viewer:s3cret@10.0.0.7:554/stream1" }],
+        }"#,
+    )
+    .unwrap();
+    let catalog = Arc::new(Catalog::build(&config));
+
+    let evidence_sub = viewer
+        .declare_subscriber("v1/*/state/parallax/evidence/device/*")
+        .await
+        .expect("evidence subscriber");
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // A discovery feed that never reports: the configured target is claimed
+    // on its own.
+    let (_tx, rx) = tokio::sync::watch::channel(Vec::new());
+    let registry = zensight_sensor_parallax::evidence::registry(sensor.clone(), Default::default());
+    tokio::spawn(zensight_sensor_parallax::evidence::run(
+        registry,
+        v1ctx(),
+        catalog,
+        rx,
+        zensight_sensor_parallax::evidence::EvidenceConfig::default(),
+    ));
+
+    let sample = tokio::time::timeout(Duration::from_secs(5), evidence_sub.recv_async())
+        .await
+        .expect("evidence timed out")
+        .expect("evidence recv");
+    assert!(
+        sample
+            .key_expr()
+            .as_str()
+            .ends_with("state/parallax/evidence/device/door"),
+        "{}",
+        sample.key_expr()
+    );
+    let raw = sample.payload().to_bytes().to_vec();
+    let claim: zensight_common::HostEvidence =
+        zensight_common::decode_auto(&raw).expect("decode evidence");
+    assert_eq!(claim.sensor, "parallax");
+    assert_eq!(claim.source, "door");
+    assert_eq!(claim.observer.as_deref(), Some("parallax"));
+    assert_eq!(claim.host_id, None);
+    assert!(claim.macs.is_empty());
+    assert_eq!(claim.ips, vec!["10.0.0.7".to_string()]);
+    let wire = String::from_utf8_lossy(&raw);
+    assert!(
+        !wire.contains("s3cret") && !wire.contains("viewer:"),
+        "credentials must never reach the bus: {wire}"
+    );
 
     viewer.close().await.unwrap();
     sensor.close().await.unwrap();

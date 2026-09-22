@@ -190,9 +190,40 @@ and they are traffic an IDS can flag — the same caution the SNMP subnet sweep
 carries. Keep them to networks you operate. Rounds are capped at 256 responders: this document
 is LWW state a GUI renders, not a log.
 
+## `evidence` block (#413) — the cameras as hosts
+
+A camera is a host on the network. Without a claim about it the correlator has
+nothing to file its streams under. This block publishes **observer-role**
+`HostEvidence` claims on `state/parallax/evidence/device/<stream>` — the same
+shape `snmp`, `netring` and `netlink` use for devices they merely observe.
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `enabled` | `true` | publish claims at all |
+| `refresh_secs` | `300` | liveness refresh: an unchanged claim is republished this often so the consumer's 900 s TTL never expires a camera that is still configured (must be > 0) |
+| `include_discovered` | `true` | also claim responders the `discovery` block found (no effect without one) |
+
+**What a claim carries, and what it cannot.** A configured RTSP target
+contributes what its URL says about the host — an IP, a bare or `.local`
+name (`hostname`), or a fully-qualified name (`fqdn`) — and `platform:
+"rtsp"`. The credentials in the URL never leave the process. A discovered
+responder contributes its address, its advertised name and the ONVIF
+`hardware` scope as a display-only `vendor`. Neither probe yields a MAC or a
+serial, so these claims sit on the ip / fqdn / hostname rungs of
+`zensight-common/docs/identity-evidence.md` and no higher: they attach to a
+host netring or netlink saw at that address, and they add no correlator
+rule. `host_id` is always absent. Local V4L2 devices get no claim — they *are*
+this host, which `evidence/self` already covers.
+
+**Keys.** A configured target is keyed by its catalogue stream name; a
+discovered one by the slug the discovery proposal suggests as a stream name,
+so a camera the operator later adopts under that name keeps its key. When
+both name the same slug the configured entry wins. Publishing is
+change-driven with the refresh above: never per tick.
+
 ## Validation
 
-Startup fails (with a clear message) on: duplicate or empty stream names,
+Startup fails (with a clear message) on: `evidence.refresh_secs` of 0, duplicate or empty stream names,
 names containing `/` or `*`, `preview.fps == 0`, `preview.quality` outside
 1..=100, `preview.max_height < 2`, zero test-source dimensions or fps,
 `video.gop_frames == 0`, an empty tier ladder, a tier with an empty/`/`/`*`

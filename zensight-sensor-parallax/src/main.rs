@@ -244,6 +244,10 @@ async fn main() -> Result<()> {
     // subnet sweep (#541). A monitoring system that starts pulling video off
     // hardware nobody configured has done something categorically different
     // from noticing that it exists.
+    // The evidence loop (#413) wants each round's responders; a `watch` hands
+    // over the latest list without the two loops knowing each other.
+    let (discovered_tx, discovered_rx) =
+        tokio::sync::watch::channel(Vec::<zensight_common::DiscoveredStream>::new());
     if let Some(discovery_config) = parallax_config.discovery.clone() {
         // Already-configured RTSP streams are never re-proposed: a proposal the
         // operator has already accepted is noise, and noise in this document
@@ -313,6 +317,7 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                let _ = discovered_tx.send(discovered.clone());
                 let report = zensight_sensor_parallax::discovery::report(methods, discovered);
                 tracing::info!(
                     discovered = report.discovered.len(),
@@ -327,6 +332,31 @@ async fn main() -> Result<()> {
                 tokio::time::sleep(interval).await;
             }
         });
+    }
+
+    // Identity evidence for the cameras (#413): observer-role claims on
+    // `state/parallax/evidence/device/<stream>` for every configured RTSP
+    // target and, when discovery runs, every responder — so the correlator
+    // files a camera as a host and its streams become attributable. Change-
+    // driven with a liveness refresh; local V4L2 devices are this host and
+    // are already `evidence/self`.
+    if parallax_config.evidence.enabled {
+        let registry = zensight_sensor_parallax::evidence::registry(
+            session.clone(),
+            runner.publisher().counters(),
+        );
+        tracing::info!(
+            refresh_secs = parallax_config.evidence.refresh_secs,
+            include_discovered = parallax_config.evidence.include_discovered,
+            "parallax camera evidence enabled"
+        );
+        runner.spawn(zensight_sensor_parallax::evidence::run(
+            registry,
+            zensight_sensor_core::v1::for_producer("parallax"),
+            catalog.clone(),
+            discovered_rx,
+            parallax_config.evidence.clone(),
+        ));
     }
 
     // Build status metadata
