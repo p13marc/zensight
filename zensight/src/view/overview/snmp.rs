@@ -23,6 +23,23 @@ use crate::view::theme;
 use crate::view::time_range::TimeRange;
 use crate::view::tokens::{font, space};
 
+/// One change to the trap feed's filter row (#578, #1306). `None` clears
+/// that facet.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Filter {
+    /// Expand/collapse the filter row and the full listing.
+    Toggle,
+    Device(Option<String>),
+    Severity(Option<zensight_common::AlertSeverity>),
+    Kind(Option<String>),
+    /// Resolved against the clock the app passes, so the view stays pure.
+    TimeRange(TimeRange),
+    /// Free-text search over kind/summary/source/fields.
+    Search(String),
+    /// Reset every facet.
+    Clear,
+}
+
 /// Filter state for the fleet trap/event feed (#578).
 ///
 /// The feed is a ring of every producer-published [`EventRecord`] the GUI has
@@ -49,6 +66,19 @@ pub struct EventFilterState {
 
 impl EventFilterState {
     /// Resolve a picked range to an absolute lower bound.
+    /// One filter change (#1306); nothing for the app to do afterwards.
+    pub fn update(&mut self, filter: Filter, now_ms: i64) {
+        match filter {
+            Filter::Toggle => self.open = !self.open,
+            Filter::Device(device) => self.device = device,
+            Filter::Severity(severity) => self.severity = severity,
+            Filter::Kind(kind) => self.kind = kind,
+            Filter::TimeRange(range) => self.set_time_range(range, now_ms),
+            Filter::Search(search) => self.search = search,
+            Filter::Clear => self.clear(),
+        }
+    }
+
     pub fn set_time_range(&mut self, range: TimeRange, now_ms: i64) {
         self.time_range = range;
         self.range_from = range.window_ms().map(|w| now_ms - w);
@@ -557,7 +587,7 @@ fn render_trap_feed<'a>(
                 color: Some(theme::colors(t).text_muted()),
             }),
     )
-    .on_press(Message::ToggleSnmpEventFilters)
+    .on_press(Message::TrapFeed(Filter::Toggle))
     .style(iced::widget::button::text);
 
     let mut feed = column![title].spacing(space::SM);
@@ -759,22 +789,20 @@ fn render_event_filters<'a>(
 
     let facets = row![
         pick_list(device_opts, device_sel, |f: Facet<String>| {
-            Message::SetSnmpEventDevice(f.value)
+            Message::TrapFeed(Filter::Device(f.value))
         })
         .text_size(font::CAPTION),
         pick_list(severity_opts, severity_sel, |f: Facet<AlertSeverity>| {
-            Message::SetSnmpEventSeverity(f.value)
+            Message::TrapFeed(Filter::Severity(f.value))
         })
         .text_size(font::CAPTION),
         pick_list(kind_opts, kind_sel, |f: Facet<String>| {
-            Message::SetSnmpEventKind(f.value)
+            Message::TrapFeed(Filter::Kind(f.value))
         })
         .text_size(font::CAPTION),
-        pick_list(
-            TimeRange::ALL.to_vec(),
-            Some(filter.time_range),
-            Message::SetSnmpEventTimeRange
-        )
+        pick_list(TimeRange::ALL.to_vec(), Some(filter.time_range), |r| {
+            Message::TrapFeed(Filter::TimeRange(r))
+        })
         .text_size(font::CAPTION),
     ]
     .spacing(space::SM)
@@ -783,7 +811,7 @@ fn render_event_filters<'a>(
 
     let mut search = row![
         text_input("Search traps…", &filter.search)
-            .on_input(Message::SetSnmpEventSearch)
+            .on_input(|v| Message::TrapFeed(Filter::Search(v)))
             .size(font::CAPTION)
             .width(Length::Fill),
     ]
@@ -792,7 +820,7 @@ fn render_event_filters<'a>(
     if filter.is_active() {
         search = search.push(
             iced::widget::button(text("Clear").size(font::CAPTION))
-                .on_press(Message::ClearSnmpEventFilters)
+                .on_press(Message::TrapFeed(Filter::Clear))
                 .style(iced::widget::button::text),
         );
     }

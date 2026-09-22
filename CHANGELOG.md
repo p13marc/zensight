@@ -344,6 +344,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the Info toggle, the anomaly drill-down; `SecurityState::update` takes the
   tuning state and answers `ReadStatus`/`FetchCaptures`). `Message` is 277
   variants.
+  **The six lists follow**: `Dashboard` (7 — filters, search, paging,
+  grid/table), `TrapFeed` (7 — the facets, with the clock), `Alerts` (7 —
+  filters and presets; `Effect::Persist`), `Inventory` (3), `Bandwidth` (3;
+  `RebuildServices`/`FetchProcesses`) and `Fleet` (3). `Message` is 253
+  variants.
 
 - **No write leaves the GUI without a host** (#1261). The fifteen fleet-wide
   writes — netring's detector toggles, thresholds, allowlist, capture filter,

@@ -23,6 +23,30 @@ use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
+/// One interaction with the bandwidth monitor (#1306).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// Processes ⇄ Services.
+    Mode(BandwidthMode),
+    /// Sort the table by column index.
+    Sort(usize),
+    /// Filter the table by name substring.
+    Filter(String),
+}
+
+/// What the app has to do after a bandwidth action.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    /// The Services mode was chosen: rebuild its rows from the app's live
+    /// telemetry.
+    RebuildServices,
+    /// The Processes mode was shown for the first time: fetch the
+    /// per-process rows.
+    FetchProcesses,
+}
+
 /// Which bandwidth breakdown the monitor is showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BandwidthMode {
@@ -70,6 +94,29 @@ fn host_scoped(record: &BandwidthRecord, host_filter: Option<&str>) -> bool {
 
 impl BandwidthState {
     /// Mark the per-process fetch in flight.
+    /// One monitor interaction (#1306); what the app must rebuild or fetch
+    /// comes back as the [`Effect`].
+    pub fn update(&mut self, action: Action) -> Effect {
+        match action {
+            Action::Mode(mode) => {
+                self.mode = mode;
+                self.table = TableState::default();
+                match mode {
+                    BandwidthMode::Services => return Effect::RebuildServices,
+                    BandwidthMode::Processes => {
+                        if matches!(self.processes, Fetch::Idle) {
+                            self.loading();
+                            return Effect::FetchProcesses;
+                        }
+                    }
+                }
+            }
+            Action::Sort(col) => self.table.toggle_sort(col),
+            Action::Filter(q) => self.table.set_filter(q),
+        }
+        Effect::None
+    }
+
     pub fn loading(&mut self) {
         self.processes = Fetch::Loading;
     }
@@ -136,7 +183,7 @@ pub fn bandwidth_view(state: &BandwidthState) -> Element<'_, Message> {
         let active = state.mode == mode;
         let mut b = button(text(label).size(font::CAPTION)).padding([4, 12]);
         if !active {
-            b = b.on_press(Message::SetBandwidthMode(mode));
+            b = b.on_press(Message::Bandwidth(Action::Mode(mode)));
         }
         b
     };
@@ -236,8 +283,8 @@ fn render_processes(state: &BandwidthState) -> Element<'_, Message> {
             .on_press(Message::RefreshBandwidth),
         DataTable::new(columns)
             .searchable(|r: &BandwidthRecord| row_name(r))
-            .on_sort(Message::BandwidthTableSort)
-            .on_filter(Message::BandwidthTableFilter)
+            .on_sort(|c| Message::Bandwidth(Action::Sort(c)))
+            .on_filter(|q| Message::Bandwidth(Action::Filter(q)))
             .noun("processes")
             .view(records, &state.table),
     ]
@@ -291,8 +338,8 @@ fn render_services(state: &BandwidthState) -> Element<'_, Message> {
     ];
     DataTable::new(columns)
         .searchable(|r: &BwRow| row_name(&r.record))
-        .on_sort(Message::BandwidthTableSort)
-        .on_filter(Message::BandwidthTableFilter)
+        .on_sort(|c| Message::Bandwidth(Action::Sort(c)))
+        .on_filter(|q| Message::Bandwidth(Action::Filter(q)))
         .noun("services")
         .view(services, table)
 }
@@ -431,7 +478,29 @@ mod tests {
         let msgs: Vec<Message> = ui.into_messages().collect();
         assert!(
             msgs.iter()
-                .any(|m| matches!(m, Message::SetBandwidthMode(BandwidthMode::Services)))
+                .any(|m| matches!(m, Message::Bandwidth(Action::Mode(BandwidthMode::Services))))
         );
+    }
+
+    /// Switching to Processes fetches once; switching to Services asks the
+    /// app to rebuild its rows; sorting and filtering ask nothing.
+    #[test]
+    fn mode_switches_report_what_to_load() {
+        let mut b = BandwidthState::default();
+        assert_eq!(
+            b.update(Action::Mode(BandwidthMode::Processes)),
+            Effect::FetchProcesses
+        );
+        assert!(matches!(b.processes, Fetch::Loading));
+        assert_eq!(
+            b.update(Action::Mode(BandwidthMode::Processes)),
+            Effect::None
+        );
+        assert_eq!(
+            b.update(Action::Mode(BandwidthMode::Services)),
+            Effect::RebuildServices
+        );
+        assert_eq!(b.update(Action::Sort(1)), Effect::None);
+        assert_eq!(b.update(Action::Filter("ssh".into())), Effect::None);
     }
 }

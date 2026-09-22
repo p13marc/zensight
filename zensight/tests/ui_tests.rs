@@ -26,13 +26,14 @@ fn force_gl_backend_for_tests() {
 use zensight::app::{AppTheme, CurrentView};
 use zensight::message::{DeviceId, Message};
 use zensight::mock;
+use zensight::view::alerts::Action as AlertsAction;
 use zensight::view::dashboard::{ConnectionState, DashboardState, DeviceState, dashboard_view};
 use zensight::view::device::{
     DeviceDetailState, DeviceViewCtx, FacetTab, device_view_with_syslog_filter, host_detail_view,
 };
 use zensight::view::groups::GroupsState;
 use zensight::view::overview::OverviewState;
-use zensight::view::overview::snmp::{EventFilterState, SnmpOverviewData};
+use zensight::view::overview::snmp::{EventFilterState, Filter as TrapFilter, SnmpOverviewData};
 use zensight::view::settings::{SettingsState, settings_view};
 use zensight::view::specialized::syslog::Action as LogsAction;
 use zensight::view::specialized::{SyslogFilterState, specialized_view};
@@ -2083,7 +2084,7 @@ fn test_alert_filter_pills() {
     assert!(
         msgs.iter().any(|m| matches!(
             m,
-            Message::SetAlertSeverityFilter(Some(AlertSeverity::Critical))
+            Message::Alerts(AlertsAction::Severity(Some(AlertSeverity::Critical)))
         )),
         "Critical pill should emit SetAlertSeverityFilter(Critical), got {msgs:?}"
     );
@@ -2095,7 +2096,7 @@ fn test_alert_filter_pills() {
     assert!(
         msgs2
             .iter()
-            .any(|m| matches!(m, Message::SetAlertSourceFilter(Some(s)) if s == "host2")),
+            .any(|m| matches!(m, Message::Alerts(AlertsAction::Source(Some(s))) if s == "host2")),
         "host2 pill should emit SetAlertSourceFilter(host2), got {msgs2:?}"
     );
 }
@@ -7571,7 +7572,7 @@ fn test_snmp_event_feed_filters_and_links() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::ToggleSnmpEventFilters))
+            .any(|m| matches!(m, Message::TrapFeed(TrapFilter::Toggle)))
     );
 
     // Open + free-text search: only the matching record survives, and the

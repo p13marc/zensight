@@ -50,6 +50,22 @@ use crate::view::icons::{self, IconSize};
 use crate::view::overview::{OverviewState, overview_section};
 use crate::view::tokens::font;
 
+/// One interaction with the dashboard's device list (#1306): the filters,
+/// the search, paging and the grid/table mode.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    ToggleProducer(String),
+    /// One device status, driven by the fleet summary chips (#34); clicking
+    /// the active chip clears it.
+    StatusFilter(Option<DeviceStatus>),
+    Search(String),
+    NextPage,
+    PrevPage,
+    GoToPage(usize),
+    /// Grid ⇄ table.
+    ToggleViewMode,
+}
+
 /// State for a single device on the dashboard.
 #[derive(Debug, Clone)]
 pub struct DeviceState {
@@ -526,6 +542,20 @@ impl DashboardState {
     }
 
     /// Set (or clear) the status filter, resetting pagination (#34).
+    /// One list interaction (#1306). Every one is the dashboard's own; the
+    /// app has nothing to do afterwards.
+    pub fn update(&mut self, action: Action) {
+        match action {
+            Action::ToggleProducer(producer) => self.toggle_filter(producer),
+            Action::StatusFilter(status) => self.set_status_filter(status),
+            Action::Search(filter) => self.set_search_filter(filter),
+            Action::NextPage => self.next_page(),
+            Action::PrevPage => self.prev_page(),
+            Action::GoToPage(page) => self.go_to_page(page),
+            Action::ToggleViewMode => self.toggle_view_mode(),
+        }
+    }
+
     pub fn set_status_filter(&mut self, status: Option<DeviceStatus>) {
         // Toggle off if the same chip is clicked again.
         self.status_filter = if self.status_filter == status {
@@ -770,7 +800,7 @@ fn render_fleet_summary<'a>(
         let active = state.status_filter == Some(status);
         let content: Element<'_, Message> = badge(status_color(status), format!("{count} {label}"));
         let mut b = button(content)
-            .on_press(Message::SetStatusFilter(Some(status)))
+            .on_press(Message::Dashboard(Action::StatusFilter(Some(status))))
             .padding([4, 10]);
         b = if active {
             b.style(iced::widget::button::primary)
@@ -820,7 +850,7 @@ fn render_fleet_summary<'a>(
     if state.status_filter.is_some() {
         bar = bar.push(
             button(text("Show all").size(font_caption()))
-                .on_press(Message::SetStatusFilter(None))
+                .on_press(Message::Dashboard(Action::StatusFilter(None)))
                 .padding([4, 10])
                 .style(iced::widget::button::text),
         );
@@ -941,7 +971,7 @@ fn render_header(
             .spacing(6)
             .align_y(Alignment::Center),
     )
-    .on_press(Message::ToggleDashboardViewMode)
+    .on_press(Message::Dashboard(Action::ToggleViewMode))
     .style(iced::widget::button::secondary);
 
     // Global metric search trigger (Ctrl+K) — discoverable button (#27).
@@ -1087,7 +1117,7 @@ fn render_protocol_filters<'a>(
             state.producer_filters.is_empty() || state.producer_filters.contains(&producer);
 
         let btn = button(text(producer.clone()).size(font::CAPTION))
-            .on_press(Message::ToggleProducerFilter(producer));
+            .on_press(Message::Dashboard(Action::ToggleProducer(producer)));
 
         let btn = if is_active {
             btn.style(iced::widget::button::primary)
@@ -1101,7 +1131,7 @@ fn render_protocol_filters<'a>(
     // Device search input (with ID for keyboard focus)
     let search_input = text_input("Search devices... (Ctrl+F)", state.search_input())
         .id(DASHBOARD_SEARCH_ID.clone())
-        .on_input(Message::SetDeviceSearchFilter)
+        .on_input(|v| Message::Dashboard(Action::Search(v)))
         .padding(6)
         .width(Length::Fixed(200.0));
 
@@ -1583,7 +1613,7 @@ fn render_pagination_controls_with_count(
     // Previous button
     let prev_btn = if current_page > 0 {
         button(text("<").size(font::BODY))
-            .on_press(Message::PrevPage)
+            .on_press(Message::Dashboard(Action::PrevPage))
             .style(iced::widget::button::secondary)
     } else {
         button(text("<").size(font::BODY)).style(iced::widget::button::secondary)
@@ -1592,7 +1622,7 @@ fn render_pagination_controls_with_count(
     // Next button
     let next_btn = if current_page + 1 < total_pages {
         button(text(">").size(font::BODY))
-            .on_press(Message::NextPage)
+            .on_press(Message::Dashboard(Action::NextPage))
             .style(iced::widget::button::secondary)
     } else {
         button(text(">").size(font::BODY)).style(iced::widget::button::secondary)
@@ -1616,7 +1646,7 @@ fn render_pagination_controls_with_count(
                 .style(iced::widget::button::primary)
         } else {
             button(text(format!("{}", page + 1)).size(font::BODY))
-                .on_press(Message::GoToPage(page))
+                .on_press(Message::Dashboard(Action::GoToPage(page)))
                 .style(iced::widget::button::secondary)
         };
         page_row = page_row.push(page_btn);
