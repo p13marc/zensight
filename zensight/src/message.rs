@@ -1,6 +1,6 @@
 use zensight_common::{
-    Alert, DeviceLiveness, DeviceStatus, ErrorReport, HealthSnapshot, HostEntity, Protocol,
-    SensorInfo, TelemetryPoint,
+    Alert, DeviceLiveness, ErrorReport, HealthSnapshot, HostEntity, Protocol, SensorInfo,
+    TelemetryPoint,
 };
 
 /// One telemetry sample, plus **who published it** (#474).
@@ -249,15 +249,9 @@ pub enum Message {
     /// open tile, forever, so a producer that refuses them would otherwise
     /// toast on a 3-second loop for as long as the tile is open. This one
     /// toasts the first refusal and then goes quiet until reports work again.
-    ParallaxReportOutcome {
-        success: bool,
-        message: String,
-    },
+    ParallaxReportOutcome { success: bool, message: String },
     /// Result of a command sent to a sensor (drives a feedback toast).
-    CommandFeedback {
-        success: bool,
-        message: String,
-    },
+    CommandFeedback { success: bool, message: String },
 
     // ── Expectations authoring (netlink sentinel, Plan 08) ──────────────────
     /// Open the expectations authoring view.
@@ -301,12 +295,8 @@ pub enum Message {
     OpenInventory,
     /// Combined inventory fetch outcome (assets + TLS/QUIC/SSH fingerprints).
     InventoryLoaded(Result<crate::view::inventory::InventoryData, String>),
-    /// Set the inventory asset-table sort order.
-    SetInventoryAssetSort(crate::view::inventory::AssetSort),
-    /// Filter the passive-asset inventory by role (`None` = all roles, #329).
-    SetInventoryAssetRole(Option<String>),
-    /// Set the fingerprint-explorer kind filter (`None` = all kinds).
-    SetInventoryFpFilter(Option<crate::view::inventory::FpKind>),
+    /// One inventory sort/filter change (#1306).
+    Inventory(crate::view::inventory::Action),
 
     /// Open the bandwidth live-monitor view (#319, epic #320) and fetch per-process rows.
     OpenBandwidth,
@@ -314,12 +304,9 @@ pub enum Message {
     RefreshBandwidth,
     /// Per-process bandwidth fetch outcome.
     BandwidthLoaded(Result<Vec<zensight_common::BandwidthRecord>, String>),
-    /// Switch the bandwidth monitor between Processes and Services modes.
-    SetBandwidthMode(crate::view::bandwidth::BandwidthMode),
-    /// Sort the bandwidth table by column index.
-    BandwidthTableSort(usize),
-    /// Filter the bandwidth table by name substring.
-    BandwidthTableFilter(String),
+    /// One bandwidth-monitor interaction (#1306); `BandwidthState::update`
+    /// says whether to rebuild the service rows or fetch the process rows.
+    Bandwidth(crate::view::bandwidth::Action),
 
     /// Open the fleet-capabilities view (#469) and fan `introspect` out.
     OpenFleet,
@@ -360,12 +347,9 @@ pub enum Message {
         subject: String,
         value: serde_json::Value,
     },
-    /// Expand/collapse one row's registry findings.
-    ToggleFleetFindings(String),
-    /// Sort the fleet table by column index.
-    FleetTableSort(usize),
-    /// Filter the fleet table by host/producer substring.
-    FleetTableFilter(String),
+
+    /// One fleet-table interaction (#1306).
+    Fleet(crate::view::fleet::Action),
 
     /// Open the bus-explorer view (#748) and start its monitor if none runs.
     OpenExplorer,
@@ -415,9 +399,7 @@ pub enum Message {
     },
     /// Forget a procedure's answer on the selected device (#1261), so its
     /// panel offers the call again — a unit file hidden, a table dismissed.
-    ForgetCall {
-        procedure: String,
-    },
+    ForgetCall { procedure: String },
     /// Fetch this host's advertised service-control gate (#283) so the Units tab
     /// can render what it will actually accept.
     // ── Gated PDU outlet control (#956) ─────────────────────────────────
@@ -493,10 +475,7 @@ pub enum Message {
     /// Toggle a topology node's pin (#394).
     TopologyTogglePin(String),
     /// Apply a canvas-computed zoom-to-fit (#394).
-    TopologyFitApplied {
-        zoom: f32,
-        pan: (f32, f32),
-    },
+    TopologyFitApplied { zoom: f32, pan: (f32, f32) },
     /// Hover moved onto (or off) a topology node (#394); emitted on change
     /// only.
     TopologyHover(Option<String>),
@@ -549,29 +528,17 @@ pub enum Message {
     /// Sort a device view's on-demand table by column index (#1261). The
     /// table is named by the view (`flows`), the state lives in
     /// `DeviceDetailState::tables`.
-    DetailTableSort {
-        table: String,
-        column: usize,
-    },
+    DetailTableSort { table: String, column: usize },
     /// Filter a device view's on-demand table.
-    DetailTableFilter {
-        table: String,
-        query: String,
-    },
+    DetailTableFilter { table: String, query: String },
     /// Show more rows of a device view's on-demand table.
-    DetailTableMore {
-        table: String,
-    },
+    DetailTableMore { table: String },
     /// Open a live JPEG preview tile: sends `open_stream` (codec `mjpeg`) and
     /// spawns the abortable per-tile subscriber task (#408).
-    ParallaxOpenTile {
-        stream: String,
-    },
+    ParallaxOpenTile { stream: String },
     /// Close a preview tile: aborts its subscriber task and sends
     /// `close_stream`.
-    ParallaxCloseTile {
-        stream: String,
-    },
+    ParallaxCloseTile { stream: String },
     /// A decoded preview frame from a tile's subscriber task. `generation`
     /// identifies the tile incarnation the task was opened for (frames from
     /// a replaced task are dropped); stale `seq`s within an incarnation are
@@ -615,17 +582,9 @@ pub enum Message {
     /// GUI restart without a bus-side storage. Folded into the ring like a
     /// live `Event`, and not written back.
     EventHistory(Vec<zensight_store::StoredEvent>),
-    /// Expand/collapse the trap feed's filter row and full listing (#578).
-    ToggleSnmpEventFilters,
-    /// Trap-feed facets (#578). `None` clears that facet.
-    SetSnmpEventDevice(Option<String>),
-    SetSnmpEventSeverity(Option<zensight_common::AlertSeverity>),
-    SetSnmpEventKind(Option<String>),
-    SetSnmpEventTimeRange(crate::view::time_range::TimeRange),
-    /// Free-text search over the trap feed (kind/summary/source/fields).
-    SetSnmpEventSearch(String),
-    /// Reset every trap-feed facet (#578).
-    ClearSnmpEventFilters,
+    /// One trap-feed filter change (#578, #1306); `EventFilterState::update`
+    /// takes the clock for the time range.
+    TrapFeed(crate::view::overview::snmp::Filter),
     /// An older-page fetch finished (#601). Kept separate from
     /// `LogEventsLoaded` so a page merge never advances the live-tail
     /// watermark — an older page must not make the tail skip forward.
@@ -638,12 +597,7 @@ pub enum Message {
     /// (#651). `source` + `alert_key` are the in-GUI external identity
     /// `<source>/<alert_key>`; scoping the view by source alone would land the
     /// operator in a list when several alerts fire on one device.
-    OpenAlertForKey {
-        source: String,
-        alert_key: String,
-    },
-    /// Drop the focused-alert highlight (#651).
-    ClearAlertFocus,
+    OpenAlertForKey { source: String, alert_key: String },
     /// Subnet-discovery report (#579) off `state/snmp/discovery` — LWW per
     /// publishing sensor origin; proposals only, nothing auto-adds (#541).
     SnmpDiscoveryReport {
@@ -666,29 +620,20 @@ pub enum Message {
     /// offered tier is its own button (#494/#502). Opening a different tier for
     /// a stream replaces its single tile. Only functional on builds with the
     /// `h264` feature; otherwise it toasts the build hint.
-    ParallaxOpenVideoTile {
-        stream: String,
-        tier: String,
-    },
+    ParallaxOpenVideoTile { stream: String, tier: String },
     /// Hand tier selection back to the controller (#720).
     ///
     /// The counterpart of a manual tier click, which pins the stream. There is
     /// no "turn adaptation off" — a pin *is* off, for the one stream the
     /// operator pinned, and it is expressed by the thing they already did.
-    ParallaxAutoTier {
-        stream: String,
-    },
+    ParallaxAutoTier { stream: String },
     /// Ask the sensor for a fresh IDR (`request_keyframe`) — fired by the
     /// H.264 tile decoder on a sequence discontinuity (#409).
-    ParallaxRequestKeyframe {
-        stream: String,
-    },
+    ParallaxRequestKeyframe { stream: String },
     /// Expand a tile to the near-fullscreen overlay (#436). A preview tile
     /// is upgraded to the H.264 video profile when the build and the stream
     /// support it (same refcount-balanced switch as the Video button).
-    ParallaxExpandTile {
-        stream: String,
-    },
+    ParallaxExpandTile { stream: String },
     /// Dismiss the expanded-tile overlay (Esc / backdrop click / Close),
     /// restoring the tile's pre-expand profile.
     ParallaxCollapseTile,
@@ -701,10 +646,7 @@ pub enum Message {
     /// Pivot to the systemd device for `host` with `unit`'s drill-down loading
     /// (process cgroup chip, journald unit-run chip). Toast fallback when no
     /// systemd device exists for the host.
-    PivotToUnit {
-        host: String,
-        unit: String,
-    },
+    PivotToUnit { host: String, unit: String },
     /// Pivot to the sysinfo device for `host` with the process explorer
     /// filtered to `pid`. `start_time` (the `(pid, start_time)` identity pair)
     /// arms the stale-generation guard: a reused pid renders as "exited", never
@@ -719,10 +661,7 @@ pub enum Message {
     ClearPivot,
     /// Pivot to the Logs view pre-filtered to one unit *run* (journald
     /// `_SYSTEMD_INVOCATION_ID`), from the unit drill-down's "logs for this run".
-    OpenLogsForInvocation {
-        unit: String,
-        invocation_id: String,
-    },
+    OpenLogsForInvocation { unit: String, invocation_id: String },
     /// Clear the Logs view's unit-run (invocation id) filter.
     ClearLogsInvocationFilter,
     /// Pivot from a log-sourced alert to the Logs feed pre-filtered to its
@@ -747,10 +686,7 @@ pub enum Message {
     /// Pivot from a Security anomaly to its netring flows (#119): fetch
     /// `@rpc/netring/flows` and filter to the offending `src`. `key` is the anomaly's
     /// `alert_key` so the result renders under the right row.
-    FetchAnomalyFlows {
-        key: String,
-        src: String,
-    },
+    FetchAnomalyFlows { key: String, src: String },
     /// A flow-pivot reply for anomaly `key`: the filtered flows, or an error.
     AnomalyFlowsReceived(String, Result<Vec<zensight_common::FlowRecord>, String>),
     /// The capture-to-disk index fetched for the Security drill-down (#327), so
@@ -797,10 +733,7 @@ pub enum Message {
     /// the app resolves it against the devices it has seen
     /// ([`crate::view::dashboard::DashboardState::resolve_device`]) rather than
     /// letting the view fabricate a handle (#474, RFC 06 §6).
-    SelectDeviceNamed {
-        producer: String,
-        source: String,
-    },
+    SelectDeviceNamed { producer: String, source: String },
 
     /// User dismissed a stale facet: drop it from the in-memory device map.
     /// Facets are not persisted, so this is a pure view-model removal — the
@@ -821,9 +754,7 @@ pub enum Message {
 
     /// Navigate to the previous/next device within the current filtered set
     /// (#35 cross-device navigation on the device detail view).
-    SelectAdjacentDevice {
-        forward: bool,
-    },
+    SelectAdjacentDevice { forward: bool },
 
     /// User cleared device selection (back to dashboard).
     ClearSelection,
@@ -855,28 +786,11 @@ pub enum Message {
         Vec<zensight_common::history::TimelineEntry>,
     ),
 
-    /// User toggled protocol filter.
-    ToggleProducerFilter(String),
+    /// One dashboard list interaction (#1306): the filters, the search,
+    /// paging, grid/table.
+    Dashboard(crate::view::dashboard::Action),
 
-    /// Filter the dashboard to a single device status (None = all), driven by
-    /// the fleet summary chips (#34). Clicking the active chip clears it.
-    SetStatusFilter(Option<DeviceStatus>),
-
-    /// User changed device search filter.
-    SetDeviceSearchFilter(String),
-
-    /// Go to next page in dashboard.
-    NextPage,
-
-    /// Go to previous page in dashboard.
-    PrevPage,
-
-    /// Go to a specific page in dashboard.
-    GoToPage(usize),
-
-    /// Toggle dashboard view mode (grid vs table).
-    ToggleDashboardViewMode,
-
+    /// Toggle "group by host" on the dashboard (#306): merge per-protocol
     /// Toggle "group by host" on the dashboard (#306): merge per-protocol
     /// facets into one host card via correlator entities, or show per-source.
     ToggleGroupByHost,
@@ -972,10 +886,7 @@ pub enum Message {
         current: String,
     },
     /// The `state/snmp/applied/targets` marker for one origin (#936).
-    SnmpTargetsApplied {
-        origin: String,
-        json: String,
-    },
+    SnmpTargetsApplied { origin: String, json: String },
     /// One `@catalog/state/ack/*` document arrived (#925).
     AckReceived(Box<zensight_common::ack::AlertAck>),
     /// An ack was tombstoned by the catalog.
@@ -1005,37 +916,23 @@ pub enum Message {
     MergeTargetChanged(String),
     /// `@catalog` `link?old=…;new=…` (#1129): fuse the host at origin `old`
     /// into the one at `new`. Both are `h-<12hex>` origins, never entity ids.
-    LinkHosts {
-        old: String,
-        new: String,
-    },
+    LinkHosts { old: String, new: String },
     /// `@catalog` `unlink?old=…;new=…` (#1129): retract the link that fuses
     /// `old` into `new`, so the catalog stops merging them.
-    UnlinkHosts {
-        old: String,
-        new: String,
-    },
+    UnlinkHosts { old: String, new: String },
 
     /// Toggle the opt-in desktop-notifications setting (#26) and persist it.
     ToggleDesktopNotifications,
     /// Lift a silence on a source (#26).
     UnsilenceSource(String),
 
-    /// Filter the external-alerts feed by severity (`None` = all) (#27).
-    SetAlertSeverityFilter(Option<zensight_common::AlertSeverity>),
-    /// Filter the external-alerts feed by source (`None` = all) (#27).
-    SetAlertSourceFilter(Option<String>),
-    /// Filter the external-alerts feed to one protocol (#582). `None` = all.
-    SetAlertProtocolFilter(Option<zensight_common::Protocol>),
+    /// One external-alerts filter or preset change (#1306);
+    /// `AlertsState::update` says whether the presets must be persisted.
+    Alerts(crate::view::alerts::Action),
+    /// Open the Alerts view pre-filtered to a protocol — the overview tiles'
     /// Open the Alerts view pre-filtered to a protocol — the overview tiles'
     /// click-through (#582).
     OpenAlertsForProtocol(zensight_common::Protocol),
-    /// Save the current external-alert filter combination as a preset (#27).
-    SaveAlertFilterPreset,
-    /// Apply a saved external-alert filter preset by index (#27).
-    ApplyAlertFilterPreset(usize),
-    /// Delete a saved external-alert filter preset by index (#27).
-    DeleteAlertFilterPreset(usize),
 
     /// Toggle the keyboard-shortcuts help overlay (#28).
     ToggleHelp,

@@ -23,6 +23,16 @@ use crate::view::formatting::format_timestamp;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
+/// One change to the inventory's sort or filters (#1306).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    AssetSort(AssetSort),
+    /// Role filter over the passive-asset table (`None` = all, #329).
+    AssetRole(Option<String>),
+    /// Fingerprint-explorer kind filter (`None` = all kinds).
+    FpFilter(Option<FpKind>),
+}
+
 /// The four inventory tables fetched together on view-open. Carried in one
 /// message so a single combined task populates the whole view.
 #[derive(Debug, Clone, Default)]
@@ -140,6 +150,15 @@ pub struct InventoryState {
 
 impl InventoryState {
     /// Mark a fetch as in flight.
+    /// One sort or filter change (#1306); nothing for the app to do.
+    pub fn update(&mut self, action: Action) {
+        match action {
+            Action::AssetSort(sort) => self.asset_sort = sort,
+            Action::AssetRole(role) => self.asset_role_filter = role,
+            Action::FpFilter(kind) => self.fp_filter = kind,
+        }
+    }
+
     pub fn loading(&mut self) {
         self.loading = true;
         self.error = None;
@@ -371,11 +390,9 @@ fn render_assets<'a>(
     // The entity column only appears when a correlator is on the bus (#314):
     // with an empty store every asset would be a noisy "wire-only" badge.
     let show_entities = !entities.is_empty();
-    let sort_pick = pick_list(
-        AssetSort::ALL.as_slice(),
-        Some(state.asset_sort),
-        Message::SetInventoryAssetSort,
-    )
+    let sort_pick = pick_list(AssetSort::ALL.as_slice(), Some(state.asset_sort), |sort| {
+        Message::Inventory(Action::AssetSort(sort))
+    })
     .width(Length::Fixed(130.0))
     .text_size(font::CAPTION);
     let header_row = row![
@@ -408,7 +425,7 @@ fn render_assets<'a>(
             chip(
                 "all",
                 state.asset_role_filter.is_none(),
-                Message::SetInventoryAssetRole(None)
+                Message::Inventory(Action::AssetRole(None))
             ),
         ]
         .spacing(space::XS)
@@ -418,7 +435,7 @@ fn render_assets<'a>(
             chips = chips.push(chip(
                 &role,
                 active,
-                Message::SetInventoryAssetRole(Some(role.clone())),
+                Message::Inventory(Action::AssetRole(Some(role.clone()))),
             ));
         }
         column![header_row, chips].spacing(space::XS).into()
@@ -561,7 +578,7 @@ fn render_fingerprints<'a>(
         chip(
             "all",
             state.fp_filter.is_none(),
-            Message::SetInventoryFpFilter(None)
+            Message::Inventory(Action::FpFilter(None))
         ),
     ]
     .spacing(space::XS)
@@ -570,7 +587,7 @@ fn render_fingerprints<'a>(
         chips = chips.push(chip(
             k.label(),
             state.fp_filter == Some(k),
-            Message::SetInventoryFpFilter(Some(k)),
+            Message::Inventory(Action::FpFilter(Some(k))),
         ));
     }
 

@@ -14,6 +14,30 @@ use crate::view::formatting::format_timestamp;
 use crate::view::icons::{self, IconSize};
 use crate::view::tokens::{font, space};
 
+/// One change to the external-alerts feed's filters or presets (#27, #582,
+/// #1306). Every filter change also drops the focused-alert highlight.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    Severity(Option<zensight_common::AlertSeverity>),
+    Source(Option<String>),
+    Protocol(Option<Protocol>),
+    /// Save the current filter combination as a preset.
+    SavePreset,
+    ApplyPreset(usize),
+    DeletePreset(usize),
+    /// Drop the focused-alert highlight (#651).
+    ClearFocus,
+}
+
+/// What the app has to do after an alerts action.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    /// The preset list changed: persist it.
+    Persist,
+}
+
 /// Current wall-clock time in epoch milliseconds.
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -801,6 +825,40 @@ impl AlertsState {
 
     /// Save the current external-filter combination as a preset (#27). No-op
     /// (returns `false`) when no filter is active or an identical preset exists.
+    /// One filter or preset change (#1306); whether the presets must be
+    /// persisted comes back as the [`Effect`].
+    pub fn update(&mut self, action: Action) -> Effect {
+        match action {
+            Action::Severity(sev) => {
+                self.external_severity_filter = sev;
+                self.focused_external = None;
+            }
+            Action::Source(source) => {
+                self.external_source_filter = source;
+                self.focused_external = None;
+            }
+            Action::Protocol(protocol) => {
+                self.external_protocol_filter = protocol;
+                self.focused_external = None;
+            }
+            Action::SavePreset => {
+                if self.save_current_filter_preset() {
+                    return Effect::Persist;
+                }
+            }
+            Action::ApplyPreset(index) => {
+                self.apply_filter_preset(index);
+                self.focused_external = None;
+            }
+            Action::DeletePreset(index) => {
+                self.delete_filter_preset(index);
+                return Effect::Persist;
+            }
+            Action::ClearFocus => self.focused_external = None,
+        }
+        Effect::None
+    }
+
     pub fn save_current_filter_preset(&mut self) -> bool {
         let severity = self.external_severity_filter;
         let source = self.external_source_filter.clone();
@@ -1031,7 +1089,7 @@ fn render_external_alerts_section(state: &AlertsState) -> Element<'_, Message> {
                     text("The linked alert is no longer firing.").size(font::CAPTION),
                     container(text("")).width(Length::Fill),
                     button(text("Clear").size(font::CAPTION))
-                        .on_press(Message::ClearAlertFocus)
+                        .on_press(Message::Alerts(Action::ClearFocus))
                         .padding([space::XS, space::SM])
                         .style(iced::widget::button::text),
                 ]
@@ -1100,7 +1158,7 @@ fn render_alert_filter_pills<'a>(
         pill(
             "All".into(),
             sev.is_none(),
-            Message::SetAlertSeverityFilter(None)
+            Message::Alerts(Action::Severity(None))
         ),
     ]
     .spacing(space::XS)
@@ -1120,7 +1178,7 @@ fn render_alert_filter_pills<'a>(
         sev_row = sev_row.push(pill(
             label,
             sev == Some(s),
-            Message::SetAlertSeverityFilter(Some(s)),
+            Message::Alerts(Action::Severity(Some(s))),
         ));
     }
 
@@ -1144,7 +1202,7 @@ fn render_alert_filter_pills<'a>(
             pill(
                 "All".into(),
                 active_proto.is_none(),
-                Message::SetAlertProtocolFilter(None)
+                Message::Alerts(Action::Protocol(None))
             ),
         ]
         .spacing(space::XS)
@@ -1153,7 +1211,7 @@ fn render_alert_filter_pills<'a>(
             proto_row = proto_row.push(pill(
                 p.to_string(),
                 active_proto == Some(p),
-                Message::SetAlertProtocolFilter(Some(p)),
+                Message::Alerts(Action::Protocol(Some(p))),
             ));
         }
         col = col.push(proto_row.wrap());
@@ -1172,7 +1230,7 @@ fn render_alert_filter_pills<'a>(
             pill(
                 "All".into(),
                 active.is_none(),
-                Message::SetAlertSourceFilter(None)
+                Message::Alerts(Action::Source(None))
             ),
         ]
         .spacing(space::XS)
@@ -1181,7 +1239,7 @@ fn render_alert_filter_pills<'a>(
             src_row = src_row.push(pill(
                 s.to_string(),
                 active == Some(s),
-                Message::SetAlertSourceFilter(Some(s.to_string())),
+                Message::Alerts(Action::Source(Some(s.to_string()))),
             ));
         }
         // Many sources can overflow the width, so let the source pills wrap.
@@ -1210,7 +1268,7 @@ fn render_alert_filter_pills<'a>(
                 && state.external_source_filter == preset.source;
             let chip = row![
                 button(text(preset.name.clone()).size(font::CAPTION))
-                    .on_press(Message::ApplyAlertFilterPreset(i))
+                    .on_press(Message::Alerts(Action::ApplyPreset(i)))
                     .padding([space::XS, space::SM])
                     .style(if active {
                         iced::widget::button::primary
@@ -1218,7 +1276,7 @@ fn render_alert_filter_pills<'a>(
                         iced::widget::button::secondary
                     }),
                 button(text("✕").size(font::CAPTION))
-                    .on_press(Message::DeleteAlertFilterPreset(i))
+                    .on_press(Message::Alerts(Action::DeletePreset(i)))
                     .padding([space::XS, space::XS])
                     .style(iced::widget::button::text),
             ]
@@ -1230,7 +1288,7 @@ fn render_alert_filter_pills<'a>(
         if can_save {
             presets_row = presets_row.push(
                 button(text("+ Save filter").size(font::CAPTION))
-                    .on_press(Message::SaveAlertFilterPreset)
+                    .on_press(Message::Alerts(Action::SavePreset))
                     .padding([space::XS, space::SM])
                     .style(iced::widget::button::secondary),
             );
@@ -2192,5 +2250,34 @@ mod tests {
             state.ingest_ack(ack_doc(&r, fired));
         }
         assert_eq!(state.external_count(), 0);
+    }
+}
+
+#[cfg(test)]
+mod actions {
+    use super::*;
+
+    /// A filter change drops the focus and asks nothing; only a preset
+    /// change asks to be persisted, and saving an empty combination does not.
+    #[test]
+    fn filters_drop_focus_presets_persist() {
+        let mut a = AlertsState {
+            focused_external: Some("k".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            a.update(Action::Severity(Some(
+                zensight_common::AlertSeverity::Critical
+            ))),
+            Effect::None
+        );
+        assert!(a.focused_external.is_none());
+        assert_eq!(
+            a.external_severity_filter,
+            Some(zensight_common::AlertSeverity::Critical)
+        );
+        assert_eq!(a.update(Action::SavePreset), Effect::Persist);
+        assert_eq!(a.update(Action::ClearFocus), Effect::None);
+        assert_eq!(a.update(Action::DeletePreset(0)), Effect::Persist);
     }
 }

@@ -80,6 +80,17 @@ use crate::view::specialized::fetch::Fetch;
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
+/// One interaction with the fleet-capabilities table (#1306).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// Expand/collapse one row's registry findings.
+    ToggleFindings(String),
+    /// Sort by column index.
+    Sort(usize),
+    /// Filter by host/producer substring.
+    Filter(String),
+}
+
 /// One `introspect` reply: which host, which producer, and the raw slice it
 /// served. The origin is recovered from the *answering key*, not the payload —
 /// a registry slice does not name the host it runs on, and it should not
@@ -240,6 +251,21 @@ pub struct FleetState {
 }
 
 impl FleetState {
+    /// One table interaction (#1306); nothing for the app to do.
+    pub fn update(&mut self, action: Action) {
+        match action {
+            Action::ToggleFindings(id) => {
+                self.expanded = if self.expanded.as_deref() == Some(id.as_str()) {
+                    None
+                } else {
+                    Some(id)
+                };
+            }
+            Action::Sort(col) => self.table.toggle_sort(col),
+            Action::Filter(q) => self.table.set_filter(q),
+        }
+    }
+
     pub fn loading(&mut self) {
         self.rows = Fetch::Loading;
     }
@@ -545,7 +571,7 @@ pub fn fleet_view(state: &FleetState) -> Element<'_, Message> {
             };
             button(text(label).size(font::CAPTION))
                 .padding([2, 8])
-                .on_press(Message::ToggleFleetFindings(row_id(r)))
+                .on_press(Message::Fleet(Action::ToggleFindings(row_id(r))))
                 .style(iced::widget::button::text)
                 .into()
         }),
@@ -565,8 +591,8 @@ pub fn fleet_view(state: &FleetState) -> Element<'_, Message> {
     body = body.push(
         DataTable::new(columns)
             .searchable(FleetRow::search_key)
-            .on_sort(Message::FleetTableSort)
-            .on_filter(Message::FleetTableFilter)
+            .on_sort(|c| Message::Fleet(Action::Sort(c)))
+            .on_filter(|q| Message::Fleet(Action::Filter(q)))
             .noun("producers")
             .view(rows, &state.table),
     );

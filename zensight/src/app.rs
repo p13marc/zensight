@@ -1334,28 +1334,6 @@ impl ZenSight {
                     device.parallax_detail.apply_stream_status(&status);
                 }
             }
-            Message::ToggleSnmpEventFilters => {
-                let filter = &mut self.dashboard.snmp_event_filter;
-                filter.open = !filter.open;
-            }
-            Message::SetSnmpEventDevice(device) => {
-                self.dashboard.snmp_event_filter.device = device;
-            }
-            Message::SetSnmpEventSeverity(severity) => {
-                self.dashboard.snmp_event_filter.severity = severity;
-            }
-            Message::SetSnmpEventKind(kind) => {
-                self.dashboard.snmp_event_filter.kind = kind;
-            }
-            Message::SetSnmpEventTimeRange(range) => {
-                // Resolved against the clock here so the view stays pure.
-                self.dashboard
-                    .snmp_event_filter
-                    .set_time_range(range, now_ms());
-            }
-            Message::SetSnmpEventSearch(search) => {
-                self.dashboard.snmp_event_filter.search = search;
-            }
             Message::LogOlderPageLoaded(result) => {
                 self.syslog_filter.loading_older = false;
                 match result {
@@ -1399,9 +1377,6 @@ impl ZenSight {
                     }
                 }
             }
-            Message::ClearSnmpEventFilters => {
-                self.dashboard.snmp_event_filter.clear();
-            }
             Message::OpenAlertsForSource(source) => {
                 self.alerts.external_source_filter = Some(source);
                 self.alerts.focused_external = None;
@@ -1416,9 +1391,6 @@ impl ZenSight {
                 self.alerts.external_severity_filter = None;
                 self.alerts.external_protocol_filter = None;
                 self.set_view(CurrentView::Alerts);
-            }
-            Message::ClearAlertFocus => {
-                self.alerts.focused_external = None;
             }
             Message::EventHistory(events) => {
                 // Cold-store backfill at boot (#578); `push_event` dedups
@@ -1553,6 +1525,40 @@ impl ZenSight {
 
             Message::Settings(field) => {
                 self.settings.set(field);
+            }
+
+            Message::Dashboard(action) => {
+                self.dashboard.update(action);
+            }
+
+            Message::TrapFeed(filter) => {
+                self.dashboard.snmp_event_filter.update(filter, now_ms());
+            }
+
+            Message::Alerts(action) => {
+                if self.alerts.update(action) == crate::view::alerts::Effect::Persist {
+                    self.save_alert_filter_presets();
+                }
+            }
+
+            Message::Inventory(action) => {
+                self.inventory.update(action);
+            }
+
+            Message::Bandwidth(action) => {
+                use crate::view::bandwidth::Effect;
+                match self.bandwidth.update(action) {
+                    Effect::None => {}
+                    Effect::RebuildServices => {
+                        let rows = self.bandwidth_service_rows();
+                        self.bandwidth.set_services(rows);
+                    }
+                    Effect::FetchProcesses => return self.query_bandwidth(),
+                }
+            }
+
+            Message::Fleet(action) => {
+                self.fleet.update(action);
             }
 
             Message::Security(action) => {
@@ -2235,34 +2241,6 @@ impl ZenSight {
                 }
             }
 
-            Message::ToggleProducerFilter(producer) => {
-                self.dashboard.toggle_filter(producer);
-            }
-
-            Message::SetStatusFilter(status) => {
-                self.dashboard.set_status_filter(status);
-            }
-
-            Message::SetDeviceSearchFilter(filter) => {
-                self.dashboard.set_search_filter(filter);
-            }
-
-            Message::NextPage => {
-                self.dashboard.next_page();
-            }
-
-            Message::PrevPage => {
-                self.dashboard.prev_page();
-            }
-
-            Message::GoToPage(page) => {
-                self.dashboard.go_to_page(page);
-            }
-
-            Message::ToggleDashboardViewMode => {
-                self.dashboard.toggle_view_mode();
-            }
-
             Message::ToggleGroupByHost => {
                 self.settings.group_by_host = !self.settings.group_by_host;
                 self.save_group_by_host();
@@ -2537,16 +2515,6 @@ impl ZenSight {
             Message::InventoryLoaded(result) => {
                 self.inventory.apply(result);
             }
-            Message::SetInventoryAssetSort(sort) => {
-                self.inventory.asset_sort = sort;
-            }
-            Message::SetInventoryAssetRole(role) => {
-                self.inventory.asset_role_filter = role;
-            }
-            Message::SetInventoryFpFilter(kind) => {
-                self.inventory.fp_filter = kind;
-            }
-
             Message::OpenBandwidth => {
                 // Nav-rail entry = unscoped (#351); the per-host pivot below
                 // sets the scope instead.
@@ -2589,33 +2557,6 @@ impl ZenSight {
             Message::BandwidthLoaded(result) => {
                 self.bandwidth.apply(result);
             }
-            Message::SetBandwidthMode(mode) => {
-                self.bandwidth.mode = mode;
-                self.bandwidth.table = crate::view::components::TableState::default();
-                match mode {
-                    crate::view::bandwidth::BandwidthMode::Services => {
-                        let rows = self.bandwidth_service_rows();
-                        self.bandwidth.set_services(rows);
-                    }
-                    // Fetch per-process rows the first time that mode is shown.
-                    crate::view::bandwidth::BandwidthMode::Processes => {
-                        if matches!(
-                            self.bandwidth.processes,
-                            crate::view::specialized::fetch::Fetch::Idle
-                        ) {
-                            self.bandwidth.loading();
-                            return self.query_bandwidth();
-                        }
-                    }
-                }
-            }
-            Message::BandwidthTableSort(col) => {
-                self.bandwidth.table.toggle_sort(col);
-            }
-            Message::BandwidthTableFilter(q) => {
-                self.bandwidth.table.set_filter(q);
-            }
-
             Message::OpenFleet => {
                 self.set_view(CurrentView::Fleet);
                 self.save_current_view();
@@ -2701,20 +2642,6 @@ impl ZenSight {
                 self.dashboard.push_event(event);
                 self.sync_selected_intake();
             }
-            Message::ToggleFleetFindings(id) => {
-                self.fleet.expanded = if self.fleet.expanded.as_deref() == Some(id.as_str()) {
-                    None
-                } else {
-                    Some(id)
-                };
-            }
-            Message::FleetTableSort(col) => {
-                self.fleet.table.toggle_sort(col);
-            }
-            Message::FleetTableFilter(q) => {
-                self.fleet.table.set_filter(q);
-            }
-
             Message::OpenExplorer => {
                 self.set_view(CurrentView::Explorer);
                 self.save_current_view();
@@ -2918,38 +2845,12 @@ impl ZenSight {
                 return task;
             }
 
-            Message::SetAlertSeverityFilter(sev) => {
-                self.alerts.external_severity_filter = sev;
-                self.alerts.focused_external = None;
-            }
-            Message::SetAlertSourceFilter(source) => {
-                self.alerts.external_source_filter = source;
-                self.alerts.focused_external = None;
-            }
-            Message::SetAlertProtocolFilter(protocol) => {
-                self.alerts.external_protocol_filter = protocol;
-                self.alerts.focused_external = None;
-            }
             Message::OpenAlertsForProtocol(protocol) => {
                 // Overview tile click-through (#582): protocol-scoped Alerts.
                 self.alerts.external_protocol_filter = Some(protocol);
                 self.alerts.focused_external = None;
                 self.set_view(CurrentView::Alerts);
             }
-            Message::SaveAlertFilterPreset => {
-                if self.alerts.save_current_filter_preset() {
-                    self.save_alert_filter_presets();
-                }
-            }
-            Message::ApplyAlertFilterPreset(index) => {
-                self.alerts.apply_filter_preset(index);
-                self.alerts.focused_external = None;
-            }
-            Message::DeleteAlertFilterPreset(index) => {
-                self.alerts.delete_filter_preset(index);
-                self.save_alert_filter_presets();
-            }
-
             Message::ToggleHelp => {
                 self.help_open = !self.help_open;
             }
