@@ -17,7 +17,8 @@ use zensight_common::pve::{
     AllocationSource, PveBackupJob, PveBackupSchedule, PveBackupSummary, PveBackupVolume,
     PveCephStatus, PveClusterHealth, PveGuest, PveNode, PveStoragePool,
 };
-use zensight_common::{HostEvidence, QosClass, TelemetryValue};
+use zensight_common::registry::pve::Subject;
+use zensight_common::{HostEvidence, QosClass, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{
     AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth, SweepOpts,
 };
@@ -25,7 +26,6 @@ use zensight_sensor_core::{
 use crate::alerts::{self, Observation};
 use crate::api::{PveClient, build_guest, build_pool};
 use crate::config::PveConfig;
-use crate::telemetry_guard::checked_point;
 
 /// Everything one sweep learned. Kept whole so the state documents, the
 /// gauges and the assertions all describe the *same* observation — a
@@ -506,20 +506,27 @@ impl Poller {
 
         for g in &sweep.guests {
             let labels = guest_labels(g);
-            let mut points = Vec::new();
+            let vmid = g.vmid.to_string();
+            let mut points: Vec<(Subject, f64)> = Vec::new();
             if let Some(m) = sweep.metrics.iter().find(|m| m.vmid == g.vmid) {
                 // Only what the hypervisor actually reported. A `0` for a
                 // plugin that cannot report disk usage would read as "empty",
                 // which is a worse answer than no series at all.
-                for (suffix, value) in [
-                    ("cpu_ratio", m.cpu),
-                    ("mem_bytes", m.mem.map(|v| v as f64)),
-                    ("mem_max_bytes", m.maxmem.map(|v| v as f64)),
-                    ("disk_bytes", m.disk.map(|v| v as f64)),
-                    ("disk_max_bytes", m.maxdisk.map(|v| v as f64)),
+                for (subject, value) in [
+                    (Subject::guest_cpu_ratio(&vmid), m.cpu),
+                    (Subject::guest_mem_bytes(&vmid), m.mem.map(|v| v as f64)),
+                    (
+                        Subject::guest_mem_max_bytes(&vmid),
+                        m.maxmem.map(|v| v as f64),
+                    ),
+                    (Subject::guest_disk_bytes(&vmid), m.disk.map(|v| v as f64)),
+                    (
+                        Subject::guest_disk_max_bytes(&vmid),
+                        m.maxdisk.map(|v| v as f64),
+                    ),
                 ] {
                     if let Some(v) = value {
-                        points.push((format!("guest/{}/{suffix}", g.vmid), v));
+                        points.push((subject, v));
                     }
                 }
             }
@@ -530,16 +537,16 @@ impl Poller {
             // same claim every other metric in this block refuses to make.
             if alerts::guest_is_observable(sweep.cluster.as_ref(), &g.node) {
                 points.push((
-                    format!("guest/{}/running", g.vmid),
+                    Subject::guest_running(&vmid),
                     if g.is_running() { 1.0 } else { 0.0 },
                 ));
             }
             points.push((
-                format!("guest/{}/uptime_secs", g.vmid),
+                Subject::guest_uptime_secs(&vmid),
                 g.uptime_secs.unwrap_or(0) as f64,
             ));
             if let Some(p) = g.provisioned_bytes {
-                points.push((format!("guest/{}/provisioned_bytes", g.vmid), p as f64));
+                points.push((Subject::guest_provisioned_bytes(&vmid), p as f64));
             }
             // The four counters the row already carried (#1141). Published as
             // COUNTERS, not gauges: they are monotonic since the guest booted
@@ -547,17 +554,20 @@ impl Poller {
             // (#1152) decodes as a reset rather than as a cliff. A gauge would
             // put the raw total on a dashboard, where it means nothing.
             if let Some(m) = sweep.metrics.iter().find(|m| m.vmid == g.vmid) {
-                for (suffix, value) in [
-                    ("net_in_bytes", m.netin),
-                    ("net_out_bytes", m.netout),
-                    ("disk_read_bytes", m.diskread),
-                    ("disk_write_bytes", m.diskwrite),
+                for (subject, value) in [
+                    (Subject::guest_net_in_bytes(&vmid), m.netin),
+                    (Subject::guest_net_out_bytes(&vmid), m.netout),
+                    (Subject::guest_disk_read_bytes(&vmid), m.diskread),
+                    (Subject::guest_disk_write_bytes(&vmid), m.diskwrite),
                 ] {
                     let Some(v) = value else { continue };
-                    let metric = format!("guest/{}/{suffix}", g.vmid);
-                    let point = checked_point(&self.source, &metric, TelemetryValue::Counter(v))
-                        .with_labels(labels.clone());
-                    if let Err(e) = self.publisher.publish(&metric, &point).await {
+                    let point = TelemetryPoint::for_subject(
+                        &self.source,
+                        &subject,
+                        TelemetryValue::Counter(v),
+                    )
+                    .with_labels(labels.clone());
+                    if let Err(e) = self.publisher.publish_subject(&subject, &point).await {
                         tracing::debug!(error = %e, "pve: counter publish failed");
                     } else {
                         published += 1;
@@ -565,14 +575,18 @@ impl Poller {
                 }
             }
 
-            for (metric, value) in points {
+            for (subject, value) in points {
                 // `source` is the host doing the reporting, never the guest
                 // being reported on (#883). The vmid is in the key and in the
                 // labels; a guest is a facet of this hypervisor, not a
                 // separate machine that publishes for itself.
-                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                    .with_labels(labels.clone());
-                if let Err(e) = self.publisher.publish(&metric, &point).await {
+                let point = TelemetryPoint::for_subject(
+                    &self.source,
+                    &subject,
+                    TelemetryValue::Gauge(value),
+                )
+                .with_labels(labels.clone());
+                if let Err(e) = self.publisher.publish_subject(&subject, &point).await {
                     tracing::debug!(error = %e, "pve: telemetry publish failed");
                 } else {
                     published += 1;
@@ -626,27 +640,42 @@ impl Poller {
             let labels = [("node".to_string(), n.name.clone())]
                 .into_iter()
                 .collect::<std::collections::HashMap<_, _>>();
-            for (suffix, value) in [
-                ("cpu_ratio", n.cpu_ratio),
-                ("mem_bytes", n.mem_bytes.map(|v| v as f64)),
-                ("mem_total_bytes", n.mem_total_bytes.map(|v| v as f64)),
+            for (subject, value) in [
+                (Subject::node_cpu_ratio(&n.name), n.cpu_ratio),
+                (
+                    Subject::node_mem_bytes(&n.name),
+                    n.mem_bytes.map(|v| v as f64),
+                ),
+                (
+                    Subject::node_mem_total_bytes(&n.name),
+                    n.mem_total_bytes.map(|v| v as f64),
+                ),
                 // Absent on a node with no swap configured, which is a
                 // deliberate configuration rather than 0 % used.
-                ("swap_bytes", n.swap_bytes.map(|v| v as f64)),
-                ("rootfs_bytes", n.rootfs_bytes.map(|v| v as f64)),
-                ("rootfs_used_ratio", n.rootfs_ratio()),
-                ("load1", n.load1),
-                ("load_per_cpu", n.load_per_cpu()),
-                ("uptime_secs", n.uptime_secs.map(|v| v as f64)),
+                (
+                    Subject::node_swap_bytes(&n.name),
+                    n.swap_bytes.map(|v| v as f64),
+                ),
+                (
+                    Subject::node_rootfs_bytes(&n.name),
+                    n.rootfs_bytes.map(|v| v as f64),
+                ),
+                (Subject::node_rootfs_used_ratio(&n.name), n.rootfs_ratio()),
+                (Subject::node_load1(&n.name), n.load1),
+                (Subject::node_load_per_cpu(&n.name), n.load_per_cpu()),
+                (
+                    Subject::node_uptime_secs(&n.name),
+                    n.uptime_secs.map(|v| v as f64),
+                ),
             ] {
                 // Absent stays absent: a field PVE did not report is a
                 // MISSING reading, not a zero, and its shape has moved across
                 // releases.
                 let Some(v) = value else { continue };
-                let metric = format!("node/{chunk}/{suffix}");
-                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(v))
-                    .with_labels(labels.clone());
-                if let Err(e) = self.publisher.publish(&metric, &point).await {
+                let point =
+                    TelemetryPoint::for_subject(&self.source, &subject, TelemetryValue::Gauge(v))
+                        .with_labels(labels.clone());
+                if let Err(e) = self.publisher.publish_subject(&subject, &point).await {
                     tracing::debug!(error = %e, "pve: node telemetry publish failed");
                 } else {
                     published += 1;
@@ -677,17 +706,17 @@ impl Poller {
         // `healthy: 0`. A cluster with no Ceph is not a cluster with unhealthy
         // Ceph.
         if let Some(c) = &sweep.ceph {
-            for (suffix, value) in [
+            for (subject, value) in [
                 // Ceph's OWN enum, never our reading of the counters below it.
                 (
-                    "healthy",
+                    Subject::CephHealthy,
                     Some(if c.health == "HEALTH_OK" { 1.0 } else { 0.0 }),
                 ),
-                ("osds_up", c.osds_up.map(f64::from)),
-                ("osds_total", c.osds_total.map(f64::from)),
-                ("pgs_degraded", c.pgs_degraded.map(f64::from)),
+                (Subject::CephOsdsUp, c.osds_up.map(f64::from)),
+                (Subject::CephOsdsTotal, c.osds_total.map(f64::from)),
+                (Subject::CephPgsDegraded, c.pgs_degraded.map(f64::from)),
                 (
-                    "used_ratio",
+                    Subject::CephUsedRatio,
                     match (c.bytes_used, c.bytes_total) {
                         (Some(u), Some(t)) if t > 0 => Some(u as f64 / t as f64),
                         _ => None,
@@ -695,9 +724,9 @@ impl Poller {
                 ),
             ] {
                 let Some(v) = value else { continue };
-                let metric = format!("ceph/{suffix}");
-                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(v));
-                if let Err(e) = self.publisher.publish(&metric, &point).await {
+                let point =
+                    TelemetryPoint::for_subject(&self.source, &subject, TelemetryValue::Gauge(v));
+                if let Err(e) = self.publisher.publish_subject(&subject, &point).await {
                     tracing::debug!(error = %e, "pve: ceph telemetry publish failed");
                 } else {
                     published += 1;
@@ -730,18 +759,32 @@ impl Poller {
             } else {
                 zensight_sensor_core::key::device_chunk(format!("{}-{}", p.node, p.storage))
             };
-            let stem = format!("storage/{slug}");
-            for (suffix, value) in [
-                ("total_bytes", p.total_bytes as f64),
-                ("used_bytes", p.used_bytes as f64),
-                ("avail_bytes", p.avail_bytes as f64),
-                ("used_ratio", p.used_ratio()),
+            // The builder slugs the raw value itself (#1274); `slug` above is
+            // what the state document's key carries.
+            let store = if p.shared {
+                p.storage.clone()
+            } else {
+                format!("{}-{}", p.node, p.storage)
+            };
+            for (subject, value) in [
+                (Subject::storage_total_bytes(&store), p.total_bytes as f64),
+                (Subject::storage_used_bytes(&store), p.used_bytes as f64),
+                (Subject::storage_avail_bytes(&store), p.avail_bytes as f64),
+                (Subject::storage_used_ratio(&store), p.used_ratio()),
             ] {
-                let metric = format!("{stem}/{suffix}");
-                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                    .with_label("storage", p.storage.clone())
-                    .with_label("node", p.node.clone());
-                if self.publisher.publish(&metric, &point).await.is_ok() {
+                let point = TelemetryPoint::for_subject(
+                    &self.source,
+                    &subject,
+                    TelemetryValue::Gauge(value),
+                )
+                .with_label("storage", p.storage.clone())
+                .with_label("node", p.node.clone());
+                if self
+                    .publisher
+                    .publish_subject(&subject, &point)
+                    .await
+                    .is_ok()
+                {
                     published += 1;
                 }
             }
@@ -749,15 +792,20 @@ impl Poller {
             // would read as "nothing is provisioned", which is the one wrong
             // answer this family can give.
             if let Some(a) = p.allocated_bytes {
-                for (suffix, value) in [
-                    ("allocated_bytes", a as f64),
-                    ("overcommit_ratio", p.overcommit_ratio.unwrap_or(0.0)),
+                for (subject, value) in [
+                    (Subject::storage_allocated_bytes(&store), a as f64),
+                    (
+                        Subject::storage_overcommit_ratio(&store),
+                        p.overcommit_ratio.unwrap_or(0.0),
+                    ),
                 ] {
-                    let metric = format!("{stem}/{suffix}");
-                    let mut point =
-                        checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                            .with_label("storage", p.storage.clone())
-                            .with_label("node", p.node.clone());
+                    let mut point = TelemetryPoint::for_subject(
+                        &self.source,
+                        &subject,
+                        TelemetryValue::Gauge(value),
+                    )
+                    .with_label("storage", p.storage.clone())
+                    .with_label("node", p.node.clone());
                     // Reported vs derived rides on the series, not only in the
                     // document: a derived total is a floor, and a dashboard
                     // comparing two pools must be able to see which is which.
@@ -770,7 +818,12 @@ impl Poller {
                             },
                         );
                     }
-                    if self.publisher.publish(&metric, &point).await.is_ok() {
+                    if self
+                        .publisher
+                        .publish_subject(&subject, &point)
+                        .await
+                        .is_ok()
+                    {
                         published += 1;
                     }
                 }
@@ -783,32 +836,39 @@ impl Poller {
         }
 
         for b in &sweep.backups {
-            let mut points = Vec::new();
+            let vmid = b.vmid.to_string();
+            let mut points: Vec<(Subject, f64)> = Vec::new();
             if let Some(l) = &b.latest {
-                points.push((format!("backup/{}/size_bytes", b.vmid), l.size_bytes as f64));
+                points.push((Subject::backup_size_bytes(&vmid), l.size_bytes as f64));
             }
             if let Some(c) = b.size_change_pct {
-                points.push((format!("backup/{}/size_change_pct", b.vmid), c));
+                points.push((Subject::backup_size_change_pct(&vmid), c));
             }
             if let Some(a) = b.age_secs {
-                points.push((format!("backup/{}/age_secs", b.vmid), a as f64));
+                points.push((Subject::backup_age_secs(&vmid), a as f64));
             }
             if let Some(t) = &b.last_task {
-                points.push((
-                    format!("backup/{}/ok", b.vmid),
-                    if t.ok { 1.0 } else { 0.0 },
-                ));
+                points.push((Subject::backup_ok(&vmid), if t.ok { 1.0 } else { 0.0 }));
                 if let Some(d) = t.duration_secs {
-                    points.push((format!("backup/{}/duration_secs", b.vmid), d as f64));
+                    points.push((Subject::backup_duration_secs(&vmid), d as f64));
                 }
             }
-            for (metric, value) in points {
+            for (subject, value) in points {
                 // Named its subject for the first time: these points carried
                 // no labels at all, so a consumer holding one as a value had
                 // no idea which guest it was about (#883).
-                let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                    .with_label("vmid", b.vmid.to_string());
-                if self.publisher.publish(&metric, &point).await.is_ok() {
+                let point = TelemetryPoint::for_subject(
+                    &self.source,
+                    &subject,
+                    TelemetryValue::Gauge(value),
+                )
+                .with_label("vmid", b.vmid.to_string());
+                if self
+                    .publisher
+                    .publish_subject(&subject, &point)
+                    .await
+                    .is_ok()
+                {
                     published += 1;
                 }
             }
@@ -822,14 +882,28 @@ impl Poller {
         for j in &sweep.backup_jobs {
             let slug = zensight_sensor_core::key::device_chunk(&j.node);
             if let Some(t) = &j.last_task {
-                for (suffix, value) in [
-                    ("ok", if t.ok { 1.0 } else { 0.0 }),
-                    ("duration_secs", t.duration_secs.unwrap_or(0) as f64),
+                for (subject, value) in [
+                    (
+                        Subject::backup_job_ok(&j.node),
+                        if t.ok { 1.0 } else { 0.0 },
+                    ),
+                    (
+                        Subject::backup_job_duration_secs(&j.node),
+                        t.duration_secs.unwrap_or(0) as f64,
+                    ),
                 ] {
-                    let metric = format!("backup/job/{slug}/{suffix}");
-                    let point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value))
-                        .with_label("node", j.node.clone());
-                    if self.publisher.publish(&metric, &point).await.is_ok() {
+                    let point = TelemetryPoint::for_subject(
+                        &self.source,
+                        &subject,
+                        TelemetryValue::Gauge(value),
+                    )
+                    .with_label("node", j.node.clone());
+                    if self
+                        .publisher
+                        .publish_subject(&subject, &point)
+                        .await
+                        .is_ok()
+                    {
                         published += 1;
                     }
                 }
@@ -843,13 +917,10 @@ impl Poller {
 
         if let Some(c) = &sweep.cluster {
             let mut points = vec![
-                ("cluster/guests_total".to_string(), c.guests_total as f64),
+                (Subject::ClusterGuestsTotal, c.guests_total as f64),
+                (Subject::ClusterGuestsRunning, c.guests_running as f64),
                 (
-                    "cluster/guests_running".to_string(),
-                    c.guests_running as f64,
-                ),
-                (
-                    "cluster/replication_failed".to_string(),
+                    Subject::ClusterReplicationFailed,
                     c.replication.iter().filter(|j| j.failed).count() as f64,
                 ),
             ];
@@ -858,23 +929,32 @@ impl Poller {
             // empty node list is "could not ask", and `nodes_online = 0`
             // would read as "every node is down".
             if !c.nodes.is_empty() {
-                points.push(("cluster/nodes_online".to_string(), c.nodes_online() as f64));
-                points.push(("cluster/nodes_total".to_string(), c.nodes.len() as f64));
+                points.push((Subject::ClusterNodesOnline, c.nodes_online() as f64));
+                points.push((Subject::ClusterNodesTotal, c.nodes.len() as f64));
             }
             // Absent, not 0, on a standalone node: there is no quorum to
             // report, and 0 would read as "lost".
             if let Some(q) = c.quorate {
-                points.push(("cluster/quorate".to_string(), if q { 1.0 } else { 0.0 }));
+                points.push((Subject::ClusterQuorate, if q { 1.0 } else { 0.0 }));
             }
-            for (metric, value) in points {
-                let mut point = checked_point(&self.source, &metric, TelemetryValue::Gauge(value));
+            for (subject, value) in points {
+                let mut point = TelemetryPoint::for_subject(
+                    &self.source,
+                    &subject,
+                    TelemetryValue::Gauge(value),
+                );
                 // The node this cluster view was read from. Not the identity
                 // of the series — that is the reporting host — but the fact a
                 // reader needs when two hypervisors are polled from one place.
                 if let Some(local) = c.nodes.iter().find(|n| n.local) {
                     point = point.with_label("node", local.name.clone());
                 }
-                if self.publisher.publish(&metric, &point).await.is_ok() {
+                if self
+                    .publisher
+                    .publish_subject(&subject, &point)
+                    .await
+                    .is_ok()
+                {
                     published += 1;
                 }
             }

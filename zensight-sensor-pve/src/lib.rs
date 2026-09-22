@@ -40,4 +40,49 @@ pub mod api;
 pub mod cli;
 pub mod config;
 pub mod poller;
-mod telemetry_guard;
+
+#[cfg(test)]
+mod typed_subjects {
+    use zensight_common::registry::pve::Subject;
+    use zensight_common::subject::TelemetrySubject;
+
+    /// The generated subjects render the tails this sensor published by hand
+    /// (#1274): byte-identical keys, so every consumer's series carries over.
+    #[test]
+    fn the_registered_families_render_their_tails() {
+        for (subject, tail) in [
+            (Subject::guest_cpu_ratio("140"), "guest/140/cpu_ratio"),
+            (Subject::guest_running("140"), "guest/140/running"),
+            (Subject::guest_net_in_bytes("140"), "guest/140/net_in_bytes"),
+            (
+                Subject::storage_overcommit_ratio("local-lvm"),
+                "storage/local-lvm/overcommit_ratio",
+            ),
+            (
+                Subject::backup_size_change_pct("140"),
+                "backup/140/size_change_pct",
+            ),
+            (Subject::backup_job_ok("pve1"), "backup/job/pve1/ok"),
+            (Subject::node_load1("pve1"), "node/pve1/load1"),
+            (Subject::CephUsedRatio, "ceph/used_ratio"),
+            (Subject::ClusterQuorate, "cluster/quorate"),
+        ] {
+            assert_eq!(subject.tail(), tail);
+        }
+    }
+
+    /// A non-shared pool's chunk is the node and the storage, slugged once by
+    /// the builder from the raw pair — the same chunk `device_chunk` made at
+    /// the old call site, and the one the pool's state document is keyed by.
+    #[test]
+    fn a_local_pool_is_keyed_by_node_and_storage() {
+        let raw = format!("{}-{}", "pve1", "local-lvm");
+        let subject = Subject::storage_used_ratio(&raw);
+        let chunk = zensight_sensor_core::key::device_chunk(&raw);
+        assert_eq!(
+            subject.tail(),
+            format!("storage/{}/used_ratio", chunk.as_str())
+        );
+        assert_eq!(subject.vars()[0], ("store", chunk.as_str().to_string()));
+    }
+}
