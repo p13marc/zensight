@@ -57,6 +57,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`Publisher::publish_subject` — a telemetry key is rendered from the
+  generated subject, not spelled** (#1274, the bullet #1153 deferred).
+  `zensight_common::subject::TelemetrySubject` is implemented by every
+  producer's generated `registry::<producer>::Subject`; both publisher tiers
+  take one and render the key as their own producer (instance suffix
+  included), and `TelemetryPoint::for_subject` builds the point with the
+  subject's tail as its metric, so the metric string and the key can no
+  longer disagree. A subject the registry does not declare has no
+  constructor, which is the compile-time answer to the runtime question the
+  metric guard asks on every put; a state subject handed to the telemetry
+  path is refused by name. `bmc` is the first sensor on it: its
+  `telemetry_guard.rs` is gone, its keys are byte-identical (pinned by
+  `typed_subjects::the_registered_families_render_their_tails`), and its
+  `chassis` label is read back from the subject's bound `{chassis}` rather
+  than spelled twice. The `&str`-suffix `publish` stays as the interim while
+  the other sensors move, one per PR.
+
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green
   throughout: the deployment's watchdog had five `origin-down` rules, which

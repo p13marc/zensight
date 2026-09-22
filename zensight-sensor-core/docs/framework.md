@@ -139,8 +139,16 @@ There are **two tiers, one contract** (#1155 — the `Publish` trait in
   (reliable+block) so a firing/resolved event is never dropped on a lossy link;
   health uses `QosClass::HealthLiveness` (drop-friendly). `Publisher` — the
   runner's own, behind `V1Context::telemetry_prefix()` — is this tier:
-  `publish` / `publish_to_key` / `publish_batch` for telemetry, `publish_raw` /
-  `publish_json` / `delete` for state documents.
+  `publish_subject` / `publish_batch_subjects` for telemetry (#1274: the
+  generated `zensight_common::registry::<producer>::Subject` in, the key
+  rendered from it, the point built by `TelemetryPoint::for_subject` so its
+  metric is the subject's tail — a subject the registry does not declare has
+  no constructor, and the metric guard has nothing left to say), `publish` /
+  `publish_to_key` / `publish_batch` as the `&str`-suffix interim while the
+  sensors move (checked on every put by the guard), `publish_raw` /
+  `publish_json` / `delete` for state documents. A builder slugs the foreign
+  value itself: hand it the raw value, never a chunk — the slug is injective
+  and would escape a chunk a second time. `bmc` is the exemplar.
 - **Advanced** — `AdvancedPublisherRegistry`: zenoh-ext *advanced* publishers
   (per-key cache + sample-miss / publisher detection), one class per registry
   (`with_qos`, default `Telemetry`; evidence feeds set `Evidence`). This is

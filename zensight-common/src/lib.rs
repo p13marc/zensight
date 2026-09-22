@@ -66,6 +66,7 @@ pub mod silence;
 pub mod slug;
 pub mod state;
 pub mod stream;
+pub mod subject;
 pub mod subscribe;
 pub mod systemd;
 pub mod targets;

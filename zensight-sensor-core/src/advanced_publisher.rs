@@ -254,10 +254,47 @@ impl AdvancedPublisherRegistry {
 
     /// Publish a telemetry point using an advanced publisher.
     ///
-    /// The publisher for this key is created on first use and cached.
+    /// The publisher for this key is created on first use and cached. The
+    /// string form is the interim (#1274) — see
+    /// [`Publisher::publish`](crate::publisher::Publisher::publish).
     pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
         let key = self.build_key(key_suffix);
         self.publish_to_key(&key, point).await
+    }
+
+    /// Publish a telemetry point under its generated subject (#1274) — the
+    /// advanced tier's [`Publisher::publish_subject`](crate::publisher::Publisher::publish_subject).
+    pub async fn publish_subject(
+        &self,
+        subject: &impl zensight_common::subject::TelemetrySubject,
+        point: &TelemetryPoint,
+    ) -> Result<()> {
+        debug_assert_eq!(
+            point.metric,
+            subject.tail(),
+            "the point's metric must be the subject it is published under (#1274)"
+        );
+        let producer = self.producer()?;
+        let key =
+            zensight_common::subject::telemetry_key(subject, &producer).map_err(|message| {
+                SensorError::Publish {
+                    key: subject.tail(),
+                    message,
+                }
+            })?;
+        self.publish_to_key(key.as_str(), point).await
+    }
+
+    /// The producer this registry publishes as, read back from its prefix
+    /// (`v1/<origin>/telemetry/<producer>`) — instance suffix included.
+    fn producer(&self) -> Result<zenkey::grammar::Producer> {
+        zenkey::grammar::parse(&self.telemetry_prefix)
+            .ok()
+            .and_then(|parsed| parsed.producer().cloned())
+            .ok_or_else(|| SensorError::Publish {
+                key: self.telemetry_prefix.clone(),
+                message: "the telemetry prefix names no producer".to_string(),
+            })
     }
 
     /// Install a point observer (#930). Idempotent-by-first-call.

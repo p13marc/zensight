@@ -59,6 +59,23 @@ impl TelemetryPoint {
         }
     }
 
+    /// A point under a registry-declared subject (#1274): the metric is the
+    /// subject's tail, so it cannot disagree with the key the point is
+    /// published under (`Publisher::publish_subject`). A state subject is a
+    /// caller's bug, caught in debug; the publisher refuses it in release.
+    pub fn for_subject(
+        source: impl Into<String>,
+        subject: &impl crate::subject::TelemetrySubject,
+        value: TelemetryValue,
+    ) -> Self {
+        debug_assert_eq!(
+            subject.class(),
+            zenkey::grammar::Class::Telemetry,
+            "{subject:?} is not a telemetry subject"
+        );
+        Self::new(source, subject.tail(), value)
+    }
+
     /// Add a label to this telemetry point.
     pub fn with_label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.insert(key.into(), value.into());

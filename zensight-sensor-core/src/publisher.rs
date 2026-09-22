@@ -5,6 +5,7 @@ use std::sync::Arc;
 use zenoh::bytes::{Encoding, ZBytes};
 use zenoh::handlers::DefaultHandler;
 use zenoh::matching::MatchingListenerBuilder;
+use zensight_common::subject::TelemetrySubject;
 use zensight_common::{Format, QosClass, TelemetryPoint};
 
 use crate::error::{Result, SensorError};
@@ -116,10 +117,68 @@ impl Publisher {
 
     /// Publish a telemetry point (baseline tier: plain declared publisher).
     ///
-    /// The key is constructed by appending `key_suffix` to the publisher's prefix.
+    /// The key is constructed by appending `key_suffix` to the publisher's
+    /// prefix. **The string form is the interim** (#1274): a suffix is spelled
+    /// by hand and checked on every put by the metric guard, where
+    /// [`Self::publish_subject`] takes the generated subject and cannot spell
+    /// one the registry does not declare. Retired when the last caller moves.
     pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
         let key = self.build_key(key_suffix);
         self.publish_to_key(&key, point).await
+    }
+
+    /// Publish a telemetry point under its generated subject (#1274): the
+    /// key is rendered from the subject as this publisher's producer, so a
+    /// subject the registry does not declare does not compile, and the
+    /// metric guard has nothing left to say. The point's metric must be the
+    /// subject's tail — build it with [`TelemetryPoint::for_subject`].
+    pub async fn publish_subject(
+        &self,
+        subject: &impl TelemetrySubject,
+        point: &TelemetryPoint,
+    ) -> Result<()> {
+        let key = self.subject_key(subject, point)?;
+        self.publish_to_key(key.as_str(), point).await
+    }
+
+    /// The key a subject publishes under, refusing a state subject.
+    fn subject_key(
+        &self,
+        subject: &impl TelemetrySubject,
+        point: &TelemetryPoint,
+    ) -> Result<zenkey::key::Key> {
+        debug_assert_eq!(
+            point.metric,
+            subject.tail(),
+            "the point's metric must be the subject it is published under (#1274)"
+        );
+        zensight_common::subject::telemetry_key(subject, self.v1.producer()).map_err(|message| {
+            SensorError::Publish {
+                key: subject.tail(),
+                message,
+            }
+        })
+    }
+
+    /// Publish a batch of points under their generated subjects (#1274).
+    ///
+    /// Returns the number of successfully published points and logs errors.
+    pub async fn publish_batch_subjects<'a, S, I>(&self, points: I) -> PublishStats
+    where
+        S: TelemetrySubject + 'a,
+        I: IntoIterator<Item = (&'a S, &'a TelemetryPoint)>,
+    {
+        let mut stats = PublishStats::default();
+        for (subject, point) in points {
+            match self.publish_subject(subject, point).await {
+                Ok(()) => stats.success += 1,
+                Err(e) => {
+                    stats.failed += 1;
+                    tracing::warn!(error = %e, "Failed to publish telemetry");
+                }
+            }
+        }
+        stats
     }
 
     /// Publish a telemetry point with a full key (not using prefix).
