@@ -61,6 +61,9 @@ fn arm_action(state: &DeviceDetailState, verb: Verb, unit: String) -> Message {
         format!("{verb} {unit}")
     };
     Message::Arm(Armed {
+        surface: crate::call::CallSurface::Device,
+        producer: None,
+        origin: None,
         procedure: ACTION_SET.to_string(),
         request: serde_json::to_value(ServiceAction { verb, unit }).unwrap_or_default(),
         label,

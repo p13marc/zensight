@@ -42,8 +42,31 @@ pub struct SecurityState {
     /// evidence file for download right in the drill-down.
     pub captures: Fetch<Vec<zensight_common::CaptureRecord>>,
     /// The calls this surface has made (#1261): the flow↔process joins of
-    /// the pivot-flow rows, `netlink/sockets` per endpoint, keyed by flow.
+    /// the pivot-flow rows, `netlink/sockets` per endpoint, keyed by flow;
+    /// and the tuning panel's three status reads at the chosen host.
     pub calls: crate::call::Calls,
+    /// The writes this surface has armed and sent (#1261): the tuning
+    /// panel's, each to the chosen host and no other.
+    pub writes: crate::call::Writes,
+    /// The netring host the tuning panel reads from and writes to (#1261,
+    /// the rule #1114 set for the expectations pane): one host's sensor,
+    /// chosen by the operator or alone on the fleet. `None` disables every
+    /// write control — a fleet fan-in's first reply used to be rendered as
+    /// the config and edited back fleet-wide.
+    pub host: Option<crate::view::expectations::ExpHost>,
+    /// Whether `host` was the operator's own choice — see `ExpectationsState`.
+    pub host_explicit: bool,
+    /// The hosts known to run netring, from the sensor registrations.
+    pub hosts: Vec<crate::view::expectations::ExpHost>,
+}
+
+impl SecurityState {
+    /// The chosen host as a parsed origin.
+    pub fn host_origin(&self) -> Option<zenkey::RemoteOrigin> {
+        self.host
+            .as_ref()
+            .and_then(|h| zenkey::RemoteOrigin::parse(&h.chunk).ok())
+    }
 }
 
 /// Find a triggered capture matching this anomaly (#327): same detector slug,
@@ -179,7 +202,7 @@ pub fn security_view<'a>(
     let content = column![
         render_header(anomalies.len(), sec),
         rule::horizontal(1),
-        crate::view::detection_tuning::detection_tuning_panel(tuning),
+        crate::view::detection_tuning::detection_tuning_panel(tuning, sec),
         rule::horizontal(1),
         render_by_tactic(&anomalies),
         rule::horizontal(1),

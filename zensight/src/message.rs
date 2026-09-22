@@ -316,56 +316,25 @@ pub enum Message {
 
     // Netring detection-tuning (#121): runtime allowlist + per-detector mute /
     // threshold, pushed to the netring sensor's command channel.
-    /// Fetch the netring detector config (status queryable).
-    RefreshDetectorConfig,
-    /// A netring detector-status reply (AnomalyConfig JSON), or an error.
-    DetectorConfigReceived(Result<String, String>),
-    /// Mute/unmute a netring detector by name (flips current state).
-    ToggleNetringDetector(String),
     /// Edit a detector's threshold input field (not yet applied).
     SetNetringThresholdInput {
         detector: String,
         value: String,
     },
-    /// Apply the edited threshold for a detector to the sensor.
-    ApplyNetringThreshold(String),
     /// Edit the new-allowlist-entry input field.
     SetNetringAllowlistInput(String),
-    /// Add the typed allowlist entry to the netring allowlist.
-    AddNetringAllowlist,
-    /// Remove an allowlist entry from the netring allowlist.
-    RemoveNetringAllowlist(String),
-    /// Add a specific host/SLD to the netring allowlist (#120) — used by the
-    /// inventory fingerprint explorer's per-row allowlist action.
-    AddNetringAllowlistEntry(String),
 
     // Netring capture-focus (#225/#228): hot-swap the reloadable packet-tier
     // BPF filter live, narrowing capture attention during an incident.
     /// Edit the capture-focus filter expression input (not yet applied).
     SetPacketFilterInput(String),
-    /// Apply the typed capture-focus filter to the netring sensor.
-    ApplyPacketFilter,
-    /// Clear the capture-focus filter back to the configured base.
-    ClearPacketFilter,
-    /// A capture-filter status reply (`CaptureFilterStatus` JSON), or an error.
-    CaptureFilterStatusReceived(Result<String, String>),
 
     // Netring threat-intel (IOC / YARA) hot-reload (#328): swap the live matchers
     // without a capture restart via `@rpc/netring/threat_intel/set`.
     /// Edit the IOC paste box (indicators, one per line).
     SetThreatIocInput(String),
-    /// Apply the pasted IOC indicators to the netring sensor's live set.
-    ApplyThreatIoc,
-    /// Re-read the sensor's configured indicator files and re-apply.
-    ReloadThreatIocFiles,
-    /// Clear all live IOC indicators.
-    ClearThreatIoc,
     /// Edit the YARA rules paste box.
     SetThreatYaraInput(String),
-    /// Compile + apply the pasted YARA rules (needs the sensor's `yara` feature).
-    ApplyThreatYara,
-    /// A threat-intel status reply (`ThreatIntelStatus` JSON), or an error.
-    ThreatIntelStatusReceived(Result<String, String>),
 
     /// Open the unified Incidents triage view (#129).
     OpenIncidents,
@@ -479,14 +448,18 @@ pub enum Message {
     /// Send the armed write — only when its confirmation holds, checked
     /// again in the app so a message arriving any other way cannot skip it.
     Confirm,
-    /// A write procedure answered, or did not (#1261). Carries the device
-    /// and the request it answers, so a stale outcome is dropped.
+    /// A write procedure answered, or did not (#1261). Carries the surface,
+    /// the device and the request it answers, so a stale outcome is dropped.
     Written {
-        device: DeviceId,
+        surface: crate::call::CallSurface,
+        device: Option<DeviceId>,
         procedure: String,
         request: serde_json::Value,
         result: Result<crate::call::Reply, crate::call::WriteFailure>,
     },
+    /// Choose the host the Security pane's netring tuning reads from and
+    /// writes to (#1261) — one host's sensor, never the fleet.
+    SetSecurityHost(crate::view::expectations::ExpHost),
     /// Forget a procedure's answer on the selected device (#1261), so its
     /// panel offers the call again — a unit file hidden, a table dismissed.
     ForgetCall {
@@ -582,13 +555,6 @@ pub enum Message {
     TopologyLayoutFrame,
     /// Toggle the topology lens legend (#394).
     TopologyToggleLegend,
-    /// Manual capture trigger (#327): `capture_now` on `@rpc/netring/capture_disk/set`
-    /// (fires the pre-trigger ring in triggered mode, rotates the spool in
-    /// rotating mode).
-    NetringCaptureNow,
-    /// Hot-switch the capture-to-disk mode (#327): `set_capture` on
-    /// `@rpc/netring/capture_disk/set` (`"off"` / `"rotating"` / `"triggered"`).
-    NetringSetCaptureDiskMode(String),
     /// Download a finished triggered capture by its blob id (#327). Unlike
     /// `StartArtifact` there is no request/produce phase — the file is already
     /// registered on the sensor's `@blob/artifact` server.
@@ -1485,9 +1451,6 @@ pub enum Message {
 
     /// Set syslog message content filter pattern.
     SetSyslogMessageFilter(String),
-
-    /// Apply syslog filters (send to sensor).
-    ApplySyslogFilters,
 
     /// Clear all syslog filters.
     ClearSyslogFilters,

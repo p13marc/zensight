@@ -1291,44 +1291,6 @@ impl ZenSight {
                 self.syslog_filter.set_message_filter(filter);
             }
 
-            Message::ApplySyslogFilters => {
-                // Build a syslog filter command and push it to the sensor's
-                // control channel. A stable filter id means re-applying replaces
-                // the same dynamic filter rather than stacking duplicates.
-                let f = &self.syslog_filter;
-                let mut filter = serde_json::Map::new();
-                if let Some(sev) = f.min_severity {
-                    filter.insert("min_severity".into(), serde_json::json!(sev));
-                }
-                if !f.selected_facilities.is_empty() {
-                    let facs: Vec<&String> = f.selected_facilities.iter().collect();
-                    filter.insert("include_facilities".into(), serde_json::json!(facs));
-                }
-                if !f.app_filter.is_empty() {
-                    filter.insert(
-                        "include_app_patterns".into(),
-                        serde_json::json!([{ "pattern": f.app_filter, "pattern_type": "glob" }]),
-                    );
-                }
-                if !f.message_filter.is_empty() {
-                    filter.insert(
-                        "include_message_patterns".into(),
-                        serde_json::json!([{ "pattern": f.message_filter, "pattern_type": "glob" }]),
-                    );
-                }
-                let command = serde_json::json!({
-                    "type": "add_filter",
-                    "id": "frontend-panel",
-                    "filter": serde_json::Value::Object(filter),
-                });
-                let key = zensight_common::fleet_command_key("logs", "filter");
-                self.syslog_filter.mark_applied();
-                return ControlFlow::Break(self.send_command(
-                    key,
-                    &command,
-                    "Syslog filters applied".to_string(),
-                ));
-            }
             other => return ControlFlow::Continue(other),
         }
         ControlFlow::Break(Task::none())
@@ -1347,30 +1309,49 @@ impl ZenSight {
             }
             // ── Gated PDU outlet control (#956) ──────────────────────────
             Message::Arm(armed) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.writes.arm(armed);
+                // One armed write at a time, app-wide: arming on one surface
+                // disarms the other, so Confirm is never ambiguous.
+                match armed.surface {
+                    crate::call::CallSurface::Device => {
+                        self.security.writes.disarm();
+                        if let Some(device) = self.selected_device.as_mut() {
+                            device.writes.arm(armed);
+                        }
+                    }
+                    crate::call::CallSurface::Security => {
+                        if let Some(device) = self.selected_device.as_mut() {
+                            device.writes.disarm();
+                        }
+                        self.security.writes.arm(armed);
+                    }
+                    crate::call::CallSurface::Topology => {}
                 }
             }
             Message::Disarm => {
                 if let Some(device) = self.selected_device.as_mut() {
                     device.writes.disarm();
                 }
+                self.security.writes.disarm();
             }
             Message::ConfirmText(typed) => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.writes.typed(typed);
+                    device.writes.typed(typed.clone());
                 }
+                self.security.writes.typed(typed);
             }
             Message::Confirm => {
                 return ControlFlow::Break(self.confirm_write());
             }
             Message::Written {
+                surface,
                 device,
                 procedure,
                 request,
                 result,
             } => {
-                return ControlFlow::Break(self.apply_written(device, procedure, request, result));
+                return ControlFlow::Break(
+                    self.apply_written(surface, device, procedure, request, result),
+                );
             }
 
             // ── Cross-view identity pivots (#313) ────────────────────────────
@@ -1532,24 +1513,6 @@ impl ZenSight {
                     format!("No topology node found for asset {ip}"),
                 );
             }
-            Message::NetringCaptureNow => {
-                let key = zensight_common::fleet_command_key("netring", "capture_disk");
-                let command = serde_json::json!({ "type": "capture_now" });
-                return ControlFlow::Break(self.send_command(
-                    key,
-                    &command,
-                    "Capture triggered".to_string(),
-                ));
-            }
-            Message::NetringSetCaptureDiskMode(mode) => {
-                let key = zensight_common::fleet_command_key("netring", "capture_disk");
-                let command = serde_json::json!({ "type": "set_capture", "mode": mode });
-                return ControlFlow::Break(self.send_command(
-                    key,
-                    &command,
-                    format!("Capture-to-disk mode → {mode}"),
-                ));
-            }
             Message::Call(request) => {
                 return ControlFlow::Break(self.call_now(request));
             }
@@ -1557,9 +1520,9 @@ impl ZenSight {
                 surface,
                 device,
                 key,
+                procedure,
                 params,
                 result,
-                ..
             } => {
                 // Landed only on the surface that asked — for a device, the
                 // device that asked — and only for the params still in
@@ -1574,7 +1537,9 @@ impl ZenSight {
                         }
                     }
                     crate::call::CallSurface::Security => {
-                        self.security.calls.apply(&key, &params, result);
+                        if self.security.calls.apply(&key, &params, result) {
+                            self.sync_detection_tuning(&procedure);
+                        }
                     }
                     crate::call::CallSurface::Topology => {
                         self.topology.panel.calls.apply(&key, &params, result);
@@ -1925,6 +1890,7 @@ impl ZenSight {
                 // A sentinel that just registered belongs in the pane's host
                 // picker (#1114); the choice already made is kept.
                 self.refresh_expectation_hosts();
+                self.refresh_security_hosts();
             }
 
             Message::AlertReceived { origin, alert } => {
@@ -3609,6 +3575,7 @@ impl ZenSight {
             Message::OpenExpectations => {
                 self.set_view(CurrentView::Expectations);
                 self.refresh_expectation_hosts();
+                self.refresh_security_hosts();
                 return self.query_expectations();
             }
             Message::SetExpectationHost(host) => {
@@ -3624,6 +3591,7 @@ impl ZenSight {
                 self.expectations.target = target;
                 self.expectations.status_note = None;
                 self.refresh_expectation_hosts();
+                self.refresh_security_hosts();
                 return self.refresh_expectations_for_target();
             }
             Message::SetSystemdExpKind(kind) => {
@@ -4042,34 +4010,10 @@ impl ZenSight {
             }
 
             // Netring detection-tuning (#121).
-            Message::RefreshDetectorConfig => {
-                return self
-                    .query_detector_status()
-                    .chain(self.query_capture_filter_status())
-                    .chain(self.query_threat_intel_status());
-            }
-            Message::DetectorConfigReceived(result) => match result {
-                Ok(json) => {
-                    self.detection_tuning.detectors_verdict =
-                        Some(Self::reply_verdict("netring", "detectors", &json));
-                    self.detection_tuning.apply_status(&json)
-                }
-                Err(e) => {
-                    self.detection_tuning.status_note = Some(e);
-                }
-            },
-            Message::ToggleNetringDetector(detector) => {
-                let enabled = !self.detection_tuning.is_enabled(&detector).unwrap_or(false);
-                let command = serde_json::json!({ "type": "set_enabled", "detector": detector, "enabled": enabled });
-                let key = zensight_common::fleet_command_key("netring", "detectors");
-                return self
-                    .send_command(
-                        key,
-                        &command,
-                        format!("{detector} {}", if enabled { "enabled" } else { "muted" }),
-                    )
-                    .chain(self.query_detector_status());
-            }
+            // The tuning panel's inputs (#121, #225, #328); every write it
+            // makes is an armed `<topic>/set` to the chosen host (#1261), and
+            // its three status reads are calls on the Security surface,
+            // projected by `sync_detection_tuning`.
             Message::SetNetringThresholdInput { detector, value } => {
                 if let Some(row) = self
                     .detection_tuning
@@ -4080,181 +4024,18 @@ impl ZenSight {
                     row.threshold_input = value;
                 }
             }
-            Message::ApplyNetringThreshold(detector) => {
-                let input = self
-                    .detection_tuning
-                    .detectors
-                    .iter()
-                    .find(|d| d.name == detector)
-                    .map(|d| d.threshold_input.clone())
-                    .unwrap_or_default();
-                let Ok(value) = input.trim().parse::<f64>() else {
-                    self.toasts
-                        .push(ToastSeverity::Error, "Threshold must be a number");
-                    return Task::none();
-                };
-                let command = serde_json::json!({ "type": "set_threshold", "detector": detector, "value": value });
-                let key = zensight_common::fleet_command_key("netring", "detectors");
-                return self
-                    .send_command(key, &command, format!("{detector} threshold = {value}"))
-                    .chain(self.query_detector_status());
-            }
             Message::SetNetringAllowlistInput(value) => {
                 self.detection_tuning.new_entry = value;
             }
-            Message::AddNetringAllowlist => {
-                let entry = self.detection_tuning.new_entry.trim().to_string();
-                if entry.is_empty() {
-                    return Task::none();
-                }
-                self.detection_tuning.new_entry.clear();
-                let command = serde_json::json!({ "type": "add_allowlist", "entry": entry });
-                let key = zensight_common::fleet_command_key("netring", "detectors");
-                return self
-                    .send_command(key, &command, format!("Allowlisted {entry}"))
-                    .chain(self.query_detector_status());
-            }
-            Message::AddNetringAllowlistEntry(entry) => {
-                let entry = entry.trim().to_string();
-                if entry.is_empty() {
-                    return Task::none();
-                }
-                let command = serde_json::json!({ "type": "add_allowlist", "entry": entry });
-                let key = zensight_common::fleet_command_key("netring", "detectors");
-                return self
-                    .send_command(key, &command, format!("Allowlisted {entry}"))
-                    .chain(self.query_detector_status());
-            }
-            Message::RemoveNetringAllowlist(entry) => {
-                let command = serde_json::json!({ "type": "remove_allowlist", "entry": entry });
-                let key = zensight_common::fleet_command_key("netring", "detectors");
-                return self
-                    .send_command(key, &command, format!("Removed {entry}"))
-                    .chain(self.query_detector_status());
-            }
-
-            // Netring capture-focus (#225/#228): hot-swap the reloadable packet
-            // filter. Validation happens sensor-side — a bad expr comes back as a
-            // `last_error` on `@rpc/netring/capture_filter`, surfaced inline.
             Message::SetPacketFilterInput(value) => {
                 self.detection_tuning.packet_filter_input = value;
             }
-            Message::ApplyPacketFilter => {
-                let expr = self.detection_tuning.packet_filter_input.trim().to_string();
-                if expr.is_empty() {
-                    self.toasts
-                        .push(ToastSeverity::Error, "Capture filter cannot be empty");
-                    return Task::none();
-                }
-                let command = serde_json::json!({ "type": "set_packet_filter", "expr": expr });
-                let key = zensight_common::fleet_command_key("netring", "capture_filter");
-                return self
-                    .send_command(key, &command, format!("Capture filter → {expr}"))
-                    .chain(self.query_capture_filter_status());
-            }
-            Message::ClearPacketFilter => {
-                let command = serde_json::json!({ "type": "clear_packet_filter" });
-                let key = zensight_common::fleet_command_key("netring", "capture_filter");
-                return self
-                    .send_command(key, &command, "Capture filter cleared".to_string())
-                    .chain(self.query_capture_filter_status());
-            }
-            Message::CaptureFilterStatusReceived(result) => match result {
-                Ok(json) => {
-                    self.detection_tuning.capture_filter_verdict =
-                        Some(Self::reply_verdict("netring", "capture_filter", &json));
-                    self.detection_tuning.apply_capture_filter_status(&json);
-                    // Surface a sensor-side validation rejection as a toast too,
-                    // so it's not missed if the panel isn't on screen.
-                    if let Some(err) = self
-                        .detection_tuning
-                        .capture_filter
-                        .as_ref()
-                        .and_then(|c| c.last_error.clone())
-                    {
-                        self.toasts
-                            .push(ToastSeverity::Error, format!("Filter rejected: {err}"));
-                    }
-                }
-                Err(_) => {
-                    self.detection_tuning.capture_filter = None;
-                }
-            },
-
-            // Netring threat-intel (#328): hot-swap IOC / YARA matchers. Sensor
-            // validates YARA; a compile error comes back as `last_reload` on
-            // `@rpc/netring/threat_intel`, surfaced inline + as a toast.
             Message::SetThreatIocInput(value) => {
                 self.detection_tuning.threat_ioc_input = value;
-            }
-            Message::ApplyThreatIoc => {
-                let (ips, domains) = crate::view::detection_tuning::split_ioc_paste(
-                    &self.detection_tuning.threat_ioc_input,
-                );
-                if ips.is_empty() && domains.is_empty() {
-                    self.toasts
-                        .push(ToastSeverity::Error, "No indicators to apply");
-                    return Task::none();
-                }
-                let n = ips.len() + domains.len();
-                let command = serde_json::json!({
-                    "type": "set_ioc", "ips": ips, "domains": domains, "ja4": [], "ja3": [],
-                });
-                let key = zensight_common::fleet_command_key("netring", "threat_intel");
-                return self
-                    .send_command(key, &command, format!("Pushed {n} IOC indicators"))
-                    .chain(self.query_threat_intel_status());
-            }
-            Message::ReloadThreatIocFiles => {
-                let command = serde_json::json!({ "type": "reload_ioc_files" });
-                let key = zensight_common::fleet_command_key("netring", "threat_intel");
-                return self
-                    .send_command(key, &command, "Reloading indicator files".to_string())
-                    .chain(self.query_threat_intel_status());
-            }
-            Message::ClearThreatIoc => {
-                let command = serde_json::json!({ "type": "clear_ioc" });
-                let key = zensight_common::fleet_command_key("netring", "threat_intel");
-                return self
-                    .send_command(key, &command, "Cleared IOC indicators".to_string())
-                    .chain(self.query_threat_intel_status());
             }
             Message::SetThreatYaraInput(value) => {
                 self.detection_tuning.threat_yara_input = value;
             }
-            Message::ApplyThreatYara => {
-                let rules = self.detection_tuning.threat_yara_input.trim().to_string();
-                if rules.is_empty() {
-                    self.toasts
-                        .push(ToastSeverity::Error, "YARA rules cannot be empty");
-                    return Task::none();
-                }
-                let command = serde_json::json!({ "type": "set_yara", "rules": rules });
-                let key = zensight_common::fleet_command_key("netring", "threat_intel");
-                return self
-                    .send_command(key, &command, "Applying YARA rules".to_string())
-                    .chain(self.query_threat_intel_status());
-            }
-            Message::ThreatIntelStatusReceived(result) => match result {
-                Ok(json) => {
-                    self.detection_tuning.threat_intel_verdict =
-                        Some(Self::reply_verdict("netring", "threat_intel", &json));
-                    self.detection_tuning.apply_threat_intel_status(&json);
-                    // Surface a sensor-side reload error (e.g. bad YARA) as a toast.
-                    if let Some(last) = self
-                        .detection_tuning
-                        .threat_intel
-                        .as_ref()
-                        .and_then(|t| t.last_reload.clone())
-                        && last.starts_with("error")
-                    {
-                        self.toasts.push(ToastSeverity::Error, last);
-                    }
-                }
-                Err(_) => {
-                    self.detection_tuning.threat_intel = None;
-                }
-            },
 
             Message::FetchAnomalyFlows { key, src } => {
                 self.security.flows_for = Some(key.clone());
@@ -4270,8 +4051,17 @@ impl ZenSight {
             }
             Message::OpenSecurity => {
                 self.set_view(CurrentView::Security);
-                // Pull the netring detector config so the tuning panel is ready.
-                return self.query_detector_status();
+                // The tuning panel reads one host (#1261): list them, keep a
+                // choice already made, choose a lone one, and read it.
+                self.refresh_security_hosts();
+                return self.security_status_calls();
+            }
+            Message::SetSecurityHost(host) => {
+                self.security.host = Some(host);
+                self.security.host_explicit = true;
+                self.security.writes.disarm();
+                self.detection_tuning.forget_status();
+                return self.security_status_calls();
             }
             Message::CloseSecurity => {
                 self.set_view(CurrentView::Dashboard);
@@ -5851,92 +5641,6 @@ impl ZenSight {
         Some(self.call_now(crate::call::Request::new(procedure, params)))
     }
 
-    /// Query the netring sensor's current detector config (#121, status
-    /// queryable). Routes to `DetectorConfigReceived`.
-    fn query_detector_status(&self) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::DetectorConfigReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        let key = zensight_common::fleet_rpc_key("netring", "detectors");
-        Task::future(async move {
-            match session.get(&key).await {
-                Ok(replies) => {
-                    if let Ok(reply) = replies.recv_async().await
-                        && let Ok(sample) = reply.result()
-                    {
-                        let body =
-                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
-                        return Message::DetectorConfigReceived(Ok(body));
-                    }
-                    Message::DetectorConfigReceived(Err("No netring sensor responded".to_string()))
-                }
-                Err(e) => Message::DetectorConfigReceived(Err(format!("Status query failed: {e}"))),
-            }
-        })
-    }
-
-    /// Query the netring sensor's live capture-focus filter
-    /// (`@rpc/netring/capture_filter`). Routes to `CaptureFilterStatusReceived`.
-    fn query_capture_filter_status(&self) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::CaptureFilterStatusReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        let key = zensight_common::fleet_rpc_key("netring", "capture_filter");
-        Task::future(async move {
-            match session.get(&key).await {
-                Ok(replies) => {
-                    if let Ok(reply) = replies.recv_async().await
-                        && let Ok(sample) = reply.result()
-                    {
-                        let body =
-                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
-                        return Message::CaptureFilterStatusReceived(Ok(body));
-                    }
-                    Message::CaptureFilterStatusReceived(Err(
-                        "No netring sensor responded".to_string()
-                    ))
-                }
-                Err(e) => {
-                    Message::CaptureFilterStatusReceived(Err(format!("Status query failed: {e}")))
-                }
-            }
-        })
-    }
-
-    /// Query the netring sensor's live threat-intel status
-    /// (`@rpc/netring/threat_intel`). Routes to `ThreatIntelStatusReceived`.
-    fn query_threat_intel_status(&self) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::ThreatIntelStatusReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        let key = zensight_common::fleet_rpc_key("netring", "threat_intel");
-        Task::future(async move {
-            match session.get(&key).await {
-                Ok(replies) => {
-                    if let Ok(reply) = replies.recv_async().await
-                        && let Ok(sample) = reply.result()
-                    {
-                        let body =
-                            String::from_utf8_lossy(&sample.payload().to_bytes()).to_string();
-                        return Message::ThreatIntelStatusReceived(Ok(body));
-                    }
-                    Message::ThreatIntelStatusReceived(Err(
-                        "No netring sensor responded".to_string()
-                    ))
-                }
-                Err(e) => {
-                    Message::ThreatIntelStatusReceived(Err(format!("Status query failed: {e}")))
-                }
-            }
-        })
-    }
-
     /// Cross-view pivot (#313): open the systemd device for `host` on the Units
     /// tab with `unit`'s drill-down loading. Toast fallback when the host runs
     /// no systemd sensor (missing data is the normal case, never a dead end).
@@ -6088,14 +5792,28 @@ impl ZenSight {
         self.dashboard.devices.retain(|id, _| id.origin == focus);
     }
 
-    /// The parallax `stream/set` write key for `source`'s host: the concrete
-    /// origin key when the origin is known, else the fleet selector (the
-    /// command carries the stream name, and send_command targets All).
-    fn parallax_stream_set_key(&self, source: &str) -> String {
-        match self.origin_for(zensight_common::Protocol::Parallax, source) {
-            Some(origin) => zensight_common::origin_rpc_key(&origin, "parallax", "stream/set"),
-            None => zensight_common::fleet_command_key("parallax", "stream"),
-        }
+    /// The parallax `stream/set` write key for `source`'s host, or `None`
+    /// when that host's origin is not known yet.
+    ///
+    /// No fleet fallback (#1261), like [`Self::parallax_stream_report_key`]:
+    /// a stream control is a statement to one host's sensor, and the fleet
+    /// spelling would open, close or retune the stream on every host serving
+    /// parallax. A control we cannot address is refused, and says so.
+    fn parallax_stream_set_key(&self, source: &str) -> Option<String> {
+        let origin = self.origin_for(zensight_common::Protocol::Parallax, source)?;
+        Some(zensight_common::origin_rpc_key(
+            &origin,
+            "parallax",
+            "stream/set",
+        ))
+    }
+
+    /// The refusal a stream control gets when its host is not known (#1261).
+    fn refuse_parallax(source: &str, what: &str) -> Task<Message> {
+        Task::done(Message::CommandFeedback {
+            success: false,
+            message: format!("No host origin for {source} — refusing to broadcast {what}"),
+        })
     }
 
     /// The parallax `stream/report` write key for `source`'s host (#718,
@@ -6685,33 +6403,66 @@ impl ZenSight {
         })
     }
 
-    /// Send the armed write of the selected device (#1261): only when its
-    /// confirmation holds — checked here again, so a message arriving any
-    /// other way cannot skip it — and only to the drilled-in host. There is
-    /// deliberately no fleet fallback: a wildcard origin would apply the write
-    /// on every host serving the sensor, so an unresolvable origin refuses
-    /// rather than widening the blast radius.
+    /// Send the armed write (#1261): only when its confirmation holds —
+    /// checked here again, so a message arriving any other way cannot skip
+    /// it — and only to one host: the request's own, else the surface's (the
+    /// drilled-in device's origin, the Security pane's chosen host). There
+    /// is deliberately no fleet fallback: a wildcard origin would apply the
+    /// write on every host serving the sensor, so an unresolvable origin
+    /// refuses rather than widening the blast radius.
     fn confirm_write(&mut self) -> Task<Message> {
-        let Some(device) = self.selected_device.as_mut() else {
+        use crate::call::CallSurface;
+        // One armed write at a time, app-wide: whichever surface holds it.
+        let (surface, armed, device) = if let Some(d) = self.selected_device.as_mut()
+            && let Some(armed) = d.writes.confirm()
+        {
+            (CallSurface::Device, armed, Some(d.device_id.clone()))
+        } else if let Some(armed) = self.security.writes.confirm() {
+            (CallSurface::Security, armed, None)
+        } else {
             return Task::none();
         };
-        let Some(armed) = device.writes.confirm() else {
-            return Task::none();
-        };
-        let id = device.device_id.clone();
-        let Some(origin) = id.remote_origin() else {
+        let origin = armed.origin.clone().or_else(|| match surface {
+            CallSurface::Device => device.as_ref().and_then(|id| id.remote_origin()),
+            CallSurface::Security => self.security.host_origin(),
+            CallSurface::Topology => None,
+        });
+        let Some(origin) = origin else {
+            let message = match surface {
+                CallSurface::Device => format!(
+                    "No host origin for {} — refusing to broadcast {}",
+                    device.map(|d| d.source).unwrap_or_default(),
+                    armed.label
+                ),
+                _ => format!(
+                    "No host chosen — {} belongs to one host's sensor; pick the host in the \
+                     pane's header",
+                    armed.label
+                ),
+            };
             return Task::done(Message::CommandFeedback {
                 success: false,
-                message: format!(
-                    "No host origin for {} — refusing to broadcast {}",
-                    id.source, armed.label
-                ),
+                message,
             });
         };
-        device.writes.inflight = Some(armed.clone());
+        let producer = armed
+            .producer
+            .clone()
+            .or_else(|| device.as_ref().map(|d| d.producer.clone()))
+            .unwrap_or_default();
+        let writes = match surface {
+            CallSurface::Device => match self.selected_device.as_mut() {
+                Some(d) => &mut d.writes,
+                None => return Task::none(),
+            },
+            CallSurface::Security => &mut self.security.writes,
+            CallSurface::Topology => return Task::none(),
+        };
+        writes.inflight = Some(armed.clone());
         let Some(session) = self.session.clone() else {
             return Task::done(Message::Written {
-                device: id,
+                surface,
+                device,
                 procedure: armed.procedure,
                 request: armed.request,
                 result: Err(crate::call::WriteFailure::Transport(
@@ -6719,7 +6470,6 @@ impl ZenSight {
                 )),
             });
         };
-        let producer = id.producer.clone();
         Task::future(async move {
             let result = crate::call::write(
                 session,
@@ -6731,7 +6481,8 @@ impl ZenSight {
             )
             .await;
             Message::Written {
-                device: id,
+                surface,
+                device,
                 procedure: armed.procedure,
                 request: armed.request,
                 result,
@@ -6740,47 +6491,187 @@ impl ZenSight {
     }
 
     /// Land a write's outcome (#1261): toast it in the producer's words,
-    /// keep it as the procedure's last outcome, and re-call what it moved.
-    /// An outcome for another device, or for a request no longer in flight,
-    /// is dropped.
+    /// keep it as the procedure's last outcome on the surface that sent it,
+    /// and re-call what it moved. An outcome for another device, or for a
+    /// request no longer in flight, is dropped.
     fn apply_written(
         &mut self,
-        device: DeviceId,
+        surface: crate::call::CallSurface,
+        device: Option<DeviceId>,
         procedure: String,
         request: serde_json::Value,
         result: Result<crate::call::Reply, crate::call::WriteFailure>,
     ) -> Task<Message> {
-        let Some(selected) = self
-            .selected_device
-            .as_mut()
-            .filter(|d| d.device_id == device)
-        else {
-            return Task::none();
-        };
-        let Some(armed) = selected
-            .writes
-            .inflight
-            .take_if(|a| a.procedure == procedure && a.request == request)
-        else {
-            return Task::none();
-        };
-        let producer = selected.device_id.producer.clone();
-        let (severity, message) =
-            crate::view::specialized::write_outcome(&producer, &armed, &result);
-        let refresh = crate::view::specialized::after_write(&producer, selected, &armed, &result);
-        selected
-            .writes
-            .last
-            .insert(procedure, result.map_err(|f| f.sentence()));
-        self.toasts.push(severity, message);
-        if refresh.is_empty() {
-            return Task::none();
+        use crate::call::CallSurface;
+        match surface {
+            CallSurface::Device => {
+                let Some(selected) = self
+                    .selected_device
+                    .as_mut()
+                    .filter(|d| Some(&d.device_id) == device.as_ref())
+                else {
+                    return Task::none();
+                };
+                let Some(armed) = selected
+                    .writes
+                    .inflight
+                    .take_if(|a| a.procedure == procedure && a.request == request)
+                else {
+                    return Task::none();
+                };
+                let producer = armed
+                    .producer
+                    .clone()
+                    .unwrap_or_else(|| selected.device_id.producer.clone());
+                let (severity, message) =
+                    crate::view::specialized::write_outcome(&producer, &armed, &result);
+                let refresh =
+                    crate::view::specialized::after_write(&producer, selected, &armed, &result);
+                let landed = result.is_ok();
+                selected
+                    .writes
+                    .last
+                    .insert(procedure.clone(), result.map_err(|f| f.sentence()));
+                self.toasts.push(severity, message);
+                // A syslog filter that landed is no longer "modified".
+                if landed && producer == "logs" && procedure == "filter/set" {
+                    self.syslog_filter.mark_applied();
+                }
+                if refresh.is_empty() {
+                    return Task::none();
+                }
+                Task::batch(refresh.into_iter().map(|(procedure, params)| {
+                    self.call_now(crate::call::Request::new(procedure, params))
+                }))
+            }
+            CallSurface::Security => {
+                let Some(armed) = self
+                    .security
+                    .writes
+                    .inflight
+                    .take_if(|a| a.procedure == procedure && a.request == request)
+                else {
+                    return Task::none();
+                };
+                let producer = armed
+                    .producer
+                    .clone()
+                    .unwrap_or_else(|| "netring".to_string());
+                let (severity, message) =
+                    crate::view::specialized::write_outcome(&producer, &armed, &result);
+                let landed = result.is_ok();
+                self.security
+                    .writes
+                    .last
+                    .insert(procedure.clone(), result.map_err(|f| f.sentence()));
+                self.toasts.push(severity, message);
+                if landed && request.get("type").and_then(|t| t.as_str()) == Some("add_allowlist") {
+                    self.detection_tuning.new_entry.clear();
+                }
+                // Re-read the topic the write moved, at the host it moved it on.
+                let Some(topic) = procedure.strip_suffix("/set") else {
+                    return Task::none();
+                };
+                let Some(host) = armed.origin.clone().or_else(|| self.security.host_origin())
+                else {
+                    return Task::none();
+                };
+                self.call_now(crate::view::detection_tuning::status_request(&host, topic))
+            }
+            CallSurface::Topology => Task::none(),
         }
-        Task::batch(
-            refresh.into_iter().map(|(procedure, params)| {
-                self.call_now(crate::call::Request::new(procedure, params))
-            }),
-        )
+    }
+
+    /// Recompute the Security pane's netring host list (#1261) — the rule
+    /// `refresh_expectation_hosts` follows (#1114): a choice still valid is
+    /// kept, a lone host is chosen for the operator, a choice that no longer
+    /// exists is cleared rather than silently pointing at a host that is gone.
+    fn refresh_security_hosts(&mut self) {
+        let hosts = self.expectation_hosts("netring");
+        let still_there = self
+            .security
+            .host
+            .as_ref()
+            .is_some_and(|h| hosts.iter().any(|k| k.chunk == h.chunk));
+        if !(self.security.host_explicit && still_there) {
+            self.security.host = match hosts.as_slice() {
+                [only] => Some(only.clone()),
+                _ => None,
+            };
+            self.security.host_explicit = false;
+        }
+        self.security.hosts = hosts;
+    }
+
+    /// The tuning panel's three status reads at the chosen host (#1261);
+    /// nothing without one.
+    fn security_status_calls(&mut self) -> Task<Message> {
+        let Some(host) = self.security.host_origin() else {
+            return Task::none();
+        };
+        let mut tasks = Vec::new();
+        for request in crate::view::detection_tuning::status_requests(&host) {
+            tasks.push(self.call_now(request));
+        }
+        Task::batch(tasks)
+    }
+
+    /// Project the Security surface's status replies into the tuning panel
+    /// (#1261): each of the three, as it stands; the sensor-side rejection a
+    /// reply carries is toasted once, for the reply that just landed.
+    fn sync_detection_tuning(&mut self, landed: &str) {
+        use crate::view::specialized::fetch::Fetch;
+        let tuning = &mut self.detection_tuning;
+        for procedure in crate::view::detection_tuning::STATUS_PROCEDURES {
+            match self.security.calls.fetch(procedure) {
+                Fetch::Ready(reply) => {
+                    let body = reply.value.to_string();
+                    let verdict = Some(Self::reply_verdict("netring", procedure, &body));
+                    match procedure {
+                        "detectors" => {
+                            tuning.detectors_verdict = verdict;
+                            tuning.apply_status(&body);
+                        }
+                        "capture_filter" => {
+                            tuning.capture_filter_verdict = verdict;
+                            tuning.apply_capture_filter_status(&body);
+                        }
+                        "threat_intel" => {
+                            tuning.threat_intel_verdict = verdict;
+                            tuning.apply_threat_intel_status(&body);
+                        }
+                        _ => {}
+                    }
+                }
+                Fetch::Error(e) => match procedure {
+                    "detectors" => tuning.status_note = Some(e.clone()),
+                    "capture_filter" => tuning.capture_filter = None,
+                    "threat_intel" => tuning.threat_intel = None,
+                    _ => {}
+                },
+                Fetch::Idle | Fetch::Loading => {}
+            }
+        }
+        // Surface a sensor-side rejection as a toast too, so it is not
+        // missed if the panel is not on screen — once, when it lands.
+        if landed == "capture_filter"
+            && let Some(err) = tuning
+                .capture_filter
+                .as_ref()
+                .and_then(|c| c.last_error.clone())
+        {
+            self.toasts
+                .push(ToastSeverity::Error, format!("Filter rejected: {err}"));
+        }
+        if landed == "threat_intel"
+            && let Some(last) = tuning
+                .threat_intel
+                .as_ref()
+                .and_then(|t| t.last_reload.clone())
+            && last.starts_with("error")
+        {
+            self.toasts.push(ToastSeverity::Error, last);
+        }
     }
 
     /// Mark a procedure in flight on the selected device and call it (#1261)
@@ -6824,6 +6715,7 @@ impl ZenSight {
             return Task::none();
         };
         let key = request.key().to_string();
+        let asked_at = request.origin.clone();
         let procedure = request.procedure;
         let params = request.params;
         if self.demo_mode {
@@ -6851,13 +6743,16 @@ impl ZenSight {
                 result: Err("Not connected to Zenoh".to_string()),
             });
         };
-        // Its own producer: the device's origin. Another producer: the
+        // The request's own host when it named one (the Security pane's).
+        // Else its own producer: the device's origin. Another producer: the
         // fleet, folded (`call::fold_replies`).
-        let origin = device
-            .as_ref()
-            .filter(|id| id.producer == producer)
-            .and_then(|id| self.dashboard.resolve_device(&id.producer, &id.source))
-            .and_then(|d| d.remote_origin());
+        let origin = asked_at.or_else(|| {
+            device
+                .as_ref()
+                .filter(|id| id.producer == producer)
+                .and_then(|id| self.dashboard.resolve_device(&id.producer, &id.source))
+                .and_then(|d| d.remote_origin())
+        });
         Task::future(async move {
             let result =
                 crate::call::call(session, origin, producer, procedure.clone(), params.clone())
@@ -6954,7 +6849,9 @@ impl ZenSight {
                 None,
             );
         }
-        let cmd_key = self.parallax_stream_set_key(&source);
+        let Some(cmd_key) = self.parallax_stream_set_key(&source) else {
+            return Self::refuse_parallax(&source, &format!("open preview for {stream}"));
+        };
         let open =
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
@@ -7004,11 +6901,10 @@ impl ZenSight {
             return Task::none();
         };
         let close = zensight_common::command::Command::new(close_control);
-        self.send_command(
-            self.parallax_stream_set_key(&source),
-            &close,
-            format!("Closed preview for {stream}"),
-        )
+        let Some(cmd_key) = self.parallax_stream_set_key(&source) else {
+            return Self::refuse_parallax(&source, &format!("close preview for {stream}"));
+        };
+        self.send_command(cmd_key, &close, format!("Closed preview for {stream}"))
     }
 
     /// Open a live H.264 video tile (#409) on an explicit `tier` (the per-tier
@@ -7107,7 +7003,9 @@ impl ZenSight {
                 Some(tier.clone()),
             );
         }
-        let cmd_key = self.parallax_stream_set_key(&source);
+        let Some(cmd_key) = self.parallax_stream_set_key(&source) else {
+            return Self::refuse_parallax(&source, &format!("open video for {stream}"));
+        };
         let open =
             zensight_common::command::Command::new(zensight_common::StreamControl::OpenStream {
                 stream: stream.clone(),
@@ -7183,11 +7081,14 @@ impl ZenSight {
         // Quiet on success: resync-driven requests are automatic and can
         // recur (backed off in h264_tile_stream) — a toast per request is
         // pure noise. Failures still surface.
-        self.send_command(
-            self.parallax_stream_set_key(&source),
-            &request,
-            String::new(),
-        )
+        let Some(cmd_key) = self.parallax_stream_set_key(&source) else {
+            tracing::warn!(
+                source,
+                "keyframe request dropped: the stream's host is not known"
+            );
+            return Task::none();
+        };
+        self.send_command(cmd_key, &request, String::new())
     }
 
     /// Expand a tile into the near-fullscreen overlay (#436). A preview
@@ -7286,7 +7187,13 @@ impl ZenSight {
         if streams.is_empty() || self.demo_mode || self.command_registry.is_none() {
             return Task::none();
         }
-        let cmd_key = self.parallax_stream_set_key(&source);
+        let Some(cmd_key) = self.parallax_stream_set_key(&source) else {
+            tracing::warn!(
+                source,
+                "tile teardown not sent: the stream's host is not known"
+            );
+            return Task::none();
+        };
         Task::batch(streams.into_iter().map(|(stream, control)| {
             let close = zensight_common::command::Command::new(control);
             self.send_command(
@@ -8064,9 +7971,12 @@ impl ZenSight {
                     self.log_fetch_error.as_deref(),
                 )
             }
-            CurrentView::Inventory => {
-                crate::view::inventory::inventory_view(&self.inventory, &self.entities, now_ms())
-            }
+            CurrentView::Inventory => crate::view::inventory::inventory_view(
+                &self.inventory,
+                &self.entities,
+                &self.security,
+                now_ms(),
+            ),
             CurrentView::Bandwidth => crate::view::bandwidth::bandwidth_view(&self.bandwidth),
             CurrentView::Fleet => crate::view::fleet::fleet_view(&self.fleet),
             CurrentView::Explorer => crate::view::explorer::explorer_view(&self.explorer),
