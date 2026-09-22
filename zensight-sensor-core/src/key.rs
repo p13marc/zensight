@@ -63,9 +63,12 @@
 //! the value is, and there is one place to grep), and the guard refuses a key
 //! outside the v1 grammar on every put: a `debug_assert!` in tests, a
 //! once-per-key `warn!` in release — cheap, since the guard already parsed
-//! the key. `Publisher` still takes `&str`: a suffix is a *path* of literal
-//! segments and chunks, and the typed spelling of that path is the generated
-//! `zensight_common::registry` builders, whose adoption is a different change.
+//! the key. The typed spelling of that path is the generated
+//! `zensight_common::registry` builders, and since #1274 a publisher takes
+//! one (`Publisher::publish_subject`, `TelemetryPoint::for_subject`): the
+//! builder slugs the foreign value itself, so a caller hands it the raw
+//! value — never a chunk, which the injective slug would escape again. The
+//! `&str` suffix form is the interim while the sensors move.
 
 use zenkey::Chunk;
 
