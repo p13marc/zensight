@@ -1,11 +1,14 @@
-//! On-demand netring flow-detail client: fetches the recent-flow ring from the
-//! sensor's `@rpc/netring/flows` procedure (principle P2 — pulled only when a user
-//! drills into a netring host, never streamed).
+//! The netring view's on-demand vocabulary: the topics it calls its
+//! `@rpc/netring/*` read procedures by (the calls go through `Message::Call`
+//! and land in `DeviceDetailState::calls`, #1261 — principle P2, pulled only
+//! when a user drills into a netring host, never streamed), and what is not
+//! an answer to a call: the anomalies projected onto the device and the
+//! flow↔process join slot.
 //!
-//! Reuses the Iced-independent [`fetch_records`](super::netlink_detail::fetch_records)
-//! so the fetch+decode path is shared and already integration-tested.
+//! The `*_key` builders and `fetch_*` helpers remain for the fleet-wide
+//! joins (topology, the Security drill-down) that fetch with the `*` origin
+//! and land elsewhere than a device.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use zensight_common::{
@@ -13,13 +16,13 @@ use zensight_common::{
     HttpHostRecord, Ja4hRecord, MatrixRecord, QuicRecord, SshRecord, TalkerRecord, TlsRecord,
 };
 
-use crate::view::components::TableState;
+use crate::message::Message;
 use crate::view::specialized::fetch::Fetch;
 
-/// Identifies a sortable/filterable netring table so the shared sort/filter/
-/// load-more messages can address one table without a message per table (#244).
+/// Which netring read procedure a panel calls — and the name its answer
+/// and its table's UI state are keyed by (#1261).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum NetringTable {
+pub enum NetringTopic {
     Flows,
     Elephants,
     Talkers,
@@ -32,6 +35,50 @@ pub enum NetringTable {
     Ssh,
     Assets,
     Ja4h,
+    Captures,
+}
+
+impl NetringTopic {
+    /// The procedure this topic calls (matches the sensor's `query.rs`).
+    pub fn procedure(&self) -> &'static str {
+        match self {
+            NetringTopic::Flows => "flows",
+            NetringTopic::Elephants => "elephant_flows",
+            NetringTopic::Talkers => "talkers",
+            NetringTopic::Matrix => "matrix",
+            NetringTopic::Dns => "dns",
+            NetringTopic::EncryptedDns => "encrypted_dns",
+            NetringTopic::Http => "http",
+            NetringTopic::Tls => "tls",
+            NetringTopic::Quic => "quic",
+            NetringTopic::Ssh => "ssh",
+            NetringTopic::Assets => "assets",
+            NetringTopic::Ja4h => "ja4h",
+            NetringTopic::Captures => "captures",
+        }
+    }
+
+    /// The call's params: the top-N channels (talkers/matrix/dns/http) ask
+    /// for `top=50`; the rest reply with their whole ring or inventory.
+    pub fn params(&self) -> String {
+        match self {
+            NetringTopic::Talkers
+            | NetringTopic::Matrix
+            | NetringTopic::Dns
+            | NetringTopic::Http => {
+                format!("top={TOP_N}")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The call for this topic on the selected device (#1261).
+    pub fn call(&self) -> Message {
+        Message::Call {
+            procedure: self.procedure().to_string(),
+            params: self.params(),
+        }
+    }
 }
 
 /// How many rows the top-N query channels (talkers/dns/http) ask the sensor for.
@@ -114,30 +161,9 @@ pub fn http_key(origin: Option<&zenkey::RemoteOrigin>) -> String {
     format!("{}?top={TOP_N}", rpc_key(origin, "http"))
 }
 
-/// On-demand detail fetched for the selected netring host.
+/// What the netring view holds that is not an answer to a call (#1261).
 #[derive(Debug, Clone, Default)]
 pub struct NetringDetailState {
-    pub flows: Fetch<Vec<FlowRecord>>,
-    pub tls: Fetch<Vec<TlsRecord>>,
-    pub quic: Fetch<Vec<QuicRecord>>,
-    pub ssh: Fetch<Vec<SshRecord>>,
-    pub assets: Fetch<Vec<AssetRecord>>,
-    pub talkers: Fetch<Vec<TalkerRecord>>,
-    pub matrix: Fetch<Vec<MatrixRecord>>,
-    pub elephants: Fetch<Vec<ElephantRecord>>,
-    pub dns: Fetch<Vec<DnsRecord>>,
-    /// Passive encrypted-DNS (DoT/DoQ/DoH) destinations (#326). Encrypted DNS is
-    /// exactly what cleartext DNS RED *cannot* see, so it belongs beside it.
-    pub encrypted_dns: Fetch<Vec<EncryptedDnsRecord>>,
-    pub http: Fetch<Vec<HttpHostRecord>>,
-    /// JA4H HTTP-client fingerprints (#256); served only by `ja4plus` sensor
-    /// builds, so this is fetched manually rather than prefetched with the tab.
-    pub ja4h: Fetch<Vec<Ja4hRecord>>,
-    /// Capture-to-disk file index (#327): triggered captures with their trigger
-    /// + artifact metadata, or the rotating spool listing.
-    pub captures: Fetch<Vec<CaptureRecord>>,
-    /// Per-table sort/filter/limit state, addressed by [`NetringTable`] (#244).
-    pub tables: HashMap<NetringTable, TableState>,
     /// Firing netring anomalies scoped to this device's source (#253), projected
     /// by the app from the external alert set so the Security tab + Overview
     /// anomaly strip render without threading `AlertsState` through the view.
@@ -149,153 +175,6 @@ pub struct NetringDetailState {
         String,
         Fetch<Option<crate::view::specialized::attribution::AttributedProcess>>,
     )>,
-}
-
-impl NetringDetailState {
-    /// Read a table's interaction state (a shared default when never touched).
-    /// Returns a reference so views can borrow the filter text for a `text_input`.
-    pub fn table(&self, which: NetringTable) -> &TableState {
-        use std::sync::OnceLock;
-        static DEFAULT: OnceLock<TableState> = OnceLock::new();
-        self.tables
-            .get(&which)
-            .unwrap_or_else(|| DEFAULT.get_or_init(TableState::default))
-    }
-
-    /// Mutable table state, created lazily on first interaction.
-    pub fn table_mut(&mut self, which: NetringTable) -> &mut TableState {
-        self.tables.entry(which).or_default()
-    }
-
-    /// Mark a flow fetch as in flight (called when the request is sent).
-    pub fn loading(&mut self) {
-        self.flows = Fetch::Loading;
-    }
-
-    /// Store the flow fetch outcome (success or failure).
-    pub fn apply(&mut self, result: Result<Vec<FlowRecord>, String>) {
-        self.flows = Fetch::from_result(result);
-    }
-
-    /// Mark a TLS-inventory fetch as in flight.
-    pub fn loading_tls(&mut self) {
-        self.tls = Fetch::Loading;
-    }
-
-    /// Store the TLS-inventory fetch outcome.
-    pub fn apply_tls(&mut self, result: Result<Vec<TlsRecord>, String>) {
-        self.tls = Fetch::from_result(result);
-    }
-
-    /// Mark a QUIC-inventory fetch as in flight.
-    pub fn loading_quic(&mut self) {
-        self.quic = Fetch::Loading;
-    }
-
-    /// Store the QUIC-inventory fetch outcome.
-    pub fn apply_quic(&mut self, result: Result<Vec<QuicRecord>, String>) {
-        self.quic = Fetch::from_result(result);
-    }
-
-    /// Mark an SSH-inventory fetch as in flight.
-    pub fn loading_ssh(&mut self) {
-        self.ssh = Fetch::Loading;
-    }
-
-    /// Store the SSH-inventory fetch outcome.
-    pub fn apply_ssh(&mut self, result: Result<Vec<SshRecord>, String>) {
-        self.ssh = Fetch::from_result(result);
-    }
-
-    /// Mark an asset-inventory fetch as in flight.
-    pub fn loading_assets(&mut self) {
-        self.assets = Fetch::Loading;
-    }
-
-    /// Store the asset-inventory fetch outcome.
-    pub fn apply_assets(&mut self, result: Result<Vec<AssetRecord>, String>) {
-        self.assets = Fetch::from_result(result);
-    }
-
-    /// Mark a top-talker fetch as in flight.
-    pub fn loading_talkers(&mut self) {
-        self.talkers = Fetch::Loading;
-    }
-
-    /// Store the top-talker fetch outcome.
-    pub fn apply_talkers(&mut self, result: Result<Vec<TalkerRecord>, String>) {
-        self.talkers = Fetch::from_result(result);
-    }
-
-    /// Mark a traffic-matrix fetch as in flight (#122).
-    pub fn loading_matrix(&mut self) {
-        self.matrix = Fetch::Loading;
-    }
-
-    /// Store the traffic-matrix fetch outcome (#122).
-    pub fn apply_matrix(&mut self, result: Result<Vec<MatrixRecord>, String>) {
-        self.matrix = Fetch::from_result(result);
-    }
-
-    /// Mark an elephant-flow fetch as in flight.
-    pub fn loading_elephants(&mut self) {
-        self.elephants = Fetch::Loading;
-    }
-
-    /// Store the elephant-flow fetch outcome.
-    pub fn apply_elephants(&mut self, result: Result<Vec<ElephantRecord>, String>) {
-        self.elephants = Fetch::from_result(result);
-    }
-
-    /// Mark a DNS-detail fetch as in flight.
-    pub fn loading_dns(&mut self) {
-        self.dns = Fetch::Loading;
-    }
-
-    /// Store the DNS-detail fetch outcome.
-    pub fn apply_dns(&mut self, result: Result<Vec<DnsRecord>, String>) {
-        self.dns = Fetch::from_result(result);
-    }
-
-    /// Mark an encrypted-DNS fetch as in flight.
-    pub fn loading_encrypted_dns(&mut self) {
-        self.encrypted_dns = Fetch::Loading;
-    }
-
-    /// Store the encrypted-DNS fetch outcome.
-    pub fn apply_encrypted_dns(&mut self, result: Result<Vec<EncryptedDnsRecord>, String>) {
-        self.encrypted_dns = Fetch::from_result(result);
-    }
-
-    /// Mark an HTTP-detail fetch as in flight.
-    pub fn loading_http(&mut self) {
-        self.http = Fetch::Loading;
-    }
-
-    /// Store the HTTP-detail fetch outcome.
-    pub fn apply_http(&mut self, result: Result<Vec<HttpHostRecord>, String>) {
-        self.http = Fetch::from_result(result);
-    }
-
-    /// Mark a JA4H-inventory fetch as in flight (#256).
-    pub fn loading_ja4h(&mut self) {
-        self.ja4h = Fetch::Loading;
-    }
-
-    /// Store the JA4H-inventory fetch outcome.
-    pub fn apply_ja4h(&mut self, result: Result<Vec<Ja4hRecord>, String>) {
-        self.ja4h = Fetch::from_result(result);
-    }
-
-    /// Mark a capture-index fetch as in flight (#327).
-    pub fn loading_captures(&mut self) {
-        self.captures = Fetch::Loading;
-    }
-
-    /// Store the capture-index fetch outcome.
-    pub fn apply_captures(&mut self, result: Result<Vec<CaptureRecord>, String>) {
-        self.captures = Fetch::from_result(result);
-    }
 }
 
 /// Fetch + decode the recent-flow ring. Thin wrapper over the shared helper.
@@ -477,139 +356,29 @@ mod tests {
     }
 
     #[test]
-    fn apply_stores_captures() {
-        let mut s = NetringDetailState::default();
-        s.loading_captures();
-        assert!(s.captures.is_loading());
-        s.apply_captures(Ok(vec![CaptureRecord {
-            filename: "zensight-h1-trigger-BeaconRita-1.pcap.zst".into(),
-            bytes: 1024,
-            packets: 42,
-            mode: "triggered".into(),
-            trigger_kind: Some("BeaconRita".into()),
-            artifact_id: Some("01J0000000000000000000000".into()),
-            ..Default::default()
-        }]));
-        assert_eq!(s.captures.ready().map(|v| v.len()), Some(1));
-        s.apply_captures(Err("no sensor".into()));
-        assert_eq!(s.captures.error(), Some("no sensor"));
-    }
-
-    #[test]
-    fn apply_stores_traffic_matrix() {
-        let mut s = NetringDetailState::default();
-        s.loading_matrix();
-        assert!(s.matrix.is_loading());
-        s.apply_matrix(Ok(vec![MatrixRecord {
-            src: "10.0.0.1".into(),
-            dst: "8.8.8.8".into(),
-            bytes_per_sec: 5000.0,
-            names: Vec::new(),
-        }]));
-        assert_eq!(s.matrix.ready().map(|v| v.len()), Some(1));
-        s.apply_matrix(Err("no sensor".into()));
-        assert_eq!(s.matrix.error(), Some("no sensor"));
-    }
-
-    #[test]
-    fn apply_stores_dns_http_talkers_elephants() {
-        let mut s = NetringDetailState::default();
-        s.loading_dns();
-        assert!(s.dns.is_loading());
-        s.apply_dns(Ok(vec![DnsRecord {
-            domain: "example".into(),
-            queries: 10,
-            nxdomain: 2,
-        }]));
-        assert_eq!(s.dns.ready().map(|v| v.len()), Some(1));
-        s.apply_http(Ok(vec![HttpHostRecord {
-            host: "api.example.com".into(),
-            requests: 30,
-            errors: 1,
-        }]));
-        assert_eq!(s.http.ready().map(|v| v.len()), Some(1));
-        s.apply_talkers(Ok(vec![TalkerRecord {
-            src: "10.0.0.5".into(),
-            bytes_per_sec: 1000.0,
-            names: Vec::new(),
-        }]));
-        assert_eq!(s.talkers.ready().map(|v| v.len()), Some(1));
-        s.apply_elephants(Err("no sensor".into()));
-        assert_eq!(s.elephants.error(), Some("no sensor"));
-    }
-
-    #[test]
-    fn apply_stores_quic_and_ssh() {
-        let mut s = NetringDetailState::default();
-        s.loading_quic();
-        assert!(s.quic.is_loading());
-        s.apply_quic(Ok(vec![QuicRecord {
-            sni: Some("example.com".into()),
-            alpn: vec!["h3".into()],
-            version: "v1".into(),
-            count: 4,
-            pq_key_share: true,
-            ..Default::default()
-        }]));
-        assert_eq!(s.quic.ready().map(|v| v.len()), Some(1));
-
-        s.apply_ssh(Ok(vec![SshRecord {
-            hassh: "deadbeef".into(),
-            role: "client".into(),
-            banner: Some("SSH-2.0-OpenSSH_9.6".into()),
-            count: 2,
-            ..Default::default()
-        }]));
-        assert_eq!(s.ssh.ready().map(|v| v.len()), Some(1));
-    }
-
-    #[test]
-    fn apply_stores_assets() {
-        let mut s = NetringDetailState::default();
-        assert!(s.assets.ready().is_none());
-        s.loading_assets();
-        assert!(s.assets.is_loading());
-        s.apply_assets(Ok(vec![AssetRecord {
-            mac: "aa:bb:cc:dd:ee:ff".into(),
-            ipv4: vec!["10.0.0.5".into()],
-            ipv6: vec![],
-            hostname: Some("switch01".into()),
-            vendor: None,
-            platform: Some("cisco WS-C2960X".into()),
-            capabilities: vec!["switch".into()],
-            seen_via: vec!["lldp".into()],
-            last_seen: 1_700_000_000_000,
-            ..Default::default()
-        }]));
-        assert_eq!(s.assets.ready().map(|v| v.len()), Some(1));
-        s.apply_assets(Err("no sensor".into()));
-        assert_eq!(s.assets.error(), Some("no sensor"));
-    }
-
-    #[test]
-    fn apply_stores_flows() {
-        let mut s = NetringDetailState::default();
-        assert!(s.flows.ready().is_none());
-        s.loading();
-        assert!(s.flows.is_loading());
-        s.apply(Ok(vec![FlowRecord {
-            src: "10.0.0.1:5555".into(),
-            dst: "1.1.1.1:443".into(),
-            proto: "tcp".into(),
-            bytes: 694,
-            packets: 10,
-            duration_ms: 100,
-            reason: "fin".into(),
-            community_id: Some("1:abc".into()),
-            directed: true,
-            bytes_initiator: 120,
-            bytes_responder: 574,
-            packets_initiator: 4,
-            packets_responder: 6,
-            dst_names: Vec::new(),
-        }]));
-        assert_eq!(s.flows.ready().map(|v| v.len()), Some(1));
-        s.apply(Err("no sensor".into()));
-        assert_eq!(s.flows.error(), Some("no sensor"));
+    fn topics_name_the_sensor_s_procedures_and_params() {
+        use NetringTopic as T;
+        for (topic, procedure, params) in [
+            (T::Flows, "flows", ""),
+            (T::Elephants, "elephant_flows", ""),
+            (T::Talkers, "talkers", "top=50"),
+            (T::Matrix, "matrix", "top=50"),
+            (T::Dns, "dns", "top=50"),
+            (T::EncryptedDns, "encrypted_dns", ""),
+            (T::Http, "http", "top=50"),
+            (T::Tls, "tls", ""),
+            (T::Quic, "quic", ""),
+            (T::Ssh, "ssh", ""),
+            (T::Assets, "assets", ""),
+            (T::Ja4h, "ja4h", ""),
+            (T::Captures, "captures", ""),
+        ] {
+            assert_eq!(topic.procedure(), procedure);
+            assert_eq!(topic.params(), params);
+            assert!(matches!(
+                topic.call(),
+                Message::Call { procedure: p, params: q } if p == procedure && q == params
+            ));
+        }
     }
 }

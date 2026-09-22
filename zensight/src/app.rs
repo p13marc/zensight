@@ -1645,41 +1645,25 @@ impl ZenSight {
                     return ControlFlow::Break(task);
                 }
             }
-            Message::NetringTableSort(which, col) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.table_mut(which).toggle_sort(col);
-                }
-            }
-            Message::NetringTableFilter(which, filter) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.table_mut(which).set_filter(filter);
-                }
-            }
-            Message::NetringTableMore(which) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.table_mut(which).load_more();
-                }
-            }
             Message::NetringPivotToFlows(device_id, endpoint) => {
                 use crate::view::specialized::SpecializedTab;
                 use crate::view::specialized::fetch::Fetch;
-                use crate::view::specialized::netring_detail::NetringTable;
+                use crate::view::specialized::netring_detail::NetringTopic;
+                let flows = NetringTopic::Flows.procedure();
                 let mut fetch_needed = false;
                 if let Some(device) = self.selected_device.as_mut()
                     && device.device_id == device_id
                 {
                     device.specialized_tab = SpecializedTab::Flows;
                     device
-                        .netring_detail
-                        .table_mut(NetringTable::Flows)
+                        .tables
+                        .entry(flows.to_string())
+                        .or_default()
                         .set_filter(endpoint);
-                    if matches!(device.netring_detail.flows, Fetch::Idle) {
-                        device.netring_detail.loading();
-                        fetch_needed = true;
-                    }
+                    fetch_needed = matches!(device.calls.fetch(flows), Fetch::Idle);
                 }
                 if fetch_needed {
-                    return ControlFlow::Break(self.query_netring_flows());
+                    return ControlFlow::Break(self.call_now(flows, NetringTopic::Flows.params()));
                 }
             }
             Message::NetringAssetToTopology { ip, hostname } => {
@@ -1701,144 +1685,6 @@ impl ZenSight {
                     format!("No topology node found for asset {ip}"),
                 );
             }
-            Message::FetchNetringFlows => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading();
-                }
-                return ControlFlow::Break(self.query_netring_flows());
-            }
-            Message::NetringFlowsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply(result);
-                }
-            }
-            Message::FetchNetringTls => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_tls();
-                }
-                return ControlFlow::Break(self.query_netring_tls());
-            }
-            Message::NetringTlsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_tls(result);
-                }
-            }
-            Message::FetchNetringQuic => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_quic();
-                }
-                return ControlFlow::Break(self.query_netring_quic());
-            }
-            Message::NetringQuicReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_quic(result);
-                }
-            }
-            Message::FetchNetringSsh => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_ssh();
-                }
-                return ControlFlow::Break(self.query_netring_ssh());
-            }
-            Message::NetringSshReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_ssh(result);
-                }
-            }
-            Message::FetchNetringJa4h => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_ja4h();
-                }
-                return ControlFlow::Break(self.query_netring_ja4h());
-            }
-            Message::NetringJa4hReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_ja4h(result);
-                }
-            }
-            Message::FetchNetringAssets => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_assets();
-                }
-                return ControlFlow::Break(self.query_netring_assets());
-            }
-            Message::NetringAssetsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_assets(result);
-                }
-            }
-            Message::FetchNetringTalkers => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_talkers();
-                }
-                return ControlFlow::Break(self.query_netring_talkers());
-            }
-            Message::NetringTalkersReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_talkers(result);
-                }
-            }
-            Message::FetchNetringMatrix => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_matrix();
-                }
-                return ControlFlow::Break(self.query_netring_matrix());
-            }
-            Message::NetringMatrixReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_matrix(result);
-                }
-            }
-            Message::FetchNetringElephants => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_elephants();
-                }
-                return ControlFlow::Break(self.query_netring_elephants());
-            }
-            Message::NetringElephantsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_elephants(result);
-                }
-            }
-            Message::FetchNetringDns => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_dns();
-                }
-                return ControlFlow::Break(self.query_netring_dns());
-            }
-            Message::NetringDnsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_dns(result);
-                }
-            }
-            Message::FetchNetringEncryptedDns => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_encrypted_dns();
-                }
-                return ControlFlow::Break(self.query_netring_encrypted_dns());
-            }
-            Message::NetringEncryptedDnsReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_encrypted_dns(result);
-                }
-            }
-            Message::FetchNetringHttp => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_http();
-                }
-                return ControlFlow::Break(self.query_netring_http());
-            }
-            Message::FetchNetringCaptures => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_captures();
-                }
-                return ControlFlow::Break(self.query_netring_captures());
-            }
-            Message::NetringCapturesReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_captures(result);
-                }
-            }
             Message::NetringCaptureNow => {
                 let key = zensight_common::fleet_command_key("netring", "capture_disk");
                 let command = serde_json::json!({ "type": "capture_now" });
@@ -1856,11 +1702,6 @@ impl ZenSight {
                     &command,
                     format!("Capture-to-disk mode → {mode}"),
                 ));
-            }
-            Message::NetringHttpReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.apply_http(result);
-                }
             }
             Message::Call { procedure, params } => {
                 if self.selected_device.is_some() {
@@ -6954,150 +6795,19 @@ impl ZenSight {
         })
     }
 
-    /// On tab activation (#243), prefetch the on-demand channels that back a
-    /// netring tab — but only those still `Idle`, so we never clobber loaded
-    /// data or re-fire an in-flight request. Returns a batched task, or `None`
-    /// when the tab is fully streamed (no queryables) or everything is fetched.
+    /// On tab activation (#243), prefetch the procedures that back a netring
+    /// tab — each once (#1261), so a loaded table is never clobbered and an
+    /// in-flight call never re-fired. `None` when the tab streams.
     fn prefetch_netring_tab(
         &mut self,
         tab: crate::view::specialized::SpecializedTab,
     ) -> Option<Task<Message>> {
-        use crate::view::specialized::SpecializedTab as T;
-        use crate::view::specialized::fetch::Fetch;
-
-        let nd = &self.selected_device.as_ref()?.netring_detail;
-        // The Capture tab's file index (#327) is its own on-demand channel.
-        if matches!(tab, T::Capture) {
-            if matches!(nd.captures, Fetch::Idle) {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netring_detail.loading_captures();
-                }
-                return Some(self.query_netring_captures());
-            }
-            return None;
-        }
-        // Per-tab channel needs (flows, elephants, talkers, matrix, dns, http,
-        // tls, quic, ssh, assets); overview/bandwidth/security stream.
-        let (
-            mut flows,
-            mut elephants,
-            mut talkers,
-            mut matrix,
-            mut dns,
-            mut http,
-            mut tls,
-            mut quic,
-            mut ssh,
-            mut assets,
-        ) = match tab {
-            T::Flows => (
-                true, true, false, false, false, false, false, false, false, false,
-            ),
-            T::TalkersMatrix => (
-                false, false, true, true, false, false, false, false, false, false,
-            ),
-            T::Dns => (
-                false, false, false, false, true, false, false, false, false, false,
-            ),
-            T::HttpTls => (
-                false, false, false, false, false, true, true, true, true, false,
-            ),
-            T::Assets => (
-                false, false, false, false, false, false, false, false, false, true,
-            ),
-            _ => return None,
-        };
-        // Only fetch idle channels.
-        flows &= matches!(nd.flows, Fetch::Idle);
-        elephants &= matches!(nd.elephants, Fetch::Idle);
-        talkers &= matches!(nd.talkers, Fetch::Idle);
-        matrix &= matches!(nd.matrix, Fetch::Idle);
-        dns &= matches!(nd.dns, Fetch::Idle);
-        http &= matches!(nd.http, Fetch::Idle);
-        tls &= matches!(nd.tls, Fetch::Idle);
-        quic &= matches!(nd.quic, Fetch::Idle);
-        ssh &= matches!(nd.ssh, Fetch::Idle);
-        assets &= matches!(nd.assets, Fetch::Idle);
-        if !(flows || elephants || talkers || matrix || dns || http || tls || quic || ssh || assets)
-        {
-            return None;
-        }
-        // Mark loading (mutable borrow ends before we build the &self tasks).
-        if let Some(device) = self.selected_device.as_mut() {
-            let d = &mut device.netring_detail;
-            if flows {
-                d.loading();
-            }
-            if elephants {
-                d.loading_elephants();
-            }
-            if talkers {
-                d.loading_talkers();
-            }
-            if matrix {
-                d.loading_matrix();
-            }
-            if dns {
-                d.loading_dns();
-                d.loading_encrypted_dns();
-            }
-            if http {
-                d.loading_http();
-            }
-            if tls {
-                d.loading_tls();
-            }
-            if quic {
-                d.loading_quic();
-            }
-            if ssh {
-                d.loading_ssh();
-            }
-            if assets {
-                d.loading_assets();
-            }
-        }
-        let mut tasks: Vec<Task<Message>> = Vec::new();
-        if flows {
-            tasks.push(self.query_netring_flows());
-        }
-        if elephants {
-            tasks.push(self.query_netring_elephants());
-        }
-        if talkers {
-            tasks.push(self.query_netring_talkers());
-        }
-        if matrix {
-            tasks.push(self.query_netring_matrix());
-        }
-        if dns {
-            tasks.push(self.query_netring_dns());
-            // Encrypted DNS rides the same tab: it is precisely what the
-            // cleartext RED rollups cannot see, so showing one without the
-            // other is how a DoH tunnel stays invisible.
-            tasks.push(self.query_netring_encrypted_dns());
-        }
-        if http {
-            tasks.push(self.query_netring_http());
-        }
-        if tls {
-            tasks.push(self.query_netring_tls());
-        }
-        if quic {
-            tasks.push(self.query_netring_quic());
-        }
-        if ssh {
-            tasks.push(self.query_netring_ssh());
-        }
-        if assets {
-            tasks.push(self.query_netring_assets());
-        }
-        Some(Task::batch(tasks))
+        let procedures = crate::view::specialized::netring::tab_procedures(tab)
+            .iter()
+            .map(|t| (t.procedure().to_string(), t.params()));
+        self.prefetch_calls(procedures)
     }
 
-    /// Prefetch the on-demand `@rpc/netlink/*` procedures a newly-activated netlink tab
-    /// needs, so tabs populate without a manual "Fetch" click (#258). Only idle
-    /// channels are fetched; Overview/Interfaces/WireGuard stream live.
     fn prefetch_netlink_tab(
         &mut self,
         tab: crate::view::specialized::SpecializedTab,
@@ -7133,18 +6843,6 @@ impl ZenSight {
         Some(Task::batch(todo.into_iter().map(|(procedure, params)| {
             self.query_call(procedure, params)
         })))
-    }
-
-    fn query_netring_flows(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_flows;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_flows(s, origin)
-            },
-            Message::NetringFlowsReceived,
-            "No netring sensor responded",
-        )
     }
 
     /// Fetch the mesh-wide listen-socket table for the selected topology node
@@ -7465,71 +7163,6 @@ impl ZenSight {
         rates
     }
 
-    /// Fetch the on-demand netring TLS asset inventory.
-    fn query_netring_tls(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_tls;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_tls(s, origin)
-            },
-            Message::NetringTlsReceived,
-            "No netring sensor responded",
-        )
-    }
-
-    /// Fetch the on-demand netring QUIC SNI/ALPN inventory (#72).
-    fn query_netring_quic(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_quic;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_quic(s, origin)
-            },
-            Message::NetringQuicReceived,
-            "No QUIC data — is the netring sensor running with collect.quic enabled?",
-        )
-    }
-
-    /// Fetch the on-demand netring SSH/HASSH inventory (#72).
-    fn query_netring_ssh(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_ssh;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_ssh(s, origin)
-            },
-            Message::NetringSshReceived,
-            "No SSH data — is the netring sensor running with collect.ssh enabled?",
-        )
-    }
-
-    /// Fetch the on-demand netring JA4H HTTP-fingerprint inventory (#256).
-    fn query_netring_ja4h(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_ja4h;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_ja4h(s, origin)
-            },
-            Message::NetringJa4hReceived,
-            "No JA4H data — needs a netring sensor built with the ja4plus feature and collect.http_fp enabled",
-        )
-    }
-
-    /// Fetch the on-demand netring passive asset inventory (#70).
-    fn query_netring_assets(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_assets;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_assets(s, origin)
-            },
-            Message::NetringAssetsReceived,
-            "No netring sensor responded",
-        )
-    }
-
     /// Combined fetch for the first-class inventory view (#120): assets + the
     /// TLS/QUIC/SSH fingerprint inventories, fetched concurrently from the global
     /// `@rpc/netring/*` procedures and folded into one [`InventoryData`].
@@ -7583,97 +7216,6 @@ impl ZenSight {
                 ja4h: ja4h.unwrap_or_default(),
             }))
         })
-    }
-
-    /// Fetch the on-demand netring top-talker histogram (#45).
-    fn query_netring_talkers(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_talkers;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_talkers(s, origin)
-            },
-            Message::NetringTalkersReceived,
-            "No netring sensor responded",
-        )
-    }
-
-    /// Fetch the on-demand netring `(src,dst)` traffic matrix / service map (#122).
-    fn query_netring_matrix(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_matrix;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_matrix(s, origin)
-            },
-            Message::NetringMatrixReceived,
-            "No netring sensor responded",
-        )
-    }
-
-    /// Fetch the on-demand netring elephant-flow ring (#45).
-    fn query_netring_elephants(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_elephants;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_elephants(s, origin)
-            },
-            Message::NetringElephantsReceived,
-            "No netring sensor responded",
-        )
-    }
-
-    /// Fetch the on-demand netring per-SLD DNS detail (#45).
-    fn query_netring_dns(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_dns;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_dns(s, origin)
-            },
-            Message::NetringDnsReceived,
-            "No DNS data — is the netring sensor running with collect.dns enabled?",
-        )
-    }
-
-    /// Fetch the passive encrypted-DNS destination inventory (#326).
-    fn query_netring_encrypted_dns(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_encrypted_dns;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_encrypted_dns(s, origin)
-            },
-            Message::NetringEncryptedDnsReceived,
-            "No encrypted-DNS data — is the netring sensor running with collect.dns enabled?",
-        )
-    }
-
-    /// Fetch the on-demand netring per-host HTTP detail (#45).
-    fn query_netring_http(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_http;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_http(s, origin)
-            },
-            Message::NetringHttpReceived,
-            "No HTTP data — is the netring sensor running with collect.http enabled?",
-        )
-    }
-
-    /// Fetch the capture-to-disk file index for the device Capture tab (#327).
-    fn query_netring_captures(&self) -> Task<Message> {
-        use crate::view::specialized::netring_detail::fetch_captures;
-        self.query_channel(
-            {
-                let origin = self.selected_origin_for(zensight_common::Protocol::Netring);
-                move |s| fetch_captures(s, origin)
-            },
-            Message::NetringCapturesReceived,
-            "No captures — is capture.to_disk enabled on the netring sensor?",
-        )
     }
 
     /// Fetch the capture-to-disk index for the Security drill-down (#327), so an
@@ -10394,7 +9936,9 @@ fn prefetch_channels(producer: &str) -> Vec<Message> {
             // on open, not behind an extra click.
             NetlinkDetailTopic::RouteChanges.call(),
         ],
-        Protocol::Netring => vec![Message::FetchNetringFlows],
+        Protocol::Netring => {
+            vec![crate::view::specialized::netring_detail::NetringTopic::Flows.call()]
+        }
         // The outlet panel decides what to offer from the sensor's advertised
         // gate (#956), so the probe has to have been asked before the first
         // render — otherwise a PDU's outlets appear controlless for a beat on
@@ -10597,7 +10141,7 @@ mod prefetch_tests {
         // Netring prefetches flows; sysinfo prefetches the process explorer.
         assert!(matches!(
             prefetch_channels("netring").as_slice(),
-            [Message::FetchNetringFlows]
+            [Message::Call { procedure, .. }] if procedure == "flows"
         ));
         assert!(matches!(
             prefetch_channels("sysinfo").as_slice(),

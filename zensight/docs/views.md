@@ -317,8 +317,16 @@ answer). What `SystemdDetailState` still holds is the **action machine** —
 an armed action, one in flight, the job counter the auto-refresh watches —
 and `SystemdSelectUnit`, `SystemdUnitAction{Arm,Cancel,Confirm,Result}`
 stay with it: the write path goes through the audited seam and its form is
-the request-schema step of #1261, not a read call. The rest go one producer
-per PR; a view's `Fetch<T>` field is the sign it has not moved.
+the request-schema step of #1261, not a read call. **netring**: its thirteen
+`@rpc/netring/*` procedures (`NetringTopic`, with `params()` carrying the
+`top=50` of the ranked channels) — the twelve tables keyed by procedure, the
+tab prefetch the view's `tab_procedures`, the matrix→flows pivot a filter on
+the `flows` table plus one `call_now`. `NetringDetailState` keeps what is
+not an answer to a call: the anomalies projected onto the device and the
+flow↔process join slot; the `fetch_*` helpers stay for the fleet-wide
+topology and Security joins, which land elsewhere than a device. The rest
+go one producer per PR; a view's `Fetch<T>` field is the sign it has not
+moved.
 
 ## Routing: `CurrentView`
 

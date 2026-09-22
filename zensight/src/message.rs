@@ -524,19 +524,6 @@ pub enum Message {
     /// per device in `DeviceDetailState`.
     SelectSpecializedTab(DeviceId, crate::view::specialized::SpecializedTab),
 
-    /// Sort a netring data-table by column index (toggles direction) (#244).
-    NetringTableSort(
-        crate::view::specialized::netring_detail::NetringTable,
-        usize,
-    ),
-    /// Set a netring data-table's substring filter (#244).
-    NetringTableFilter(
-        crate::view::specialized::netring_detail::NetringTable,
-        String,
-    ),
-    /// Reveal another page of rows in a netring data-table (#244).
-    NetringTableMore(crate::view::specialized::netring_detail::NetringTable),
-
     /// Drill-down pivot (#246): jump to the Flows tab filtered to an endpoint
     /// (talker → flows, asset → flows, matrix cell → flows). Reuses the Flows
     /// data-table filter; fetches flows if not already loaded.
@@ -550,10 +537,6 @@ pub enum Message {
         hostname: Option<String>,
     },
 
-    /// Fetch the on-demand netring flow detail (recent flows).
-    FetchNetringFlows,
-    /// A netring flow-detail reply: the decoded flows, or an error message.
-    NetringFlowsReceived(Result<Vec<zensight_common::FlowRecord>, String>),
     /// One topology data-refresh reply set (#440): flows (#25) + neighbors
     /// (#49) + matrix + assets (#391), fetched concurrently and landed as a
     /// single message so the edge set rebuilds once per batch instead of
@@ -613,55 +596,6 @@ pub enum Message {
     TopologyLayoutFrame,
     /// Toggle the topology lens legend (#394).
     TopologyToggleLegend,
-    /// Fetch the on-demand netring TLS asset inventory.
-    FetchNetringTls,
-    /// A netring TLS-inventory reply: the decoded records, or an error message.
-    NetringTlsReceived(Result<Vec<zensight_common::TlsRecord>, String>),
-    /// Fetch the on-demand netring QUIC SNI/ALPN inventory (#72).
-    FetchNetringQuic,
-    /// A netring QUIC-inventory reply: the decoded records, or an error message.
-    NetringQuicReceived(Result<Vec<zensight_common::QuicRecord>, String>),
-    /// Fetch the on-demand netring SSH/HASSH inventory (#72).
-    FetchNetringSsh,
-    /// A netring SSH-inventory reply: the decoded records, or an error message.
-    NetringSshReceived(Result<Vec<zensight_common::SshRecord>, String>),
-    /// Fetch the on-demand netring JA4H HTTP-fingerprint inventory (#256).
-    /// Manual only — the queryable exists only on `ja4plus` sensor builds.
-    FetchNetringJa4h,
-    /// A netring JA4H-inventory reply: the decoded records, or an error message.
-    NetringJa4hReceived(Result<Vec<zensight_common::Ja4hRecord>, String>),
-    /// Fetch the on-demand netring passive asset inventory (#70).
-    FetchNetringAssets,
-    /// A netring asset-inventory reply: the decoded records, or an error message.
-    NetringAssetsReceived(Result<Vec<zensight_common::AssetRecord>, String>),
-    /// Fetch the on-demand netring top-talker histogram (#45).
-    FetchNetringTalkers,
-    /// A netring top-talker reply: the decoded records, or an error message.
-    NetringTalkersReceived(Result<Vec<zensight_common::TalkerRecord>, String>),
-    /// Fetch the on-demand netring `(src,dst)` traffic matrix / service map (#122).
-    FetchNetringMatrix,
-    /// A netring traffic-matrix reply: the decoded records, or an error message.
-    NetringMatrixReceived(Result<Vec<zensight_common::MatrixRecord>, String>),
-    /// Fetch the on-demand netring elephant-flow ring (#45).
-    FetchNetringElephants,
-    /// A netring elephant-flow reply: the decoded records, or an error message.
-    NetringElephantsReceived(Result<Vec<zensight_common::ElephantRecord>, String>),
-    /// Fetch the on-demand netring per-SLD DNS detail (#45).
-    FetchNetringDns,
-    /// A netring DNS-detail reply: the decoded records, or an error message.
-    NetringDnsReceived(Result<Vec<zensight_common::DnsRecord>, String>),
-    /// Fetch the passive encrypted-DNS (DoT/DoQ/DoH) destination inventory (#326).
-    FetchNetringEncryptedDns,
-    /// An encrypted-DNS inventory reply: the decoded records, or an error message.
-    NetringEncryptedDnsReceived(Result<Vec<zensight_common::EncryptedDnsRecord>, String>),
-    /// Fetch the on-demand netring per-host HTTP detail (#45).
-    FetchNetringHttp,
-    /// A netring HTTP-detail reply: the decoded records, or an error message.
-    NetringHttpReceived(Result<Vec<zensight_common::HttpHostRecord>, String>),
-    /// Fetch the on-demand netring capture-file index (#327).
-    FetchNetringCaptures,
-    /// A netring capture-index reply: the decoded records, or an error message.
-    NetringCapturesReceived(Result<Vec<zensight_common::CaptureRecord>, String>),
     /// Manual capture trigger (#327): `capture_now` on `@rpc/netring/capture_disk/set`
     /// (fires the pre-trigger ring in triggered mode, rotates the spool in
     /// rotating mode).

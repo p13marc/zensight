@@ -20,7 +20,24 @@ use crate::view::device::DeviceDetailState;
 use crate::view::formatting::{format_bytes, format_count, format_rate};
 use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
-use crate::view::specialized::netring_detail::NetringTable;
+use crate::view::specialized::netring_detail::NetringTopic;
+
+/// The procedures a tab calls when it opens (#1261): what
+/// `prefetch_netring_tab` asks for, each once, so a tab opens with its rows
+/// on the way. Overview, Bandwidth and Security stream; JA4H is served only
+/// by `ja4plus` builds, so it is fetched by hand rather than with its tab.
+pub fn tab_procedures(tab: SpecializedTab) -> &'static [NetringTopic] {
+    use NetringTopic as T;
+    match tab {
+        SpecializedTab::Flows => &[T::Flows, T::Elephants],
+        SpecializedTab::TalkersMatrix => &[T::Talkers, T::Matrix],
+        SpecializedTab::Dns => &[T::Dns, T::EncryptedDns],
+        SpecializedTab::HttpTls => &[T::Http, T::Tls, T::Quic, T::Ssh],
+        SpecializedTab::Assets => &[T::Assets],
+        SpecializedTab::Capture => &[T::Captures],
+        _ => &[],
+    }
+}
 use crate::view::subject::{leaf, var};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
@@ -75,7 +92,7 @@ fn netring_tabs(
         TabItem::new(HttpTls, "HTTP/TLS"),
         TabItem::new(Bandwidth, "Bandwidth"),
         TabItem::new(Assets, "Assets").visible(
-            has_prefix(state, "assets/") || !matches!(state.netring_detail.assets, Fetch::Idle),
+            has_prefix(state, "assets/") || !matches!(state.calls.fetch("assets"), Fetch::Idle),
         ),
         TabItem::new(Security, "Security")
             .visible(!state.netring_detail.anomalies.is_empty())
@@ -128,10 +145,10 @@ fn netring_tab_content<'a>(
                 c = c.push(card(render_http(state)));
             }
             c = c.push(card(render_tls(state)));
-            if has_prefix(state, "quic/") || !matches!(state.netring_detail.quic, Fetch::Idle) {
+            if has_prefix(state, "quic/") || !matches!(state.calls.fetch("quic"), Fetch::Idle) {
                 c = c.push(card(render_quic(state)));
             }
-            if has_prefix(state, "ssh/") || !matches!(state.netring_detail.ssh, Fetch::Idle) {
+            if has_prefix(state, "ssh/") || !matches!(state.calls.fetch("ssh"), Fetch::Idle) {
                 c = c.push(card(render_ssh(state)));
             }
             c = c.push(card(render_ja4h(state)));
@@ -159,7 +176,8 @@ fn netring_tab_content<'a>(
 /// inventory (SNI / JA4) fetched from `@rpc/netring/tls`.
 fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
     let get = |m: &str| num(state.metrics.get(m).map(|p| &p.value));
-    let loading = state.netring_detail.tls.is_loading();
+    let answer = state.calls.answer::<Vec<zensight_common::TlsRecord>>("tls");
+    let loading = answer.is_loading();
     let label = if loading {
         "Fetching…"
     } else {
@@ -167,7 +185,7 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
     };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringTls);
+        fetch = fetch.on_press(NetringTopic::Tls.call());
     }
 
     let mut col = column![
@@ -191,9 +209,9 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(space::SM);
 
-    if let Some(err) = state.netring_detail.tls.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.tls.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No TLS handshakes observed", None));
         } else {
@@ -250,11 +268,19 @@ fn render_tls(state: &DeviceDetailState) -> Element<'_, Message> {
                             r.ja3.clone().unwrap_or_default(),
                         )
                     })
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Tls, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Tls, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Tls))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Tls.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Tls.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Tls.procedure().to_string(),
+                    })
                     .noun("fingerprints")
-                    .view(records, state.netring_detail.table(NetringTable::Tls)),
+                    .view(records, state.table(NetringTopic::Tls.procedure())),
             );
         }
     }
@@ -269,11 +295,14 @@ const OVERLOAD_DROP_RATE: f64 = 0.05;
 /// QUIC section (#72): streamed distinct-SNI count + an on-demand SNI/ALPN/version
 /// inventory fetched from `@rpc/netring/quic` — the QUIC analogue of the TLS card.
 fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.quic.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::QuicRecord>>("quic");
+    let loading = answer.is_loading();
     let label = if loading { "Fetching…" } else { "Fetch QUIC" };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringQuic);
+        fetch = fetch.on_press(NetringTopic::Quic.call());
     }
 
     let count = num(state.metrics.get("quic/distinct_sni").map(|p| &p.value));
@@ -283,9 +312,9 @@ fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(space::SM);
 
-    if let Some(err) = state.netring_detail.quic.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.quic.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No QUIC Initials observed", None));
         } else {
@@ -311,11 +340,19 @@ fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(
                 DataTable::new(columns)
                     .searchable(|r: &QuicRecord| r.sni.clone().unwrap_or_default())
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Quic, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Quic, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Quic))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Quic.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Quic.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Quic.procedure().to_string(),
+                    })
                     .noun("SNI/version pairs")
-                    .view(records, state.netring_detail.table(NetringTable::Quic)),
+                    .view(records, state.table(NetringTopic::Quic.procedure())),
             );
         }
     }
@@ -327,19 +364,22 @@ fn render_quic(state: &DeviceDetailState) -> Element<'_, Message> {
 /// streamed metric to gate on — the section always shows its fetch button and
 /// the error path names the build flag.
 fn render_ja4h(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.ja4h.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::Ja4hRecord>>("ja4h");
+    let loading = answer.is_loading();
     let label = if loading { "Fetching…" } else { "Fetch JA4H" };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringJa4h);
+        fetch = fetch.on_press(NetringTopic::Ja4h.call());
     }
 
     let mut col =
         column![section_header("HTTP clients (JA4H)", Some(fetch.into()))].spacing(space::SM);
 
-    if let Some(err) = state.netring_detail.ja4h.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.ja4h.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No HTTP client fingerprints observed", None));
         } else {
@@ -380,11 +420,19 @@ fn render_ja4h(state: &DeviceDetailState) -> Element<'_, Message> {
                             r.user_agent.clone().unwrap_or_default(),
                         )
                     })
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Ja4h, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Ja4h, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Ja4h))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Ja4h.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Ja4h.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Ja4h.procedure().to_string(),
+                    })
                     .noun("fingerprints")
-                    .view(records, state.netring_detail.table(NetringTable::Ja4h)),
+                    .view(records, state.table(NetringTopic::Ja4h.procedure())),
             );
         }
     }
@@ -394,11 +442,12 @@ fn render_ja4h(state: &DeviceDetailState) -> Element<'_, Message> {
 /// SSH section (#72): streamed distinct-HASSH count + an on-demand HASSH
 /// inventory (fingerprint · role · banner) fetched from `@rpc/netring/ssh`.
 fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.ssh.is_loading();
+    let answer = state.calls.answer::<Vec<zensight_common::SshRecord>>("ssh");
+    let loading = answer.is_loading();
     let label = if loading { "Fetching…" } else { "Fetch SSH" };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringSsh);
+        fetch = fetch.on_press(NetringTopic::Ssh.call());
     }
 
     let count = num(state.metrics.get("ssh/distinct_hassh").map(|p| &p.value));
@@ -408,9 +457,9 @@ fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(space::SM);
 
-    if let Some(err) = state.netring_detail.ssh.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.ssh.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No SSH handshakes observed", None));
         } else {
@@ -438,11 +487,19 @@ fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
                     .searchable(|r: &SshRecord| {
                         format!("{} {}", r.hassh, r.banner.clone().unwrap_or_default())
                     })
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Ssh, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Ssh, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Ssh))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Ssh.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Ssh.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Ssh.procedure().to_string(),
+                    })
                     .noun("fingerprints")
-                    .view(records, state.netring_detail.table(NetringTable::Ssh)),
+                    .view(records, state.table(NetringTopic::Ssh.procedure())),
             );
         }
     }
@@ -454,7 +511,10 @@ fn render_ssh(state: &DeviceDetailState) -> Element<'_, Message> {
 /// fetched from `@rpc/netring/assets`. Surfaces hosts seen on the wire that emit no
 /// telemetry of their own — the discovery the topology/devices views lack.
 fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.assets.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::AssetRecord>>("assets");
+    let loading = answer.is_loading();
     let label = if loading {
         "Fetching…"
     } else {
@@ -462,7 +522,7 @@ fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
     };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringAssets);
+        fetch = fetch.on_press(NetringTopic::Assets.call());
     }
 
     let discovered = num(state.metrics.get("assets/discovered").map(|p| &p.value));
@@ -472,9 +532,9 @@ fn render_assets(state: &DeviceDetailState) -> Element<'_, Message> {
     ]
     .spacing(space::SM);
 
-    if let Some(err) = state.netring_detail.assets.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.assets.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No assets discovered yet", None));
         } else {
@@ -568,11 +628,19 @@ fn assets_table<'a>(
                 r.vendor.clone().unwrap_or_default(),
             )
         })
-        .on_sort(|c| Message::NetringTableSort(NetringTable::Assets, c))
-        .on_filter(|q| Message::NetringTableFilter(NetringTable::Assets, q))
-        .on_more(Message::NetringTableMore(NetringTable::Assets))
+        .on_sort(|c| Message::DetailTableSort {
+            table: NetringTopic::Assets.procedure().to_string(),
+            column: c,
+        })
+        .on_filter(|q| Message::DetailTableFilter {
+            table: NetringTopic::Assets.procedure().to_string(),
+            query: q,
+        })
+        .on_more(Message::DetailTableMore {
+            table: NetringTopic::Assets.procedure().to_string(),
+        })
         .noun("assets")
-        .view(records, state.netring_detail.table(NetringTable::Assets))
+        .view(records, state.table(NetringTopic::Assets.procedure()))
 }
 
 /// Join a slug list with commas, or `"-"` when empty.
@@ -909,13 +977,15 @@ fn render_capture_to_disk(state: &DeviceDetailState) -> Option<Element<'_, Messa
 
     // Capture-file index (`@rpc/netring/captures`): triggered captures download
     // through the artifact blob path; rotating spool files are metadata-only.
-    let captures = &state.netring_detail.captures;
+    let captures = state
+        .calls
+        .answer::<Vec<zensight_common::CaptureRecord>>("captures");
     let loading = captures.is_loading();
     let mut refresh =
         button(text(if loading { "Fetching…" } else { "Refresh" }).size(font::CAPTION))
             .padding([4, 10]);
     if !loading {
-        refresh = refresh.on_press(Message::FetchNetringCaptures);
+        refresh = refresh.on_press(NetringTopic::Captures.call());
     }
     col = col.push(
         row![text("Capture files").size(font::EMPHASIS), refresh,]
@@ -1171,7 +1241,8 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // On-demand top-SLD / top-NXDOMAIN drill-down via `@rpc/netring/dns`.
-    let loading = state.netring_detail.dns.is_loading();
+    let answer = state.calls.answer::<Vec<zensight_common::DnsRecord>>("dns");
+    let loading = answer.is_loading();
     let mut fetch = button(
         text(if loading {
             "Fetching…"
@@ -1182,12 +1253,12 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
     )
     .padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringDns);
+        fetch = fetch.on_press(NetringTopic::Dns.call());
     }
     col = col.push(fetch);
-    if let Some(err) = state.netring_detail.dns.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.dns.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No DNS detail", None));
         } else {
@@ -1218,11 +1289,19 @@ fn render_dns(state: &DeviceDetailState) -> Element<'_, Message> {
             ];
             let table = DataTable::new(columns)
                 .searchable(|r: &zensight_common::DnsRecord| r.domain.clone())
-                .on_sort(|c| Message::NetringTableSort(NetringTable::Dns, c))
-                .on_filter(|q| Message::NetringTableFilter(NetringTable::Dns, q))
-                .on_more(Message::NetringTableMore(NetringTable::Dns))
+                .on_sort(|c| Message::DetailTableSort {
+                    table: NetringTopic::Dns.procedure().to_string(),
+                    column: c,
+                })
+                .on_filter(|q| Message::DetailTableFilter {
+                    table: NetringTopic::Dns.procedure().to_string(),
+                    query: q,
+                })
+                .on_more(Message::DetailTableMore {
+                    table: NetringTopic::Dns.procedure().to_string(),
+                })
                 .noun("domains")
-                .view(records, state.netring_detail.table(NetringTable::Dns));
+                .view(records, state.table(NetringTopic::Dns.procedure()));
             col = col.push(table);
         }
     }
@@ -1244,22 +1323,25 @@ fn encrypted_dns_section<'a>(state: &'a DeviceDetailState) -> Element<'a, Messag
 
     let mut col = column![section_header("Encrypted DNS destinations", None)].spacing(space::SM);
 
-    if state.netring_detail.encrypted_dns.is_loading() {
+    let answer = state
+        .calls
+        .answer::<Vec<EncryptedDnsRecord>>("encrypted_dns");
+    if answer.is_loading() {
         return col
             .push(empty_state("Fetching encrypted-DNS destinations…", None))
             .into();
     }
-    if let Some(err) = state.netring_detail.encrypted_dns.error() {
+    if let Some(err) = answer.error() {
         return col
             .push(empty_state(format!("Fetch failed: {err}"), None))
             .into();
     }
-    let Some(records) = state.netring_detail.encrypted_dns.ready() else {
+    let Some(records) = answer.ready() else {
         return col
             .push(
                 button(text("Fetch encrypted DNS").size(font::CAPTION))
                     .padding([4, 10])
-                    .on_press(Message::FetchNetringEncryptedDns),
+                    .on_press(NetringTopic::EncryptedDns.call()),
             )
             .into();
     };
@@ -1309,14 +1391,19 @@ fn encrypted_dns_section<'a>(state: &'a DeviceDetailState) -> Element<'a, Messag
     col.push(
         DataTable::new(columns)
             .searchable(|r: &EncryptedDnsRecord| r.sni.clone().unwrap_or_default())
-            .on_sort(|c| Message::NetringTableSort(NetringTable::EncryptedDns, c))
-            .on_filter(|q| Message::NetringTableFilter(NetringTable::EncryptedDns, q))
-            .on_more(Message::NetringTableMore(NetringTable::EncryptedDns))
+            .on_sort(|c| Message::DetailTableSort {
+                table: NetringTopic::EncryptedDns.procedure().to_string(),
+                column: c,
+            })
+            .on_filter(|q| Message::DetailTableFilter {
+                table: NetringTopic::EncryptedDns.procedure().to_string(),
+                query: q,
+            })
+            .on_more(Message::DetailTableMore {
+                table: NetringTopic::EncryptedDns.procedure().to_string(),
+            })
             .noun("destinations")
-            .view(
-                records,
-                state.netring_detail.table(NetringTable::EncryptedDns),
-            ),
+            .view(records, state.table(NetringTopic::EncryptedDns.procedure())),
     )
     .into()
 }
@@ -1373,7 +1460,10 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
     }
 
     // On-demand top-hosts / error-hosts drill-down via `@rpc/netring/http` (#45).
-    let loading = state.netring_detail.http.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::HttpHostRecord>>("http");
+    let loading = answer.is_loading();
     let mut fetch = button(
         text(if loading {
             "Fetching…"
@@ -1384,12 +1474,12 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
     )
     .padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringHttp);
+        fetch = fetch.on_press(NetringTopic::Http.call());
     }
     col = col.push(fetch);
-    if let Some(err) = state.netring_detail.http.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.http.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No HTTP detail", None));
         } else {
@@ -1412,11 +1502,19 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(
                 DataTable::new(columns)
                     .searchable(|r: &HttpHostRecord| r.host.clone())
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Http, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Http, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Http))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Http.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Http.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Http.procedure().to_string(),
+                    })
                     .noun("hosts")
-                    .view(records, state.netring_detail.table(NetringTable::Http)),
+                    .view(records, state.table(NetringTopic::Http.procedure())),
             );
         }
     }
@@ -1427,7 +1525,10 @@ fn render_http(state: &DeviceDetailState) -> Element<'_, Message> {
 /// on `@rpc/netring/talkers` — distinct from the per-app bandwidth card. "Who are the
 /// major backends?" by bytes/packets/flows.
 fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.talkers.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::TalkerRecord>>("talkers");
+    let loading = answer.is_loading();
     let title = section_header("Top Talkers (on demand)", None);
     let mut fetch = button(
         text(if loading {
@@ -1439,12 +1540,12 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
     )
     .padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringTalkers);
+        fetch = fetch.on_press(NetringTopic::Talkers.call());
     }
     let mut col = column![title, fetch].spacing(space::SM);
-    if let Some(err) = state.netring_detail.talkers.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.talkers.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No talkers", None));
         } else {
@@ -1471,11 +1572,19 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(
                 DataTable::new(columns)
                     .searchable(|r: &zensight_common::TalkerRecord| r.src.clone())
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Talkers, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Talkers, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Talkers))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Talkers.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Talkers.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Talkers.procedure().to_string(),
+                    })
                     .noun("talkers")
-                    .view(records, state.netring_detail.table(NetringTable::Talkers)),
+                    .view(records, state.table(NetringTopic::Talkers.procedure())),
             );
         }
     }
@@ -1486,7 +1595,10 @@ fn render_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
 /// by byte volume, served on `@rpc/netring/matrix`. "Who talks to whom?" — the service
 /// map behind the per-destination Top Talkers card.
 fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.matrix.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::MatrixRecord>>("matrix");
+    let loading = answer.is_loading();
     let title = section_header("Service Map · Traffic Matrix (on demand)", None);
     let mut fetch = button(
         text(if loading {
@@ -1498,12 +1610,12 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
     )
     .padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringMatrix);
+        fetch = fetch.on_press(NetringTopic::Matrix.call());
     }
     let mut col = column![title, fetch].spacing(space::SM);
-    if let Some(err) = state.netring_detail.matrix.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.matrix.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No traffic matrix yet", None));
         } else {
@@ -1531,11 +1643,19 @@ fn render_matrix(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(
                 DataTable::new(columns)
                     .searchable(|r: &zensight_common::MatrixRecord| format!("{} {}", r.src, r.dst))
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Matrix, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Matrix, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Matrix))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Matrix.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Matrix.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Matrix.procedure().to_string(),
+                    })
                     .noun("src→dst pairs")
-                    .view(records, state.netring_detail.table(NetringTable::Matrix)),
+                    .view(records, state.table(NetringTopic::Matrix.procedure())),
             );
         }
     }
@@ -1574,7 +1694,10 @@ fn matrix_heatmap<'a>(records: &[zensight_common::MatrixRecord]) -> Option<Eleme
 /// Elephant-flow drill-down (#45): the biggest recently-ended flows, served on
 /// `@rpc/netring/elephant_flows`. "What were the biggest transfers?"
 fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.elephants.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::ElephantRecord>>("elephant_flows");
+    let loading = answer.is_loading();
     let title = section_header("Elephant Flows (on demand)", None);
     let mut fetch = button(
         text(if loading {
@@ -1586,12 +1709,12 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
     )
     .padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringElephants);
+        fetch = fetch.on_press(NetringTopic::Elephants.call());
     }
     let mut col = column![title, fetch].spacing(space::SM);
-    if let Some(err) = state.netring_detail.elephants.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(records) = state.netring_detail.elephants.ready() {
+    } else if let Some(records) = answer.ready() {
         if records.is_empty() {
             col = col.push(empty_state("No elephant flows", None));
         } else {
@@ -1631,11 +1754,19 @@ fn render_elephants(state: &DeviceDetailState) -> Element<'_, Message> {
             col = col.push(
                 DataTable::new(columns)
                     .searchable(|r: &ElephantRecord| format!("{} {} {}", r.src, r.dst, r.proto))
-                    .on_sort(|c| Message::NetringTableSort(NetringTable::Elephants, c))
-                    .on_filter(|q| Message::NetringTableFilter(NetringTable::Elephants, q))
-                    .on_more(Message::NetringTableMore(NetringTable::Elephants))
+                    .on_sort(|c| Message::DetailTableSort {
+                        table: NetringTopic::Elephants.procedure().to_string(),
+                        column: c,
+                    })
+                    .on_filter(|q| Message::DetailTableFilter {
+                        table: NetringTopic::Elephants.procedure().to_string(),
+                        query: q,
+                    })
+                    .on_more(Message::DetailTableMore {
+                        table: NetringTopic::Elephants.procedure().to_string(),
+                    })
                     .noun("flows")
-                    .view(records, state.netring_detail.table(NetringTable::Elephants)),
+                    .view(records, state.table(NetringTopic::Elephants.procedure())),
             );
         }
     }
@@ -1714,7 +1845,10 @@ fn capture_chip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
 /// On-demand recent-flow detail: a fetch button + the fetched flow table (P2 —
 /// pulled from the sensor's `@rpc/netring/flows` channel, never streamed).
 fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
-    let loading = state.netring_detail.flows.is_loading();
+    let answer = state
+        .calls
+        .answer::<Vec<zensight_common::FlowRecord>>("flows");
+    let loading = answer.is_loading();
     let title = section_header("Recent Flows (on demand)", None);
 
     // The button is disabled (no on_press) while a fetch is in flight.
@@ -1725,13 +1859,13 @@ fn render_flow_detail(state: &DeviceDetailState) -> Element<'_, Message> {
     };
     let mut fetch = button(text(label).size(font::CAPTION)).padding([4, 10]);
     if !loading {
-        fetch = fetch.on_press(Message::FetchNetringFlows);
+        fetch = fetch.on_press(NetringTopic::Flows.call());
     }
     let mut col = column![title, fetch].spacing(space::SM);
 
-    if let Some(err) = state.netring_detail.flows.error() {
+    if let Some(err) = answer.error() {
         col = col.push(empty_state(format!("Fetch failed: {err}"), None));
-    } else if let Some(flows) = state.netring_detail.flows.ready() {
+    } else if let Some(flows) = answer.ready() {
         if flows.is_empty() {
             col = col.push(empty_state("No recent flows", None));
         } else {
@@ -1845,11 +1979,19 @@ fn flows_table<'a>(
     ];
     DataTable::new(columns)
         .searchable(|f: &zensight_common::FlowRecord| format!("{} {} {}", f.src, f.dst, f.proto))
-        .on_sort(|col| Message::NetringTableSort(NetringTable::Flows, col))
-        .on_filter(|q| Message::NetringTableFilter(NetringTable::Flows, q))
-        .on_more(Message::NetringTableMore(NetringTable::Flows))
+        .on_sort(|col| Message::DetailTableSort {
+            table: NetringTopic::Flows.procedure().to_string(),
+            column: col,
+        })
+        .on_filter(|q| Message::DetailTableFilter {
+            table: NetringTopic::Flows.procedure().to_string(),
+            query: q,
+        })
+        .on_more(Message::DetailTableMore {
+            table: NetringTopic::Flows.procedure().to_string(),
+        })
         .noun("flows")
-        .view(flows, state.netring_detail.table(NetringTable::Flows))
+        .view(flows, state.table(NetringTopic::Flows.procedure()))
 }
 
 /// Number of apps shown in the Bandwidth tab before the "N of M" footer.
@@ -2213,12 +2355,17 @@ mod tests {
         // The matrix table's destination is a drill-down pivot (#246). Use the
         // matrix (heatmap is canvas, no text) so the clicked dst is unambiguous.
         let mut state = DeviceDetailState::new(DeviceId::fixture("netring", "host01"));
-        state.netring_detail.matrix = Fetch::Ready(vec![MatrixRecord {
-            src: "10.0.0.1:5555".to_string(),
-            dst: "10.0.0.42:443".to_string(),
-            bytes_per_sec: 1234.0,
-            names: Vec::new(),
-        }]);
+        state.calls.set_ready(
+            "matrix",
+            "",
+            serde_json::to_value(vec![MatrixRecord {
+                src: "10.0.0.1:5555".to_string(),
+                dst: "10.0.0.42:443".to_string(),
+                bytes_per_sec: 1234.0,
+                names: Vec::new(),
+            }])
+            .unwrap(),
+        );
         let mut ui = simulator(render_matrix(&state));
         let _ = ui.click("10.0.0.42:443");
         let msgs: Vec<Message> = ui.into_messages().collect();
@@ -2258,43 +2405,48 @@ mod tests {
                 TelemetryPoint::new("host01", metric.to_string(), value),
             );
         }
-        state.netring_detail.captures = Fetch::Ready(vec![
-            CaptureRecord {
-                filename: "zensight-host01-trigger-BeaconRita-1.pcap.zst".into(),
-                bytes: 2 * 1024 * 1024,
-                packets: 812,
-                mode: "triggered".into(),
-                trigger_kind: Some("BeaconRita".into()),
-                artifact_id: Some("01J00000000000000000000000".into()),
-                // A servable record names the origin holding it and the root
-                // to pin — a bulk fetch may not wildcard the origin (RFC 07 §3).
-                artifact_prefix: Some("v1/h-3fa9c2d41b7e/@blob/artifact".into()),
-                artifact_root: Some(zenkey::ContentHash::parse(&"ab".repeat(32)).unwrap()),
-                ..Default::default()
-            },
-            CaptureRecord {
-                filename: "zensight-host01-trigger-PortScanTRW-0.pcap.zst".into(),
-                bytes: 1024,
-                packets: 5,
-                mode: "triggered".into(),
-                trigger_kind: Some("PortScanTRW".into()),
-                artifact_id: None, // TTL reaped — no download affordance
-                ..Default::default()
-            },
-            CaptureRecord {
-                filename: "zensight-host01-trigger-Legacy-0.pcap.zst".into(),
-                bytes: 4096,
-                packets: 9,
-                mode: "triggered".into(),
-                trigger_kind: Some("Legacy".into()),
-                // Served by a pre-wire-v2 sensor: an id but no origin. There
-                // is no download to offer — a wildcard fetch is forbidden, and
-                // that sensor could not answer this build anyway.
-                artifact_id: Some("01J00000000000000000000001".into()),
-                artifact_prefix: None,
-                ..Default::default()
-            },
-        ]);
+        state.calls.set_ready(
+            "captures",
+            "",
+            serde_json::to_value(vec![
+                CaptureRecord {
+                    filename: "zensight-host01-trigger-BeaconRita-1.pcap.zst".into(),
+                    bytes: 2 * 1024 * 1024,
+                    packets: 812,
+                    mode: "triggered".into(),
+                    trigger_kind: Some("BeaconRita".into()),
+                    artifact_id: Some("01J00000000000000000000000".into()),
+                    // A servable record names the origin holding it and the root
+                    // to pin — a bulk fetch may not wildcard the origin (RFC 07 §3).
+                    artifact_prefix: Some("v1/h-3fa9c2d41b7e/@blob/artifact".into()),
+                    artifact_root: Some(zenkey::ContentHash::parse(&"ab".repeat(32)).unwrap()),
+                    ..Default::default()
+                },
+                CaptureRecord {
+                    filename: "zensight-host01-trigger-PortScanTRW-0.pcap.zst".into(),
+                    bytes: 1024,
+                    packets: 5,
+                    mode: "triggered".into(),
+                    trigger_kind: Some("PortScanTRW".into()),
+                    artifact_id: None, // TTL reaped — no download affordance
+                    ..Default::default()
+                },
+                CaptureRecord {
+                    filename: "zensight-host01-trigger-Legacy-0.pcap.zst".into(),
+                    bytes: 4096,
+                    packets: 9,
+                    mode: "triggered".into(),
+                    trigger_kind: Some("Legacy".into()),
+                    // Served by a pre-wire-v2 sensor: an id but no origin. There
+                    // is no download to offer — a wildcard fetch is forbidden, and
+                    // that sensor could not answer this build anyway.
+                    artifact_id: Some("01J00000000000000000000001".into()),
+                    artifact_prefix: None,
+                    ..Default::default()
+                },
+            ])
+            .unwrap(),
+        );
         state
     }
 
@@ -2354,22 +2506,27 @@ mod tests {
     fn flow_who_button_emits_attribution_fetch() {
         use crate::view::specialized::attribution::{AttributedProcess, AttributionSource};
         let mut state = DeviceDetailState::new(DeviceId::fixture("netring", "host01"));
-        state.netring_detail.flows = Fetch::Ready(vec![zensight_common::FlowRecord {
-            src: "10.0.0.5:44444".into(),
-            dst: "1.1.1.1:443".into(),
-            proto: "tcp".into(),
-            bytes: 100,
-            packets: 2,
-            duration_ms: 10,
-            reason: "fin".into(),
-            community_id: None,
-            directed: true,
-            bytes_initiator: 60,
-            bytes_responder: 40,
-            packets_initiator: 1,
-            packets_responder: 1,
-            dst_names: Vec::new(),
-        }]);
+        state.calls.set_ready(
+            "flows",
+            "",
+            serde_json::to_value(vec![zensight_common::FlowRecord {
+                src: "10.0.0.5:44444".into(),
+                dst: "1.1.1.1:443".into(),
+                proto: "tcp".into(),
+                bytes: 100,
+                packets: 2,
+                duration_ms: 10,
+                reason: "fin".into(),
+                community_id: None,
+                directed: true,
+                bytes_initiator: 60,
+                bytes_responder: 40,
+                packets_initiator: 1,
+                packets_responder: 1,
+                dst_names: Vec::new(),
+            }])
+            .unwrap(),
+        );
         // A previously-fetched attribution renders under the table.
         state.netring_detail.attribution = Some((
             "10.0.0.5:44444 → 1.1.1.1:443".into(),

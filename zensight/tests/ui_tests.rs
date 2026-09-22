@@ -2311,9 +2311,10 @@ fn test_netring_specialized_view() {
     }
 
     // Pre-populate on-demand flow detail (as if @rpc/netring/flows had replied).
-    state
-        .netring_detail
-        .apply(Ok(vec![zensight_common::FlowRecord {
+    state.calls.set_ready(
+        "flows",
+        "",
+        serde_json::to_value(vec![zensight_common::FlowRecord {
             src: "10.0.0.1:54321".into(),
             dst: "10.0.0.2:80".into(),
             proto: "tcp".into(),
@@ -2328,20 +2329,22 @@ fn test_netring_specialized_view() {
             packets_initiator: 4,
             packets_responder: 6,
             dst_names: Vec::new(),
-        }]));
+        }])
+        .unwrap(),
+    );
 
     // #247: content is tabbed. Loading/error render inline on the Flows tab;
     // drive the active tab explicitly (view tests can't switch via click).
     {
         let mut s = DeviceDetailState::new(DeviceId::fixture("netring", "wiretap1"));
         s.specialized_tab = zensight::view::specialized::SpecializedTab::Flows;
-        s.netring_detail.loading();
+        s.calls.loading("flows", "");
         {
             let mut ui = simulator(netring_sensor_view(&s, None));
             assert!(ui.find("Fetching…").is_ok());
         }
 
-        s.netring_detail.apply(Err("no sensor".into()));
+        s.calls.set_failed("flows", "no sensor");
         let mut ui = simulator(netring_sensor_view(&s, None));
         assert!(ui.find("Fetch failed: no sensor").is_ok());
     }
@@ -3411,15 +3414,20 @@ fn test_netring_tls_capture_sections() {
         state.update(TelemetryPoint::new("wiretap1", m, v));
     }
     // Pre-populate the fetched TLS inventory.
-    state.netring_detail.apply_tls(Ok(vec![TlsRecord {
-        sni: Some("api.example.com".into()),
-        alpn: Some("h2".into()),
-        ja3: None,
-        ja4: Some("t13d1516h2_8daaf6152771_b186095e22b6".into()),
-        count: 7,
-        pq_key_share: true,
-        ..Default::default()
-    }]));
+    state.calls.set_ready(
+        "tls",
+        "",
+        serde_json::to_value(vec![TlsRecord {
+            sni: Some("api.example.com".into()),
+            alpn: Some("h2".into()),
+            ja3: None,
+            ja4: Some("t13d1516h2_8daaf6152771_b186095e22b6".into()),
+            count: 7,
+            pq_key_share: true,
+            ..Default::default()
+        }])
+        .unwrap(),
+    );
 
     // TLS is on the HTTP/TLS tab; Capture Health on the Capture tab (#247).
     state.specialized_tab = zensight::view::specialized::SpecializedTab::HttpTls;
@@ -3486,20 +3494,30 @@ fn test_netring_quic_ssh_sections() {
     ] {
         state.update(TelemetryPoint::new("wiretap1", m, v));
     }
-    state.netring_detail.apply_quic(Ok(vec![QuicRecord {
-        sni: Some("cloudflare-quic.com".into()),
-        alpn: vec!["h3".into()],
-        version: "v1".into(),
-        count: 9,
-        ..Default::default()
-    }]));
-    state.netring_detail.apply_ssh(Ok(vec![SshRecord {
-        hassh: "06046964c022c6407d15a27b12a51c5b".into(),
-        role: "client".into(),
-        banner: Some("SSH-2.0-OpenSSH_9.6".into()),
-        count: 2,
-        ..Default::default()
-    }]));
+    state.calls.set_ready(
+        "quic",
+        "",
+        serde_json::to_value(vec![QuicRecord {
+            sni: Some("cloudflare-quic.com".into()),
+            alpn: vec!["h3".into()],
+            version: "v1".into(),
+            count: 9,
+            ..Default::default()
+        }])
+        .unwrap(),
+    );
+    state.calls.set_ready(
+        "ssh",
+        "",
+        serde_json::to_value(vec![SshRecord {
+            hassh: "06046964c022c6407d15a27b12a51c5b".into(),
+            role: "client".into(),
+            banner: Some("SSH-2.0-OpenSSH_9.6".into()),
+            count: 2,
+            ..Default::default()
+        }])
+        .unwrap(),
+    );
 
     // QUIC/SSH inventories live on the HTTP/TLS tab (#247).
     state.specialized_tab = zensight::view::specialized::SpecializedTab::HttpTls;
@@ -3511,7 +3529,10 @@ fn test_netring_quic_ssh_sections() {
 
     let _ = ui.click("Fetch QUIC");
     let msgs: Vec<Message> = ui.into_messages().collect();
-    assert!(msgs.iter().any(|m| matches!(m, Message::FetchNetringQuic)));
+    assert!(
+        msgs.iter()
+            .any(|m| matches!(m, Message::Call { procedure, .. } if procedure == "quic"))
+    );
 }
 
 /// #71: capture health surfaces the honest drop breakdown (AF_PACKET freezes,
@@ -3635,18 +3656,23 @@ fn test_netring_assets_section() {
         "assets/discovered",
         TelemetryValue::Gauge(2.0),
     ));
-    state.netring_detail.apply_assets(Ok(vec![AssetRecord {
-        mac: "aa:bb:cc:dd:ee:ff".into(),
-        ipv4: vec!["10.0.0.5".into()],
-        ipv6: vec![],
-        hostname: Some("switch01".into()),
-        vendor: None,
-        platform: Some("cisco WS-C2960X".into()),
-        capabilities: vec!["switch".into(), "bridge".into()],
-        seen_via: vec!["lldp".into()],
-        last_seen: 1_700_000_000_000,
-        ..Default::default()
-    }]));
+    state.calls.set_ready(
+        "assets",
+        "",
+        serde_json::to_value(vec![AssetRecord {
+            mac: "aa:bb:cc:dd:ee:ff".into(),
+            ipv4: vec!["10.0.0.5".into()],
+            ipv6: vec![],
+            hostname: Some("switch01".into()),
+            vendor: None,
+            platform: Some("cisco WS-C2960X".into()),
+            capabilities: vec!["switch".into(), "bridge".into()],
+            seen_via: vec!["lldp".into()],
+            last_seen: 1_700_000_000_000,
+            ..Default::default()
+        }])
+        .unwrap(),
+    );
 
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Assets;
     let mut ui = simulator(netring_sensor_view(&state, None));
@@ -3659,7 +3685,7 @@ fn test_netring_assets_section() {
     let msgs: Vec<Message> = ui.into_messages().collect();
     assert!(
         msgs.iter()
-            .any(|m| matches!(m, Message::FetchNetringAssets))
+            .any(|m| matches!(m, Message::Call { procedure, .. } if procedure == "assets"))
     );
 }
 
@@ -3789,12 +3815,16 @@ fn test_netring_overview_chip_and_talkers_tab() {
     }
 
     // Talkers & Matrix tab: ranked bar + table render from fetched talkers.
-    state.netring_detail.talkers =
-        zensight::view::specialized::fetch::Fetch::Ready(vec![TalkerRecord {
+    state.calls.set_ready(
+        "talkers",
+        "",
+        serde_json::to_value(vec![TalkerRecord {
             src: "10.0.0.42".into(),
             bytes_per_sec: 4096.0,
             names: Vec::new(),
-        }]);
+        }])
+        .unwrap(),
+    );
     state.specialized_tab = SpecializedTab::TalkersMatrix;
     {
         let mut ui = simulator(netring_sensor_view(&state, None));
@@ -6926,20 +6956,25 @@ fn netring_encrypted_dns_destinations_flag_unknown_resolvers() {
         labels: HashMap::new(),
         unit: None,
     });
-    state.netring_detail.apply_encrypted_dns(Ok(vec![
-        EncryptedDnsRecord {
-            transport: "doh".into(),
-            sni: Some("cloudflare-dns.com".into()),
-            via_known_resolver: true,
-            count: 40,
-        },
-        EncryptedDnsRecord {
-            transport: "dot".into(),
-            sni: Some("suspicious.example".into()),
-            via_known_resolver: false,
-            count: 3,
-        },
-    ]));
+    state.calls.set_ready(
+        "encrypted_dns",
+        "",
+        serde_json::to_value(vec![
+            EncryptedDnsRecord {
+                transport: "doh".into(),
+                sni: Some("cloudflare-dns.com".into()),
+                via_known_resolver: true,
+                count: 40,
+            },
+            EncryptedDnsRecord {
+                transport: "dot".into(),
+                sni: Some("suspicious.example".into()),
+                via_known_resolver: false,
+                count: 3,
+            },
+        ])
+        .unwrap(),
+    );
 
     let mut ui = simulator(zensight::view::specialized::netring::netring_sensor_view(
         &state, None,
