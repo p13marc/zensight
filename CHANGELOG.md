@@ -121,7 +121,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `http/methods`), the per-app bandwidth gauge, the detector slug and the
   RED quantile bind their chunks, pinned byte-identical. The debug-only
   `is_registered_telemetry` guard in netring's `point()` is gone with the
-  string it guarded. The four rest-var producers remain on `publish(&str)`.
+  string it guarded. **The four proxy producers** close the migration:
+  `V1ContextExt::subject_key` renders any generated subject's key as the
+  context's producer, and snmp (telemetry, evidence, the trap counter),
+  modbus, gnmi and netflow render their `{device}/{metric...}` keys through
+  it — the point keeps the name the device calls the series, which is why
+  they are not `publish_subject` callers. modbus's device and register names
+  and gnmi's constructor lose their hand-built prefix (`build_key_expr` is
+  gone; `GnmiSubscriber::new` takes no prefix); netflow's rollups hand back
+  the subject beside each point, and `exporter_slug` is a test that pins the
+  builder's slug. A modbus device the operator named with a space in it
+  published under an illegal key before; it is slugged now, like every other
+  foreign name. No sensor crate spells a telemetry key any more.
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green

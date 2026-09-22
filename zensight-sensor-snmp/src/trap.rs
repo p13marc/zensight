@@ -25,6 +25,7 @@ use anyhow::{Context, Result};
 use async_snmp::notification::{Notification, NotificationReceiver};
 use zenoh::Session as ZenohSession;
 
+use zensight_common::v1::V1ContextExt;
 use zensight_common::{
     Alert, AlertKind, AlertSeverity, EventRecord, Protocol, TelemetryPoint, TelemetryValue,
 };
@@ -413,9 +414,9 @@ impl TrapReceiver {
         let metric = format!("trap/{trap_id}");
         let point = TelemetryPoint::new(device, &metric, TelemetryValue::Counter(count));
         // #559: through the generated builder — slugs device and trap-id
-        // chunks so a resolved trap name can never trip the metric guard.
-        let key = zensight_common::registry::snmp::key(
-            &zensight_common::PROFILE.local_origin(),
+        // chunks so a resolved trap name can never trip the metric guard;
+        // as this producer, through the proxy seam (#1274).
+        let key = zensight_sensor_core::v1::for_producer("snmp").subject_key(
             &zensight_common::registry::snmp::Subject::device_metric(device, metric.split('/')),
         );
         let key = key.as_str();

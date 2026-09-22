@@ -14,6 +14,7 @@ mod rollup;
 
 use anyhow::Result;
 use config::NetFlowSensorConfig;
+use zensight_common::v1::V1ContextExt;
 use zensight_sensor_core::{SensorArgs, SensorConfig, SensorRunner};
 
 #[tokio::main]
@@ -76,7 +77,9 @@ async fn main() -> Result<()> {
 
     tracing::info!("NetFlow listeners started");
 
-    let key_prefix = zensight_sensor_core::v1::for_producer("netflow").telemetry_prefix();
+    // Every rollup key is rendered from its generated subject as this
+    // producer (#1274).
+    let v1 = zensight_sensor_core::v1::for_producer("netflow");
     let publish_flows = netflow_config.publish_flows;
     let publish_stats = netflow_config.publish_stats;
     // Rollup cadence: `aggregation_interval_secs`, defaulting to 30 s when
@@ -180,8 +183,8 @@ async fn main() -> Result<()> {
                 _ = tick.tick(), if publish_stats => {
                     let now = zensight_common::current_timestamp_millis();
                     let mut failed = false;
-                    for point in rollups.points(now) {
-                        let key = format!("{key_prefix}/{}", point.metric);
+                    for (subject, point) in rollups.points(now) {
+                        let key: String = v1.subject_key(&subject).into();
                         if let Err(e) = registry
                             .put_point(
                                 &key,

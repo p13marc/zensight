@@ -11,8 +11,11 @@ use tokio_modbus::client::{Context, Reader};
 use tokio_modbus::prelude::*;
 use tracing::{debug, error, info, warn};
 use zenoh::Session;
+use zensight_common::registry::modbus::Subject;
 use zensight_common::serialization::Format;
 use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
+use zensight_common::v1::V1ContextExt;
+use zensight_sensor_core::v1::V1Context;
 
 /// Error type for polling operations.
 #[derive(Debug, thiserror::Error)]
@@ -29,7 +32,9 @@ pub enum PollerError {
 pub struct ModbusPoller {
     device: DeviceConfig,
     registers: Vec<RegisterConfig>,
-    telemetry_prefix: String,
+    /// This producer's v1 context: every telemetry key is rendered from the
+    /// generated subject as this producer (#1274).
+    v1: V1Context,
     register_names: HashMap<String, String>,
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
@@ -63,9 +68,7 @@ impl ModbusPoller {
         Self {
             device,
             registers,
-            telemetry_prefix: zensight_sensor_core::v1::for_producer("modbus")
-                .telemetry_prefix()
-                .into(),
+            v1: zensight_sensor_core::v1::for_producer("modbus"),
             register_names: config.register_names.clone(),
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
             format,
@@ -453,13 +456,17 @@ impl ModbusPoller {
     /// Publish a telemetry value to Zenoh.
     async fn publish_value(&self, register: &RegisterConfig, address: u16, value: TelemetryValue) {
         let metric_name = self.get_register_name(register, address);
-        let key = format!(
-            "{}/{}/{}/{}",
-            self.telemetry_prefix,
-            self.device.name,
-            register.register_type.as_str(),
-            metric_name
-        );
+        // `{device}/{metric...}` through the generated builder (#1274): the
+        // device name and the register name are the operator's, and the
+        // builder slugs each chunk once — a name that is already a legal
+        // chunk renders byte-identical to the hand-spelled key this replaced.
+        let key: String = self
+            .v1
+            .subject_key(&Subject::device_metric(
+                &self.device.name,
+                std::iter::once(register.register_type.as_str()).chain(metric_name.split('/')),
+            ))
+            .into();
 
         let mut labels = HashMap::new();
         labels.insert("address".to_string(), address.to_string());
@@ -522,27 +529,33 @@ impl ModbusPoller {
     }
 }
 
-/// Build a key expression for a Modbus metric.
-pub fn build_key_expr(prefix: &str, device: &str, register_type: &str, name: &str) -> String {
-    format!("{}/{}/{}/{}", prefix, device, register_type, name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::RegisterType;
 
+    /// The key is rendered from the generated subject (#1274): byte-identical
+    /// to the hand-spelled `<prefix>/<device>/<type>/<name>` for legal names,
+    /// and legal for a device name the operator typed with a space in it —
+    /// which the hand-spelled key was not.
     #[test]
-    fn test_build_key_expr() {
+    fn the_key_is_rendered_from_the_subject() {
+        let ctx = zensight_sensor_core::v1::for_producer("modbus");
+        let key: String = ctx
+            .subject_key(&Subject::device_metric("plc01", ["holding", "temperature"]))
+            .into();
         assert_eq!(
-            build_key_expr(
-                "v1/h-3fa9c2d41b7e/telemetry/modbus",
-                "plc01",
-                "holding",
-                "temperature"
-            ),
-            "v1/h-3fa9c2d41b7e/telemetry/modbus/plc01/holding/temperature"
+            key,
+            format!("{}/plc01/holding/temperature", ctx.telemetry_prefix())
         );
+        let foreign: String = ctx
+            .subject_key(&Subject::device_metric("PLC 01", ["input", "Flow Rate"]))
+            .into();
+        assert!(
+            zensight_common::keyexpr::parse_key(&foreign).is_some(),
+            "{foreign}"
+        );
+        assert!(!foreign.contains(' '), "{foreign}");
     }
 
     #[test]

@@ -11,6 +11,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
 use zensight_common::page::Page;
+use zensight_common::registry::netflow::Subject;
 use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::ring::BoundedRing;
 
@@ -102,8 +103,11 @@ pub struct Rollups {
     seq: u64,
 }
 
-/// One key chunk from an exporter name (names may be raw IPs when the
-/// `exporter_names` map has no entry).
+/// The key chunk an exporter name becomes (names may be raw IPs when the
+/// `exporter_names` map has no entry) — the `{exporter}` the generated
+/// builder binds, read back off the subject. Test-only since #1274: the
+/// builder slugs the raw name itself, and this is how the tests pin what it
+/// does.
 ///
 /// #1153: this used to be `name.replace(['.', ':'], "-")`, and the test beside
 /// it was called `exporter_slug_is_one_chunk` — which was not true. A chunk
@@ -116,15 +120,22 @@ pub struct Rollups {
 /// `a-b` all produced `a-b` — so three exporters could have shared one set of
 /// counters.
 ///
-/// `device_chunk` is `zenkey::Chunk::slug`: legal by construction and
+/// The builder's slug is `zenkey::Chunk::slug`: legal by construction and
 /// injective by its left inverse. An ordinary IPv4 address is already a legal
 /// chunk, so `192.168.1.1` passes through **unchanged** and only the
 /// colon-bearing forms move.
-pub fn exporter_slug(name: &str) -> String {
-    zensight_sensor_core::key::device_chunk(name)
-        .as_str()
-        .to_string()
+#[cfg(test)]
+fn exporter_slug(name: &str) -> String {
+    Subject::exporter_metric(name, ["flows_total"])
+        .vars()
+        .into_iter()
+        .next()
+        .map(|(_, chunk)| chunk)
+        .expect("`{exporter}/{metric...}` binds the exporter first")
 }
+
+/// A rollup point beside the subject it publishes under (#1274).
+pub type Built = (Subject, TelemetryPoint);
 
 impl Rollups {
     /// Fold one flow record into its exporter's counters.
@@ -181,13 +192,14 @@ impl Rollups {
         *agg.by_proto.entry(proto).or_default() += 1;
     }
 
-    /// The current rollup series, one [`TelemetryPoint`] per
-    /// `{exporter}/{metric...}` subject (metric = the key tail after the
-    /// producer chunk; `source` = the exporter).
-    pub fn points(&self, timestamp: i64) -> Vec<TelemetryPoint> {
+    /// The current rollup series, one [`TelemetryPoint`] beside the
+    /// `{exporter}/{metric...}` subject it publishes under (#1274). The
+    /// point's metric is the key tail after the producer chunk and its
+    /// `source` is the exporter; the builder is handed the exporter's raw
+    /// name and slugs it once, exactly as [`exporter_slug`] does.
+    pub fn points(&self, timestamp: i64) -> Vec<Built> {
         let mut out = Vec::new();
         for (exporter, agg) in &self.per_exporter {
-            let slug = exporter_slug(exporter);
             // A consumer cannot tell a scaled number from a raw one, so the
             // point says which it is (#1075). `sampled=false` and an absent
             // label are different claims: "the exporter told us it is not
@@ -198,23 +210,25 @@ impl Rollups {
                 volume_labels.insert("sampling".to_string(), n.to_string());
                 volume_labels.insert("sampled".to_string(), (n > 1).to_string());
             }
-            let point = |metric: String, value: u64| TelemetryPoint {
-                timestamp,
-                source: exporter.clone(),
-                metric,
-                value: TelemetryValue::Counter(value),
-                labels: HashMap::new(),
-                unit: None,
+            let point = |metric: &[&str], value: u64| {
+                let subject = Subject::exporter_metric(exporter, metric);
+                let mut point = TelemetryPoint::for_subject(
+                    exporter.clone(),
+                    &subject,
+                    TelemetryValue::Counter(value),
+                );
+                point.timestamp = timestamp;
+                (subject, point)
             };
-            let volume_point = |metric: String, value: u64| TelemetryPoint {
-                labels: volume_labels.clone(),
-                ..point(metric, value)
+            let volume_point = |metric: &[&str], value: u64| {
+                let (subject, point) = point(metric, value);
+                (subject, point.with_labels(volume_labels.clone()))
             };
-            out.push(point(format!("{slug}/flows_total"), agg.flows));
-            out.push(volume_point(format!("{slug}/bytes_total"), agg.bytes));
-            out.push(volume_point(format!("{slug}/packets_total"), agg.packets));
+            out.push(point(&["flows_total"], agg.flows));
+            out.push(volume_point(&["bytes_total"], agg.bytes));
+            out.push(volume_point(&["packets_total"], agg.packets));
             for (proto, flows) in &agg.by_proto {
-                out.push(point(format!("{slug}/by_proto/{proto}/flows"), *flows));
+                out.push(point(&["by_proto", proto, "flows"], *flows));
             }
         }
         out
@@ -330,7 +344,8 @@ mod tests {
         let get = |metric: &str, source: &str| {
             points
                 .iter()
-                .find(|p| p.metric == metric && p.source == source)
+                .find(|(_, p)| p.metric == metric && p.source == source)
+                .map(|(_, p)| p)
                 .unwrap_or_else(|| panic!("missing {source}/{metric}"))
         };
         assert_eq!(
@@ -369,7 +384,8 @@ mod tests {
         let get = |metric: &str| {
             points
                 .iter()
-                .find(|p| p.metric == metric)
+                .find(|(_, p)| p.metric == metric)
+                .map(|(_, p)| p)
                 .unwrap_or_else(|| panic!("missing {metric}"))
         };
         assert_eq!(
@@ -406,7 +422,8 @@ mod tests {
         let points = r.points(42);
         let p = points
             .iter()
-            .find(|p| p.metric == "quiet01/bytes_total")
+            .find(|(_, p)| p.metric == "quiet01/bytes_total")
+            .map(|(_, p)| p)
             .unwrap();
         assert_eq!(p.value, TelemetryValue::Counter(1500), "unscaled");
         assert!(
@@ -420,7 +437,8 @@ mod tests {
         let points = r.points(42);
         let p = points
             .iter()
-            .find(|p| p.metric == "known01/bytes_total")
+            .find(|(_, p)| p.metric == "known01/bytes_total")
+            .map(|(_, p)| p)
             .unwrap();
         assert_eq!(p.value, TelemetryValue::Counter(1500));
         assert_eq!(p.labels.get("sampled").map(String::as_str), Some("false"));
@@ -449,7 +467,13 @@ mod tests {
         let mut r = Rollups::default();
         r.ingest(&record, None);
         let points = r.points(1);
-        let get = |m: &str| points.iter().find(|p| p.metric == m).unwrap();
+        let get = |m: &str| {
+            points
+                .iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(
             get("edge09/bytes_total").value,
             TelemetryValue::Counter(700)

@@ -148,7 +148,14 @@ There are **two tiers, one contract** (#1155 — the `Publish` trait in
   sensors move (checked on every put by the guard), `publish_raw` /
   `publish_json` / `delete` for state documents. A builder slugs the foreign
   value itself: hand it the raw value, never a chunk — the slug is injective
-  and would escape a chunk a second time. `bmc` is the exemplar.
+  and would escape a chunk a second time. `bmc` is the exemplar. The four
+  **proxy** producers (`snmp`, `modbus`, `gnmi`, `netflow`) do not go through
+  `publish_subject`: their `{device}/{metric...}` families carry the device in
+  the key and, in the point, the name the device calls the series — two
+  strings on purpose — so they render the key through
+  `V1ContextExt::subject_key(&subject)` (the same builder, as the context's
+  producer, instance suffix included) and `put_point` it on their own
+  registry. Either way no sensor spells a telemetry key.
 - **Advanced** — `AdvancedPublisherRegistry`: zenoh-ext *advanced* publishers
   (per-key cache + sample-miss / publisher detection), one class per registry
   (`with_qos`, default `Telemetry`; evidence feeds set `Evidence`). This is
