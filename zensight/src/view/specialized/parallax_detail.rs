@@ -28,6 +28,70 @@ use zensight_common::{Format, decode};
 
 use super::parallax::preview_handle_from_jpeg;
 use super::parallax_receiver;
+
+/// One live-view interaction or tile event (#1306, the last per-producer
+/// slice of #1261): the tile buttons, the expand/collapse overlay, the
+/// tier controls, and what the per-tile subscriber streams and the
+/// stream-status subscriber report. The app applies it: seven of these
+/// open, close or write through its session helpers.
+#[derive(Debug, Clone)]
+pub enum Action {
+    /// Open a live JPEG preview tile: sends `open_stream` (codec `mjpeg`)
+    /// and spawns the abortable per-tile subscriber task (#408).
+    OpenTile { stream: String },
+    /// Close a tile: aborts its subscriber task and sends `close_stream`.
+    CloseTile { stream: String },
+    /// A decoded frame from a tile's subscriber task. `generation`
+    /// identifies the tile incarnation the task was opened for (frames from
+    /// a replaced task are dropped); stale `seq`s within an incarnation are
+    /// dropped too (latest frame wins).
+    Frame {
+        stream: String,
+        generation: u64,
+        seq: u64,
+        handle: image::Handle,
+    },
+    /// A tile's subscriber task finished (session closed or subscribe
+    /// error). Carries the incarnation so a replaced task's late end report
+    /// cannot clear the new tile's abort handle.
+    TileEnded {
+        stream: String,
+        generation: u64,
+        error: Option<String>,
+    },
+    /// A tile's periodic receiver report (#718, RFC 07 §1.1): how the stream
+    /// is arriving, measured by the tile itself; forwarded to that tile's
+    /// own producer as an `@rpc/parallax/stream/report` write. Boxed: the
+    /// largest thing any message carries.
+    ReceiverReport {
+        stream: String,
+        generation: u64,
+        report: Box<zensight_common::stream::MediaReceiverReport>,
+    },
+    /// A `StreamStatus` transition from `state/parallax/stream/<stream>`: a
+    /// definitive `open: false` marks a still-waiting tile as failed.
+    StreamStatus {
+        source: String,
+        status: zensight_common::stream::StreamStatus,
+    },
+    /// Open (or switch to) the H.264 video tier: sends `open_stream` for the
+    /// tier and spawns the decoder subscriber on the exact tier key
+    /// (#494/#502). A deliberate click pins the stream (#720).
+    OpenVideoTile { stream: String, tier: String },
+    /// Hand tier selection back to the controller (#720).
+    AutoTier { stream: String },
+    /// Ask the sensor for a fresh IDR (`request_keyframe`) — fired by the
+    /// H.264 tile decoder on a sequence discontinuity (#409).
+    RequestKeyframe { stream: String },
+    /// Expand a tile to the near-fullscreen overlay (#436).
+    ExpandTile { stream: String },
+    /// Dismiss the expanded-tile overlay, restoring the tile's pre-expand
+    /// profile.
+    CollapseTile,
+    /// The outcome of a tile's `stream/report` write: a refusal is toasted
+    /// once, then quiet until reports work again (#718).
+    ReportOutcome { success: bool, message: String },
+}
 use super::parallax_receiver::{DecodeLoss, REPORT_INTERVAL, ReceiverStats, Shed};
 use super::parallax_tier::{self, TierController};
 use crate::message::Message;
@@ -565,7 +629,7 @@ fn frame_meta(sample: &zenoh::sample::Sample) -> Option<FrameMeta> {
 }
 
 /// The per-tile subscriber stream: newest JPEG preview frames decoded to
-/// [`image::Handle`]s. Ends with [`Message::ParallaxTileEnded`]; aborting the
+/// [`image::Handle`]s. Ends with [`Action::TileEnded`]; aborting the
 /// wrapping task drops the future and undeclares the subscriber. Every
 /// yielded message carries the tile `generation` this task was opened with.
 pub fn preview_tile_stream(
@@ -586,11 +650,11 @@ pub fn preview_tile_stream(
         let subscriber = match session.declare_subscriber(&key).await {
             Ok(s) => s,
             Err(e) => {
-                yield Message::ParallaxTileEnded {
+                yield Message::Parallax(Action::TileEnded {
                     stream,
                     generation,
                     error: Some(format!("subscribe failed: {e}")),
-                };
+                });
                 return;
             }
         };
@@ -663,12 +727,12 @@ pub fn preview_tile_stream(
                                     // preview frame is always a keyframe.
                                     let seq = meta.map_or(0, |m| m.sequence);
                                     stats.on_decoded(seq, true, Instant::now());
-                                    outbox.push(Message::ParallaxFrame {
+                                    outbox.push(Message::Parallax(Action::Frame {
                                         stream: stream.clone(),
                                         generation,
                                         seq,
                                         handle,
-                                    });
+                                    }));
                                 }
                                 // Undecodable bytes, or a panicked decode task.
                                 // Either way the frame is gone by our doing.
@@ -678,22 +742,22 @@ pub fn preview_tile_stream(
                     }
                 }
                 _ = reports.tick() => {
-                    outbox.push(Message::ParallaxReceiverReport {
+                    outbox.push(Message::Parallax(Action::ReceiverReport {
                         stream: stream.clone(),
                         generation,
                         report: Box::new(stats.snapshot(Instant::now())),
-                    });
+                    }));
                 }
             }
             for message in outbox.drain(..) {
                 yield message;
             }
         }
-        yield Message::ParallaxTileEnded {
+        yield Message::Parallax(Action::TileEnded {
             stream,
             generation,
             error: None,
-        };
+        });
     }
 }
 

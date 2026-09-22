@@ -17,7 +17,7 @@
 //! decode → I420 → RGBA →
 //! [`iced::widget::image::Handle`], and on any sequence discontinuity drop
 //! sync, rebuild the decoder, and ask the sensor for a fresh IDR via
-//! [`Message::ParallaxRequestKeyframe`].
+//! [`super::parallax_detail::Action::RequestKeyframe`].
 //!
 //! # The tile stays live, and says why when it cannot (#716, #717, #718)
 //!
@@ -387,15 +387,17 @@ mod real {
     ) {
         if last_resync.is_none_or(|at| at.elapsed() >= RESYNC_MIN_INTERVAL) {
             *last_resync = Some(Instant::now());
-            outbox.push(Message::ParallaxRequestKeyframe {
-                stream: stream.to_string(),
-            });
+            outbox.push(Message::Parallax(
+                crate::view::specialized::parallax_detail::Action::RequestKeyframe {
+                    stream: stream.to_string(),
+                },
+            ));
         }
     }
 
     /// The per-tile H.264 subscriber stream: decoded video frames as
-    /// [`image::Handle`]s, plus a periodic [`Message::ParallaxReceiverReport`]
-    /// (#718). Ends with [`Message::ParallaxTileEnded`]; aborting the wrapping
+    /// [`image::Handle`]s, plus a periodic [`super::parallax_detail::Action::ReceiverReport`]
+    /// (#718). Ends with [`Action::TileEnded`]; aborting the wrapping
     /// task drops the future, undeclares the subscriber and stops the decode
     /// task. Every yielded message carries the tile `generation` it was opened
     /// with.
@@ -425,18 +427,18 @@ mod real {
             let subscriber = match session.declare_subscriber(&key).await {
                 Ok(s) => s,
                 Err(e) => {
-                    yield Message::ParallaxTileEnded {
+                    yield Message::Parallax(crate::view::specialized::parallax_detail::Action::TileEnded {
                         stream,
                         generation,
                         error: Some(format!("subscribe failed: {e}")),
-                    };
+                    });
                     return;
                 }
             };
             let dec = match H264TileDecoder::new() {
                 Ok(d) => d,
                 Err(e) => {
-                    yield Message::ParallaxTileEnded { stream, generation, error: Some(e) };
+                    yield Message::Parallax(crate::view::specialized::parallax_detail::Action::TileEnded { stream, generation, error: Some(e) });
                     return;
                 }
             };
@@ -659,12 +661,12 @@ mod real {
                                 shed_since_decode = false;
                                 stats.on_decoded(sequence, keyframe, Instant::now());
                                 stats.set_queue_depth(Some(queue_depth(&jobs)));
-                                outbox.push(Message::ParallaxFrame {
+                                outbox.push(Message::Parallax(crate::view::specialized::parallax_detail::Action::Frame {
                                     stream: stream.clone(),
                                     generation,
                                     seq: sequence,
                                     handle: image::Handle::from_rgba(width, height, rgba),
-                                });
+                                }));
                             }
                             // The decoder needs more data. Normal, and now
                             // distinguishable from the two below.
@@ -709,22 +711,22 @@ mod real {
                     }
                     _ = reports.tick() => {
                         stats.set_queue_depth(Some(queue_depth(&jobs)));
-                        outbox.push(Message::ParallaxReceiverReport {
+                        outbox.push(Message::Parallax(crate::view::specialized::parallax_detail::Action::ReceiverReport {
                             stream: stream.clone(),
                             generation,
                             report: Box::new(stats.snapshot(Instant::now())),
-                        });
+                        }));
                     }
                 }
                 for message in outbox.drain(..) {
                     yield message;
                 }
             }
-            yield Message::ParallaxTileEnded {
+            yield Message::Parallax(crate::view::specialized::parallax_detail::Action::TileEnded {
                 stream,
                 generation,
                 error: ended.flatten(),
-            };
+            });
         }
     }
 

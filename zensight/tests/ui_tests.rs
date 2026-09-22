@@ -5613,10 +5613,13 @@ fn test_parallax_catalogue_and_tiles() {
         let _ = ui.click("Close");
         let messages: Vec<Message> = ui.into_messages().collect();
         assert!(
-            messages
-                .iter()
-                .any(|m| matches!(m, Message::ParallaxCloseTile { .. })),
-            "clicking Close must dispatch ParallaxCloseTile"
+            messages.iter().any(|m| matches!(
+                m,
+                Message::Parallax(
+                    zensight::view::specialized::parallax_detail::Action::CloseTile { .. }
+                )
+            )),
+            "clicking Close must dispatch the close action"
         );
     }
 
