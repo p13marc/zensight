@@ -1370,148 +1370,31 @@ impl ZenSight {
                 }
             }
             // ── Gated PDU outlet control (#956) ──────────────────────────
-            Message::SnmpOutletArm(outlet) => {
+            Message::Arm(armed) => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.pending_outlet = Some(outlet);
-                    device.snmp_detail.outlet_confirm_text.clear();
+                    device.writes.arm(armed);
                 }
             }
-            Message::SnmpOutletConfirmTextChanged(typed) => {
+            Message::Disarm => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.outlet_confirm_text = typed;
+                    device.writes.disarm();
                 }
             }
-            Message::SnmpOutletCancel => {
+            Message::ConfirmText(typed) => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.pending_outlet = None;
-                    device.snmp_detail.outlet_confirm_text.clear();
+                    device.writes.typed(typed);
                 }
             }
-            Message::SnmpOutletActionResult(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.snmp_detail.outlet_inflight = None;
-                    match result {
-                        Ok(status) => {
-                            let ok = status.accepted && status.error.is_none();
-                            let message = if ok {
-                                format!("Cycling outlet {}/{}", status.device, status.outlet)
-                            } else {
-                                status
-                                    .error
-                                    .clone()
-                                    .or_else(|| status.reason.clone())
-                                    .unwrap_or_else(|| "the sensor refused".to_string())
-                            };
-                            device.snmp_detail.outlet_last = Some(status);
-                            return ControlFlow::Break(Task::done(Message::CommandFeedback {
-                                success: ok,
-                                message,
-                            }));
-                        }
-                        Err(e) => {
-                            return ControlFlow::Break(Task::done(Message::CommandFeedback {
-                                success: false,
-                                message: e,
-                            }));
-                        }
-                    }
-                }
+            Message::Confirm => {
+                return ControlFlow::Break(self.confirm_write());
             }
-            Message::SnmpOutletConfirm => {
-                // Belt and braces: the button is only live when the typed name
-                // matches, and the check is repeated here so a message
-                // arriving any other way cannot skip it.
-                let armed = self.selected_device.as_ref().and_then(|d| {
-                    d.snmp_detail
-                        .outlet_confirmation_matches()
-                        .then(|| d.snmp_detail.pending_outlet.clone())
-                        .flatten()
-                });
-                if let Some(outlet) = armed {
-                    // Addressed to the drilled-in host only. A wildcard origin
-                    // here would cycle the matching outlet on every host
-                    // serving the sensor — a datacentre going dark — so an
-                    // unresolvable origin refuses rather than widening.
-                    let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Snmp)
-                    else {
-                        return ControlFlow::Break(Task::done(Message::CommandFeedback {
-                            success: false,
-                            message: "No host selected — refusing to broadcast an outlet cycle"
-                                .to_string(),
-                        }));
-                    };
-                    let Some(device_name) = self
-                        .selected_device
-                        .as_ref()
-                        .map(|d| d.device_id.source.clone())
-                    else {
-                        return ControlFlow::Break(Task::none());
-                    };
-                    let key = crate::view::specialized::snmp::outlet_action_key(&origin);
-                    let command = zensight_common::outlet::OutletAction {
-                        device: device_name,
-                        outlet: outlet.clone(),
-                        verb: zensight_common::outlet::OutletVerb::Cycle,
-                    };
-                    if let Some(device) = self.selected_device.as_mut() {
-                        device.snmp_detail.outlet_inflight = Some(outlet);
-                        device.snmp_detail.pending_outlet = None;
-                        device.snmp_detail.outlet_confirm_text.clear();
-                    }
-                    return ControlFlow::Break(self.call_snmp_outlet_action(key, command));
-                }
-            }
-
-            Message::SystemdUnitActionArm { verb, unit } => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.pending_action = Some((verb, unit));
-                }
-            }
-            Message::SystemdUnitActionCancel => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.systemd_detail.pending_action = None;
-                }
-            }
-            Message::SystemdUnitActionResult(result) => {
-                return ControlFlow::Break(self.apply_systemd_action_result(result));
-            }
-            Message::SystemdUnitActionConfirm => {
-                if let Some((verb, unit)) = self
-                    .selected_device
-                    .as_mut()
-                    .and_then(|d| d.systemd_detail.pending_action.take())
-                {
-                    // Addressed to the drilled-in host only. There is deliberately
-                    // no fleet fallback: a wildcard here would restart the unit on
-                    // every host serving the sensor, so an unresolvable origin
-                    // refuses rather than widening the blast radius.
-                    let Some(origin) = self.selected_origin_for(zensight_common::Protocol::Systemd)
-                    else {
-                        return ControlFlow::Break(Task::done(Message::CommandFeedback {
-                            success: false,
-                            message: "No host selected — refusing to broadcast a service action"
-                                .to_string(),
-                        }));
-                    };
-                    let key = crate::view::specialized::systemd_detail::action_set_key(&origin);
-                    let timeout = crate::view::specialized::systemd_detail::action_timeout(
-                        self.selected_device.as_ref().and_then(|d| {
-                            d.calls
-                                .answer::<zensight_common::action::ActionCapability>(
-                                    "action/capability",
-                                )
-                                .ready()
-                        }),
-                    );
-                    let command = zensight_common::action::ServiceAction {
-                        verb,
-                        unit: unit.clone(),
-                    };
-                    if let Some(device) = self.selected_device.as_mut() {
-                        device.systemd_detail.action_inflight = Some((verb, unit));
-                    }
-                    return ControlFlow::Break(self.call_systemd_action(key, command, timeout));
-                }
+            Message::Written {
+                device,
+                procedure,
+                request,
+                result,
+            } => {
+                return ControlFlow::Break(self.apply_written(device, procedure, request, result));
             }
 
             // ── Cross-view identity pivots (#313) ────────────────────────────
@@ -6033,186 +5916,6 @@ impl ZenSight {
         })
     }
 
-    /// Issue a service action and wait for the sensor's own outcome.
-    ///
-    /// The `action/set` reply *is* the `ActionStatus`, produced after the sensor
-    /// tracked the D-Bus job to completion — so there is nothing to poll for.
-    /// This replaces a fixed 1.5 s sleep followed by a fleet-wide status read,
-    /// which could report a different host's last action and reported an unknown
-    /// outcome as success.
-    ///
-    /// `timeout` is sized from the host's advertised `job_timeout_secs`
-    /// (`SystemdDetailState::action_timeout`) rather than the 5 s `send_command`
-    /// uses, because the sensor legitimately blocks for the length of the job.
-    fn call_systemd_action(
-        &self,
-        key: String,
-        command: zensight_common::action::ServiceAction,
-        timeout: std::time::Duration,
-    ) -> Task<Message> {
-        use crate::view::specialized::systemd_detail::ActionFailure;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::SystemdUnitActionResult(Err(
-                ActionFailure::Transport("Not connected to Zenoh".to_string()),
-            )));
-        };
-        let payload = match serde_json::to_vec(&command) {
-            Ok(p) => p,
-            Err(e) => {
-                return Task::done(Message::SystemdUnitActionResult(Err(
-                    ActionFailure::Transport(format!("Failed to encode action: {e}")),
-                )));
-            }
-        };
-        Task::future(async move {
-            let started = Instant::now();
-            // A concrete single-origin key has exactly one queryable, so
-            // BestMatching is the honest target here; QueryTarget::All is for
-            // fleet fan-in (RFC 05 §2.1).
-            let replies = match session
-                .get(&key)
-                .payload(payload)
-                .target(zenoh::query::QueryTarget::BestMatching)
-                .timeout(timeout)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    return Message::SystemdUnitActionResult(Err(ActionFailure::Transport(
-                        e.to_string(),
-                    )));
-                }
-            };
-            let outcome = match replies.recv_async().await {
-                Ok(reply) => match reply.result() {
-                    Ok(sample) => {
-                        match zensight_common::decode_auto::<zensight_common::action::ActionStatus>(
-                            &sample.payload().to_bytes(),
-                        ) {
-                            Ok(status) => Ok(status),
-                            Err(e) => Err(ActionFailure::Transport(format!(
-                                "Undecodable action reply: {e}"
-                            ))),
-                        }
-                    }
-                    Err(err) => {
-                        let (error, message) = parse_rpc_error(&err.payload().to_bytes());
-                        Err(ActionFailure::Refused { error, message })
-                    }
-                },
-                // Zenoh reports "nobody served the key" and "the deadline
-                // elapsed" identically, as a closed reply channel. Elapsed time
-                // against the deadline is the only way to tell them apart — a
-                // heuristic, but the two need very different wording: one is an
-                // error, the other is a job that may well be succeeding.
-                Err(_) => {
-                    let waited = started.elapsed();
-                    if waited + std::time::Duration::from_millis(250) >= timeout {
-                        Err(ActionFailure::StillRunning {
-                            waited_secs: waited.as_secs(),
-                        })
-                    } else {
-                        Err(ActionFailure::NotServed)
-                    }
-                }
-            };
-            Message::SystemdUnitActionResult(outcome)
-        })
-    }
-
-    /// Toast a finished action and refresh what it changed.
-    fn apply_systemd_action_result(
-        &mut self,
-        result: Result<
-            zensight_common::action::ActionStatus,
-            crate::view::specialized::systemd_detail::ActionFailure,
-        >,
-    ) -> Task<Message> {
-        use crate::view::specialized::systemd_detail::ActionFailure;
-        use crate::view::toast::ToastSeverity;
-        if let Some(device) = self.selected_device.as_mut() {
-            device.systemd_detail.action_inflight = None;
-        }
-        // Whether the host's state may have moved. `StillRunning` counts: that is
-        // exactly the case where the unit's own state is the only ground truth
-        // available to us.
-        let mut refresh = matches!(&result, Err(ActionFailure::StillRunning { .. }));
-        let (severity, message) = match result {
-            Ok(status) => {
-                refresh |= status.accepted;
-                let what = if status.unit.is_empty() {
-                    status.verb.to_string()
-                } else {
-                    format!("{} {}", status.verb, status.unit)
-                };
-                match (status.accepted, status.result.as_deref()) {
-                    (false, _) => (
-                        ToastSeverity::Error,
-                        format!(
-                            "{what} refused: {}",
-                            status.error.unwrap_or_else(|| "no reason given".into())
-                        ),
-                    ),
-                    (true, Some("done")) | (true, Some("applied")) => {
-                        let hint = if status.needs_daemon_reload {
-                            " — run daemon-reload for systemd to pick it up"
-                        } else {
-                            ""
-                        };
-                        (ToastSeverity::Success, format!("{what}: done{hint}"))
-                    }
-                    (true, Some(other)) => (
-                        ToastSeverity::Error,
-                        format!(
-                            "{what}: {other}{}",
-                            status
-                                .error
-                                .map(|e| format!(" — {e}"))
-                                .unwrap_or_default()
-                        ),
-                    ),
-                    // Accepted, but the sensor's own job wait elapsed. Not a
-                    // success: the previous code reported exactly this case as
-                    // one.
-                    (true, None) => (
-                        ToastSeverity::Warning,
-                        format!("{what}: issued, outcome unknown (the sensor's job wait elapsed)"),
-                    ),
-                }
-            }
-            Err(ActionFailure::Refused { error, message }) => {
-                (ToastSeverity::Error, format!("Refused — {error}: {message}"))
-            }
-            Err(ActionFailure::NotServed) => (
-                ToastSeverity::Error,
-                "No service-control endpoint on this host — actions are disabled or the sensor is offline"
-                    .to_string(),
-            ),
-            Err(ActionFailure::StillRunning { waited_secs }) => (
-                ToastSeverity::Warning,
-                format!("No reply within {waited_secs}s — the job may still be running"),
-            ),
-            Err(ActionFailure::Transport(e)) => (ToastSeverity::Error, format!("Action failed: {e}")),
-        };
-        self.toasts.push(severity, message);
-        if !refresh {
-            return Task::none();
-        }
-        // Refresh immediately rather than sleeping first: a value one poll stale
-        // resolves visibly, and a sleep here is the anti-pattern this replaced.
-        let mut tasks = vec![self.call_now("units", String::new())];
-        if let Some(unit) = self
-            .selected_device
-            .as_ref()
-            .and_then(|d| d.filter_opt("units", "selected"))
-            .filter(|u| !u.is_empty())
-            .map(str::to_string)
-        {
-            tasks.push(self.call_now("unit", format!("name={unit}")));
-        }
-        Task::batch(tasks)
-    }
-
     /// Re-pull the Units table when the host reports that a unit job finished.
     ///
     /// The sensor already streams `events/job_removed_total`, so this needs no
@@ -6250,59 +5953,6 @@ impl ZenSight {
             return None;
         }
         Some(self.call_now("units", String::new()))
-    }
-
-    /// Issue one gated outlet cycle (#956), origin-scoped.
-    fn call_snmp_outlet_action(
-        &self,
-        key: String,
-        command: zensight_common::outlet::OutletAction,
-    ) -> Task<Message> {
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::SnmpOutletActionResult(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        Task::future(async move {
-            let payload = match serde_json::to_vec(&command) {
-                Ok(p) => p,
-                Err(e) => return Message::SnmpOutletActionResult(Err(e.to_string())),
-            };
-            let result = async {
-                let replies = session
-                    .get(&key)
-                    .payload(payload)
-                    .timeout(std::time::Duration::from_secs(30))
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let reply = replies
-                    .recv_async()
-                    .await
-                    .map_err(|_| "the sensor did not answer".to_string())?;
-                match reply.result() {
-                    Ok(sample) => zensight_common::decode_with_encoding::<
-                        zensight_common::outlet::OutletStatus,
-                    >(
-                        sample.encoding(), &sample.payload().to_bytes()
-                    )
-                    .map_err(|e| e.to_string()),
-                    // A refusal is an `error/gated` reply carrying the switch
-                    // that refused (#866/#957) — surfaced verbatim, because
-                    // "which of the four gates" is the whole answer.
-                    Err(err) => {
-                        let decoded: zensight_common::rpc::RpcError =
-                            serde_json::from_slice(&err.payload().to_bytes())
-                                .map_err(|e| e.to_string())?;
-                        Err(match decoded.refused_by {
-                            Some(switch) => format!("{} (refused by {switch})", decoded.message),
-                            None => decoded.message,
-                        })
-                    }
-                }
-            }
-            .await;
-            Message::SnmpOutletActionResult(result)
-        })
     }
 
     /// Query the netring sensor's current detector config (#121, status
@@ -6690,26 +6340,6 @@ impl ZenSight {
         // exists, and leaves a phantom in the aggregate until the sensor's idle
         // timeout reaps it.
         Task::batch([send, self.open_parallax_video_tile(stream, tier, false)])
-    }
-
-    /// The v1 origin of the currently-selected device when it belongs to
-    /// `proto` — detail-tab fetches target that host's concrete @rpc key;
-    /// `None` (no selection, or origin not yet learned) falls back to the
-    /// fleet selector.
-    /// The drilled-in device's origin as a typed callee address (#485).
-    ///
-    /// `None` means "no such device selected" *or* "its origin does not
-    /// parse" — either way there is no single host to address, and the caller
-    /// falls back to the fleet selector rather than building a key aimed at
-    /// nobody (or, worse, at this process's own origin).
-    fn selected_origin_for(
-        &self,
-        proto: zensight_common::Protocol,
-    ) -> Option<zenkey::RemoteOrigin> {
-        self.selected_device
-            .as_ref()
-            .filter(|d| d.device_id.is(proto))
-            .and_then(|d| d.device_id.remote_origin())
     }
 
     fn query_channel<T, Fut>(
@@ -7239,6 +6869,104 @@ impl ZenSight {
                 result,
             }
         })
+    }
+
+    /// Send the armed write of the selected device (#1261): only when its
+    /// confirmation holds — checked here again, so a message arriving any
+    /// other way cannot skip it — and only to the drilled-in host. There is
+    /// deliberately no fleet fallback: a wildcard origin would apply the write
+    /// on every host serving the sensor, so an unresolvable origin refuses
+    /// rather than widening the blast radius.
+    fn confirm_write(&mut self) -> Task<Message> {
+        let Some(device) = self.selected_device.as_mut() else {
+            return Task::none();
+        };
+        let Some(armed) = device.writes.confirm() else {
+            return Task::none();
+        };
+        let id = device.device_id.clone();
+        let Some(origin) = id.remote_origin() else {
+            return Task::done(Message::CommandFeedback {
+                success: false,
+                message: format!(
+                    "No host origin for {} — refusing to broadcast {}",
+                    id.source, armed.label
+                ),
+            });
+        };
+        device.writes.inflight = Some(armed.clone());
+        let Some(session) = self.session.clone() else {
+            return Task::done(Message::Written {
+                device: id,
+                procedure: armed.procedure,
+                request: armed.request,
+                result: Err(crate::call::WriteFailure::Transport(
+                    "Not connected to Zenoh".to_string(),
+                )),
+            });
+        };
+        let producer = id.producer.clone();
+        Task::future(async move {
+            let result = crate::call::write(
+                session,
+                origin,
+                producer,
+                armed.procedure.clone(),
+                armed.request.clone(),
+                armed.timeout,
+            )
+            .await;
+            Message::Written {
+                device: id,
+                procedure: armed.procedure,
+                request: armed.request,
+                result,
+            }
+        })
+    }
+
+    /// Land a write's outcome (#1261): toast it in the producer's words,
+    /// keep it as the procedure's last outcome, and re-call what it moved.
+    /// An outcome for another device, or for a request no longer in flight,
+    /// is dropped.
+    fn apply_written(
+        &mut self,
+        device: DeviceId,
+        procedure: String,
+        request: serde_json::Value,
+        result: Result<crate::call::Reply, crate::call::WriteFailure>,
+    ) -> Task<Message> {
+        let Some(selected) = self
+            .selected_device
+            .as_mut()
+            .filter(|d| d.device_id == device)
+        else {
+            return Task::none();
+        };
+        let Some(armed) = selected
+            .writes
+            .inflight
+            .take_if(|a| a.procedure == procedure && a.request == request)
+        else {
+            return Task::none();
+        };
+        let producer = selected.device_id.producer.clone();
+        let (severity, message) =
+            crate::view::specialized::write_outcome(&producer, &armed, &result);
+        let refresh = crate::view::specialized::after_write(&producer, selected, &armed, &result);
+        selected
+            .writes
+            .last
+            .insert(procedure, result.map_err(|f| f.sentence()));
+        self.toasts.push(severity, message);
+        if refresh.is_empty() {
+            return Task::none();
+        }
+        Task::batch(
+            refresh
+                .into_iter()
+                .map(|(procedure, params)| self.call_now(&procedure, params)),
+        )
     }
 
     /// Mark a procedure in flight on the selected device and call it (#1261)
@@ -10983,19 +10711,20 @@ mod origin_tests {
     }
 
     /// The selected device's origin is its own — no lookup, so no window in
-    /// which a drill-down silently falls back to a fleet-wide selector.
+    /// which a write silently falls back to a fleet-wide selector (#1261: a
+    /// write is addressed to `device_id.remote_origin()` and nothing else).
     #[test]
     fn the_selected_device_knows_its_own_origin() {
         let mut a = ZenSight::boot(true).0;
         let id = DeviceId::new("netring", "h-3fa9c2d41b7e", "hostA");
         a.selected_device = Some(DeviceDetailState::new(id));
         assert_eq!(
-            a.selected_origin_for(Protocol::Netring)
+            a.selected_device
+                .as_ref()
+                .and_then(|d| d.device_id.remote_origin())
                 .map(|o| zenkey::ConcreteOrigin::chunk(&o).to_string()),
             Some("h-3fa9c2d41b7e".to_string())
         );
-        // Wrong protocol → no origin (fleet fallback).
-        assert_eq!(a.selected_origin_for(Protocol::Sysinfo), None);
     }
 }
 

@@ -124,6 +124,10 @@ pub struct DeviceDetailState {
     /// `Message::SetDetailFilter`; `""` is unset. Setting one resets the
     /// table's page, so a narrowed filter never hides matches behind "more".
     pub filters: std::collections::BTreeMap<String, String>,
+    /// The write machine (#1261): one armed write procedure, one in flight,
+    /// the last outcome per procedure — what a row's confirm/cancel and
+    /// "busy" read, whichever producer the row belongs to.
+    pub writes: crate::call::Writes,
     /// How the user arrived, when it was a pivot (#313): the process
     /// explorer's pid filter with its stale-generation guard. `None` is the
     /// plain view.
@@ -201,6 +205,7 @@ impl DeviceDetailState {
             calls: Default::default(),
             tables: Default::default(),
             filters: Default::default(),
+            writes: Default::default(),
             pivot: None,
             snmp_detail: Default::default(),
             chart_expanded: false,

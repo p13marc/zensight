@@ -6,10 +6,10 @@
 use iced::widget::{Column, button, column, row, scrollable, text};
 use iced::{Element, Length, Theme};
 use zensight_common::TelemetryValue;
-use zensight_common::action::{ActionCapability, ActionStatus, Verb};
+use zensight_common::action::{ActionCapability, ActionStatus, ServiceAction, Verb};
 use zensight_common::query_detail::{CgroupNode, TimerRecord, UnitDetail, UnitFile, UnitRecord};
 
-use crate::call::Answer;
+use crate::call::{Answer, Armed, Confirmation, Reply, WriteFailure};
 use crate::message::Message;
 use crate::view::components::{
     Column as DataColumn, DataTable, SortKey, TabItem, badge, card, empty_state, section_header,
@@ -34,6 +34,131 @@ pub fn tab_procedures(tab: SpecializedTab) -> &'static [&'static str] {
         SpecializedTab::Actions => &["actions"],
         _ => &[],
     }
+}
+
+/// The `action/set` write procedure this view arms and sends (#283, #1261).
+const ACTION_SET: &str = "action/set";
+
+/// The service action armed on this device, when one is.
+fn armed_action(state: &DeviceDetailState) -> Option<ServiceAction> {
+    let armed = state.writes.armed_for(ACTION_SET)?;
+    serde_json::from_value(armed.request.clone()).ok()
+}
+
+/// The service action in flight on this device, when one is.
+fn inflight_action(state: &DeviceDetailState) -> Option<ServiceAction> {
+    let inflight = state.writes.inflight_for(ACTION_SET)?;
+    serde_json::from_value(inflight.request.clone()).ok()
+}
+
+/// Arm `verb` on `unit` (empty for a manager-wide verb): the request the
+/// registry declares, confirmed by a second click, waited for past the
+/// host's own job wait.
+fn arm_action(state: &DeviceDetailState, verb: Verb, unit: String) -> Message {
+    let label = if unit.is_empty() {
+        verb.to_string()
+    } else {
+        format!("{verb} {unit}")
+    };
+    Message::Arm(Armed {
+        procedure: ACTION_SET.to_string(),
+        request: serde_json::to_value(ServiceAction { verb, unit }).unwrap_or_default(),
+        label,
+        confirmation: Confirmation::Click,
+        typed: String::new(),
+        timeout: crate::view::specialized::systemd_detail::action_timeout(capability(state)),
+    })
+}
+
+/// How a finished action reads (#283): the job result in the sensor's own
+/// words, never "done" for a job whose wait elapsed.
+pub fn write_outcome(
+    armed: &Armed,
+    result: &Result<Reply, WriteFailure>,
+) -> (crate::view::toast::ToastSeverity, String) {
+    use crate::view::toast::ToastSeverity;
+    let what = &armed.label;
+    match result {
+        Ok(reply) => match reply.decode::<ActionStatus>() {
+            Err(e) => (
+                ToastSeverity::Error,
+                format!("{what}: undecodable action reply — {e}"),
+            ),
+            Ok(status) => match (status.accepted, status.result.as_deref()) {
+                (false, _) => (
+                    ToastSeverity::Error,
+                    format!(
+                        "{what} refused: {}",
+                        status.error.unwrap_or_else(|| "no reason given".into())
+                    ),
+                ),
+                (true, Some("done")) | (true, Some("applied")) => {
+                    let hint = if status.needs_daemon_reload {
+                        " — run daemon-reload for systemd to pick it up"
+                    } else {
+                        ""
+                    };
+                    (ToastSeverity::Success, format!("{what}: done{hint}"))
+                }
+                (true, Some(other)) => (
+                    ToastSeverity::Error,
+                    format!(
+                        "{what}: {other}{}",
+                        status
+                            .error
+                            .map(|e| format!(" — {e}"))
+                            .unwrap_or_default()
+                    ),
+                ),
+                // Accepted, but the sensor's own job wait elapsed. Not a
+                // success: the previous code reported exactly this case as
+                // one.
+                (true, None) => (
+                    ToastSeverity::Warning,
+                    format!("{what}: issued, outcome unknown (the sensor's job wait elapsed)"),
+                ),
+            },
+        },
+        Err(WriteFailure::NotServed) => (
+            ToastSeverity::Error,
+            "No service-control endpoint on this host — actions are disabled or the sensor is offline"
+                .to_string(),
+        ),
+        Err(WriteFailure::Transport(e)) => (ToastSeverity::Error, format!("Action failed: {e}")),
+        Err(failure) => (
+            if failure.is_warning() {
+                ToastSeverity::Warning
+            } else {
+                ToastSeverity::Error
+            },
+            failure.sentence(),
+        ),
+    }
+}
+
+/// What an action may have moved: the units table, and the open unit's
+/// detail. `StillRunning` counts — that is exactly the case where the unit's
+/// own state is the only ground truth available.
+pub fn after_write(
+    state: &DeviceDetailState,
+    _armed: &Armed,
+    result: &Result<Reply, WriteFailure>,
+) -> Vec<(String, String)> {
+    let moved = match result {
+        Ok(reply) => reply
+            .decode::<ActionStatus>()
+            .is_ok_and(|status| status.accepted),
+        Err(WriteFailure::StillRunning { .. }) => true,
+        Err(_) => false,
+    };
+    if !moved {
+        return Vec::new();
+    }
+    let mut calls = vec![("units".to_string(), String::new())];
+    if let Some(unit) = selected_unit(state) {
+        calls.push(("unit".to_string(), format!("name={unit}")));
+    }
+    calls
 }
 
 /// This host's advertised service-control gate, once the probe answered.
@@ -224,11 +349,10 @@ fn stat<'a>(label: &'a str, value: f64) -> Element<'a, Message> {
 // ── Units ─────────────────────────────────────────────────────────────────────
 
 fn render_units_tab(state: &DeviceDetailState) -> Column<'_, Message> {
-    let d = &state.systemd_detail;
     let mut actions = row![refresh_button(SystemdDetailTopic::Units)].spacing(space::XS);
     // daemon-reload is manager-wide, so it belongs to the table, not a row.
     if permits_daemon_reload(capability(state)) {
-        actions = actions.push(daemon_reload_control(d.pending_action.as_ref()));
+        actions = actions.push(daemon_reload_control(state));
     }
     let header = row![section_header("Units", None), actions]
         .spacing(space::SM)
@@ -999,22 +1123,22 @@ fn tiny_button<'a>(label: String, on_press: Option<Message>) -> iced::widget::Bu
 /// toast a second and a half later. Now the row says up front what this host
 /// will accept for this unit.
 fn action_cell<'a>(state: &'a DeviceDetailState, unit: &UnitRecord) -> Element<'a, Message> {
-    let d = &state.systemd_detail;
     // An armed action takes over the cell regardless of gate: it is mid-dialogue.
-    if let Some((verb, armed)) = d.pending_action.as_ref()
-        && armed == &unit.name
+    if let Some(action) = armed_action(state)
+        && action.unit == unit.name
     {
         return row![
-            text(format!("{verb}?")).size(font::CAPTION),
-            tiny_button("confirm".into(), Some(Message::SystemdUnitActionConfirm)),
-            tiny_button("cancel".into(), Some(Message::SystemdUnitActionCancel)),
+            text(format!("{}?", action.verb)).size(font::CAPTION),
+            tiny_button("confirm".into(), Some(Message::Confirm)),
+            tiny_button("cancel".into(), Some(Message::Disarm)),
         ]
         .spacing(space::XS)
         .align_y(iced::Alignment::Center)
         .into();
     }
 
-    match action_gate(capability(state), d.action_inflight.as_ref(), &unit.name) {
+    let busy = inflight_action(state).map(|a| (a.verb, a.unit));
+    match action_gate(capability(state), busy.as_ref(), &unit.name) {
         // The whole column is dropped in this case; this arm only guards the
         // gap between the probe answering and the next render.
         ActionGate::Disabled => text("—").size(font::CAPTION).style(dim).into(),
@@ -1041,10 +1165,7 @@ fn action_cell<'a>(state: &'a DeviceDetailState, unit: &UnitRecord) -> Element<'
             for verb in verbs {
                 r = r.push(tiny_button(
                     verb.to_string(),
-                    Some(Message::SystemdUnitActionArm {
-                        verb,
-                        unit: unit.name.clone(),
-                    }),
+                    Some(arm_action(state, verb, unit.name.clone())),
                 ));
             }
             r.into()
@@ -1063,22 +1184,19 @@ fn disabled_verbs<'a>(verbs: &[Verb], why: &'a str) -> Element<'a, Message> {
 
 /// The manager-wide daemon-reload control, armed and confirmed like a row action
 /// but carrying no unit.
-fn daemon_reload_control<'a>(pending: Option<&(Verb, String)>) -> Element<'a, Message> {
-    match pending {
-        Some((Verb::DaemonReload, _)) => row![
+fn daemon_reload_control(state: &DeviceDetailState) -> Element<'_, Message> {
+    match armed_action(state) {
+        Some(action) if action.verb == Verb::DaemonReload => row![
             text("daemon-reload?").size(font::CAPTION),
-            tiny_button("confirm".into(), Some(Message::SystemdUnitActionConfirm)),
-            tiny_button("cancel".into(), Some(Message::SystemdUnitActionCancel)),
+            tiny_button("confirm".into(), Some(Message::Confirm)),
+            tiny_button("cancel".into(), Some(Message::Disarm)),
         ]
         .spacing(space::XS)
         .align_y(iced::Alignment::Center)
         .into(),
         _ => tiny_button(
             "daemon-reload".into(),
-            Some(Message::SystemdUnitActionArm {
-                verb: Verb::DaemonReload,
-                unit: String::new(),
-            }),
+            Some(arm_action(state, Verb::DaemonReload, String::new())),
         )
         .into(),
     }

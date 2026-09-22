@@ -4516,7 +4516,7 @@ fn test_systemd_units_tab_fetches_on_demand() {
 }
 
 /// #283: Units-tab service controls use an inline two-step confirm — "start"
-/// arms the action, then "confirm" emits SystemdUnitActionConfirm (which the app
+/// arms the action, then "confirm" emits `Message::Confirm` (which the app
 /// sends to `@rpc/systemd/action/set`); "cancel" backs out.
 #[test]
 fn test_systemd_units_action_confirm_flow() {
@@ -4531,34 +4531,33 @@ fn test_systemd_units_action_confirm_flow() {
     assert!(ui.find("restart").is_ok());
     let _ = ui.click("start");
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(messages.iter().any(|m| matches!(
-        m,
-        Message::SystemdUnitActionArm { verb, unit }
-            if *verb == Verb::Start && unit == "nginx.service"
-    )));
+    let armed = messages
+        .iter()
+        .find_map(|m| match m {
+            Message::Arm(armed) => Some(armed.clone()),
+            _ => None,
+        })
+        .expect("start arms an action");
+    let action: zensight_common::action::ServiceAction =
+        serde_json::from_value(armed.request.clone()).expect("the registry's request type");
+    assert_eq!(action.verb, Verb::Start);
+    assert_eq!(action.unit, "nginx.service");
+    assert_eq!(armed.procedure, "action/set");
 
     // Step 2: with the action armed, the row swaps to confirm/cancel and
     // "confirm" emits the send.
-    state.systemd_detail.pending_action = Some((Verb::Start, "nginx.service".to_string()));
+    state.writes.arm(armed);
     let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("start?").is_ok());
     let _ = ui.click("confirm");
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::SystemdUnitActionConfirm))
-    );
+    assert!(messages.iter().any(|m| matches!(m, Message::Confirm)));
 
     // Cancel path emits the disarm.
     let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     let _ = ui.click("cancel");
     let messages: Vec<Message> = ui.into_messages().collect();
-    assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::SystemdUnitActionCancel))
-    );
+    assert!(messages.iter().any(|m| matches!(m, Message::Disarm)));
 }
 
 /// A systemd device sitting on the Units tab with `units` loaded and `capability`
@@ -4661,9 +4660,7 @@ fn test_systemd_actions_inert_for_an_unallowlisted_unit() {
     let _ = ui.click("start");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        !messages
-            .iter()
-            .any(|m| matches!(m, Message::SystemdUnitActionArm { .. })),
+        !messages.iter().any(|m| matches!(m, Message::Arm(_))),
         "an inert button must not arm an action"
     );
 }

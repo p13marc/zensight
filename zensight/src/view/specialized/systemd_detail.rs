@@ -6,9 +6,9 @@
 //! `zensight-common::query_detail`; the event record matches the sensor's
 //! `events::EventRecord` JSON.
 //!
-//! What stays a state of its own ([`SystemdDetailState`]) is the action
-//! machine: an armed action awaiting confirmation, one in flight, and the
-//! job counter the auto-refresh watches. Those are not answers to a call.
+//! What stays a state of its own ([`SystemdDetailState`]) is the job
+//! counter the auto-refresh watches; the action machine is the generic
+//! `DeviceDetailState::writes` (#1261).
 
 use std::sync::Arc;
 
@@ -147,16 +147,10 @@ impl<'a> UnitFilters<'a> {
     }
 }
 
-/// The action machine (#283) — what is not an answer to a call: an armed
-/// action, one in flight, and the job counter the auto-refresh watches.
+/// What is not an answer to a call nor a write: the job counter the
+/// auto-refresh watches.
 #[derive(Debug, Clone, Default)]
 pub struct SystemdDetailState {
-    /// An action issued and not yet resolved. The write blocks until the job
-    /// completes, so without this a second click would queue a second job.
-    pub action_inflight: Option<(Verb, String)>,
-    /// Armed (verb, unit) awaiting inline confirmation in the Units tab (#283).
-    /// `Some` swaps that unit's action buttons for a confirm/cancel pair.
-    pub pending_action: Option<(Verb, String)>,
     /// Last seen `events/job_removed_total`. A change means some unit's state
     /// moved on the host — including from outside ZenSight — so the open table
     /// is stale and should re-pull. `None` until first sight, so arriving at a
@@ -255,25 +249,6 @@ pub fn action_capability_key(origin: &zenkey::RemoteOrigin) -> String {
 /// The audit-timeline key: a bounded ring of recent action outcomes.
 pub fn actions_history_key(origin: &zenkey::RemoteOrigin) -> String {
     zensight_common::origin_rpc_key(origin, "systemd", "actions")
-}
-
-/// Why an action produced no `ActionStatus`. GUI-only — not a wire type.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ActionFailure {
-    /// The sensor refused: the `error/gated` reply-error it sent back.
-    Refused {
-        error: String,
-        message: String,
-    },
-    /// Replies closed well before our deadline — nobody serves the key, so
-    /// actions are off or the sensor is offline.
-    NotServed,
-    /// Our deadline elapsed. The job was accepted and may still be running; this
-    /// is emphatically not a failure, and must not be reported as one.
-    StillRunning {
-        waited_secs: u64,
-    },
-    Transport(String),
 }
 
 /// Extract the systemd unit name from a cgroup path (#313) — the

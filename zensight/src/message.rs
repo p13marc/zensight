@@ -468,6 +468,25 @@ pub enum Message {
     /// A pump-side failure worth showing (watch refused, monitor failed).
     ExplorerError(String),
 
+    /// Arm a write procedure on the selected device (#1261): what will be
+    /// sent, how it reads, how it is confirmed. The row swaps to its
+    /// confirmation; nothing goes on the wire until [`Message::Confirm`].
+    Arm(crate::call::Armed),
+    /// Disarm the armed write.
+    Disarm,
+    /// What the operator has typed into a typed confirmation.
+    ConfirmText(String),
+    /// Send the armed write — only when its confirmation holds, checked
+    /// again in the app so a message arriving any other way cannot skip it.
+    Confirm,
+    /// A write procedure answered, or did not (#1261). Carries the device
+    /// and the request it answers, so a stale outcome is dropped.
+    Written {
+        device: DeviceId,
+        procedure: String,
+        request: serde_json::Value,
+        result: Result<crate::call::Reply, crate::call::WriteFailure>,
+    },
     /// Forget a procedure's answer on the selected device (#1261), so its
     /// panel offers the call again — a unit file hidden, a table dismissed.
     ForgetCall {
@@ -476,36 +495,6 @@ pub enum Message {
     /// Fetch this host's advertised service-control gate (#283) so the Units tab
     /// can render what it will actually accept.
     // ── Gated PDU outlet control (#956) ─────────────────────────────────
-    /// Arm one outlet for confirmation. Arming shows a field; it sends nothing.
-    SnmpOutletArm(String),
-    /// The operator is typing the outlet's name. Nothing is live until it
-    /// matches exactly — a `[confirm]` button one slip away from a live one is
-    /// not a confirmation, and this action cuts power.
-    SnmpOutletConfirmTextChanged(String),
-    SnmpOutletCancel,
-    SnmpOutletConfirm,
-    SnmpOutletActionResult(Result<zensight_common::outlet::OutletStatus, String>),
-
-    /// Arm a unit action (#283): the row's buttons swap to an inline
-    /// confirm/cancel pair until resolved. `unit` is empty for `daemon-reload`.
-    SystemdUnitActionArm {
-        verb: zensight_common::action::Verb,
-        unit: String,
-    },
-    /// Cancel the armed unit action (#283).
-    SystemdUnitActionCancel,
-    /// Send the armed unit action as `{verb, unit}` via the drilled-in host's
-    /// `@rpc/systemd/action/set` (#283). The sensor refuses unless the action is
-    /// gated open.
-    SystemdUnitActionConfirm,
-    /// The `action/set` reply: the sensor's own `ActionStatus`, produced *after*
-    /// it tracked the D-Bus job to completion, or why none arrived.
-    SystemdUnitActionResult(
-        Result<
-            zensight_common::action::ActionStatus,
-            crate::view::specialized::systemd_detail::ActionFailure,
-        >,
-    ),
 
     /// Set one of a device view's own filter controls (#1261) — the socket
     /// explorer's state chip, port substring or sort — kept in
