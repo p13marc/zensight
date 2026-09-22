@@ -80,6 +80,20 @@ Expectation types (`zensight-common::systemd`, checked in `src/sentinel.rs`):
 | `restart_rates: [{ unit, max, window_secs }]` | `expect-restart-rate` | the unit's restart count over `window_secs` is `< max` |
 | `forbid_failed: true` | `forbid-failed` | no unit is in state `failed` |
 
+**`inactive` is not `failed`, and only the sentinel knows the difference.** The
+threshold rule `systemd-unit-failed` (and `forbid-failed` above) fire on
+`ActiveState == "failed"` — a unit whose start-up failed or whose service died
+with `Restart=` exhausted. A unit that was *stopped* — `systemctl stop`, a
+clean exit under `Restart=no`, a dependency that never came up, an OOM kill
+that systemd recorded as a plain stop — is `inactive`, and `inactive` fires
+nothing anywhere except `expect-service-active`. A host whose most important
+service is down is therefore green on every threshold rule until someone
+writes `services_active: [{ unit: "<that>.service" }]`; the shipped config
+comments the block out, and the fleet-wide route is one
+`"systemd/expectations"` document in the policy file
+([`docs/DEPLOYMENT.md` §8](../../docs/DEPLOYMENT.md)). Filed from a 22-hour
+outage that reported green throughout (#1286).
+
 ## Gated service control (#283) — security-sensitive
 
 **Default OFF.** The sensor is strictly read-only unless `systemd.actions.enabled`
