@@ -72,7 +72,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `typed_subjects::the_registered_families_render_their_tails`), and its
   `chassis` label is read back from the subject's bound `{chassis}` rather
   than spelled twice. The `&str`-suffix `publish` stays as the interim while
-  the other sensors move, one per PR.
+  the other sensors move, one per PR. **pve** is the second sensor on it: all
+  fourteen families (guest gauges and counters, node, ceph, storage, backup,
+  backup job, cluster) build their subjects, a local pool's chunk is slugged
+  once by the builder from the raw `node-storage` pair, and its
+  `telemetry_guard.rs` is gone.
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green
