@@ -38,9 +38,7 @@ fn isolated_config() -> zenoh::Config {
     // As `zensight_common::session` sets it in production: a cache-only
     // advanced publisher (the evidence feed, #413) sequences by sample
     // timestamp, and zenoh enables timestamping by default only for routers.
-    config
-        .insert_json5("timestamping/enabled", "true")
-        .unwrap();
+    config.insert_json5("timestamping/enabled", "true").unwrap();
     config
 }
 
