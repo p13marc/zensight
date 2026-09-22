@@ -418,6 +418,101 @@ async fn cancel_aborts_in_flight_production() {
     assert!(reason.contains("cancel"), "reason was: {reason}");
 }
 
+/// A sensor stopping mid-production leaves a terminal state, not a silence
+/// (#1156): `shutdown` tells the producer to stop, `artifact/status` answers
+/// `Failed { reason: "sensor shutting down" }` for the kind — and, for a
+/// producer whose registry declares `state/<producer>/artifact/{kind}`, the
+/// same state lands on that document, so a consumer that was not polling at
+/// that instant still reads it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_leaves_a_terminal_state_for_an_in_flight_production() {
+    let session = Arc::new(zenoh::open(isolated_config()).await.unwrap());
+    // `sysinfo` declares the state document; a test-only prefix would not.
+    let producer_name = "sysinfo";
+
+    let started = Arc::new(tokio::sync::Notify::new());
+    let producer = Arc::new(SlowProducer {
+        common: zensight_common::CommonArtifactLimits {
+            enabled: true,
+            max_bytes: 1 << 20,
+            cooldown_secs: 0,
+            ttl_secs: 600,
+            chunk_size: 256 * 1024,
+        },
+        started: started.clone(),
+    });
+    let channel =
+        ArtifactChannel::new(session.clone(), producer_name, "host1", vec![producer]).unwrap();
+    let handle = channel.handle();
+    let documents = session
+        .declare_subscriber(format!("v1/*/state/{producer_name}/artifact/*"))
+        .with(flume::unbounded())
+        .await
+        .unwrap();
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let id = Ulid::from_parts(7, 7);
+    let replies = session
+        .get(artifact_request_key(producer_name))
+        .payload(
+            serde_json::to_vec(&ArtifactRequest {
+                id,
+                kind: ArtifactKind::Report {},
+                opts: Default::default(),
+            })
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let reply = replies.recv_async().await.expect("request reply");
+    assert!(reply.result().is_ok(), "request refused: {reply:?}");
+    tokio::time::timeout(Duration::from_secs(5), started.notified())
+        .await
+        .expect("producer never started");
+    // The accepted request already published `Generating`.
+    let generating = documents
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the Generating document");
+    let doc: ArtifactStatus =
+        serde_json::from_slice(&generating.payload().to_bytes()).expect("an ArtifactStatus");
+    assert!(matches!(
+        kind_current(&doc, "report"),
+        Some(ArtifactState::Generating { .. })
+    ));
+
+    // The runner's wind-down, as it runs it: bounded, before any abort.
+    tokio::time::timeout(Duration::from_secs(2), handle.shutdown())
+        .await
+        .expect("shutdown winds down within its budget");
+
+    // The read procedure still answers — with the terminal state.
+    let status = poll_status(&session, &artifact_status_key(producer_name))
+        .await
+        .expect("status still served after shutdown");
+    match kind_current(&status, "report") {
+        Some(ArtifactState::Failed { reason, .. }) => {
+            assert!(reason.contains("shutting down"), "reason was: {reason}");
+        }
+        other => panic!("expected Failed, got {other:?}"),
+    }
+    assert!(
+        !status.kinds.iter().any(|k| k.busy),
+        "an interrupted kind is not busy: {status:?}"
+    );
+
+    // And the document says the same, for a consumer that was not polling.
+    let failed = documents
+        .recv_timeout(Duration::from_secs(2))
+        .expect("the Failed document");
+    let doc: ArtifactStatus =
+        serde_json::from_slice(&failed.payload().to_bytes()).expect("an ArtifactStatus");
+    assert!(matches!(
+        kind_current(&doc, "report"),
+        Some(ArtifactState::Failed { .. })
+    ));
+}
+
 /// Count regular files under a directory, recursively (the DirStore layout).
 fn file_count(root: &std::path::Path) -> usize {
     let mut n = 0;
