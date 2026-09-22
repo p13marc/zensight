@@ -57,6 +57,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A browser's way onto the bus: the zenoh remote-api bridge** (#705, the
+  first step of #704). `configs/router-remote-api.json5` configures
+  `zenoh-bridge-remote-api` — the standalone binary, deliberately, because a
+  dynamically loaded plugin must match its router's sources, rustc and
+  features exactly or SIGSEGVs — with `websocket_port`, the optional
+  `secure_websocket` TLS pair, no zenoh listener of its own, and the four
+  deployment facts in its header: the bridge is a peer or client that joins
+  a hub, never the hub; the deployment `namespace` is set on the bridge and
+  a browser spells base-less keys exactly as the iced GUI does (the plugin
+  creates every browser session from the bridge's runtime, whose namespace is
+  read once from this file); one bridge per namespace; and the WebSocket is
+  the whole bus with no authentication of its own, so it binds to loopback
+  behind a proxy or a firewall. `just remote-api` installs it at the
+  workspace's zenoh version (1.10.1) on first use and runs it against the
+  GUI's hub; `packaging/systemd/zenoh-bridge-remote-api.service` is the unit
+  (sandboxed, no capabilities, no quadlet twin because upstream ships no
+  image — `packaging-check.sh` says so by name); `docs/DEPLOYMENT.md` §9 is
+  the write-up. Verified as far as a bridge can be without a browser client:
+  it starts, loads `remote_api` statically, opens only the WebSocket port and
+  completes an upgrade handshake.
+
 - **parallax serves stills and clips over the artifact channel** (#414).
   The live `@media` plane is lossy and ephemeral by design; these are its
   reliable complement, with the progress, status, cancel and TTL every

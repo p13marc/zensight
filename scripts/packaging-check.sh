@@ -46,6 +46,9 @@ config_for() {
     case "$name" in
         exporter-otel) echo "otel-exporter" ;;
         exporter-prometheus) echo "prometheus-exporter" ;;
+        # Not a ZenSight binary (#705): the upstream bridge, reading the
+        # router-style config. No `resources` block, so no budget row.
+        zenoh-bridge-remote-api) echo "router-remote-api" ;;
         *) echo "$name" ;;
     esac
 }
@@ -95,7 +98,12 @@ budget_of() {
 
 # Units with no quadlet, and the reason. #1093 empties this list; an entry that
 # is no longer true is itself a failure, so it cannot rot.
-declare -A NO_QUADLET=()
+declare -A NO_QUADLET=(
+    # An upstream binary (eclipse-zenoh/zenoh-ts), not one of ours: no
+    # ZenSight image builds it and upstream publishes no container image for
+    # it (#705). When either changes, the twin goes in and this line goes.
+    [zenoh-bridge-remote-api]="upstream binary, no image to run — #705"
+)
 
 rows=()
 
