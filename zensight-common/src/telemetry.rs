@@ -73,7 +73,14 @@ impl TelemetryPoint {
             zenkey::grammar::Class::Telemetry,
             "{subject:?} is not a telemetry subject"
         );
-        Self::new(source, subject.tail(), value)
+        let metric = subject.tail();
+        // The kind the registry declares against the variant published
+        // (#1071): both exporters read the variant and nothing else, so a
+        // counter published as a gauge is the wire type a scrape sees.
+        if let Err(e) = crate::registry::kind_matches(subject.producer(), &metric, &value) {
+            debug_assert!(false, "{e}");
+        }
+        Self::new(source, metric, value)
     }
 
     /// Add a label to this telemetry point.

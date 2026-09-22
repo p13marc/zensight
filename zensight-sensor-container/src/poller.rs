@@ -11,8 +11,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::container::{ContainerInfo, HealthState, SignatureState};
+use zensight_common::registry::container::Subject;
 use zensight_common::relation::{EndpointClaim, RelationKind, RelationshipEvidence};
-use zensight_common::{HostEvidence, QosClass, TelemetryValue};
+use zensight_common::{HostEvidence, QosClass, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{
     AdvancedPublisherRegistry, AlertReporter, Publisher, SensorHealth, SweepOpts,
 };
@@ -20,7 +21,6 @@ use zensight_sensor_core::{
 use crate::alerts::{self, Observation};
 use crate::config::ContainerConfig;
 use crate::runtime::RuntimeClient;
-use crate::telemetry_guard::checked_point;
 use crate::upstream::UpstreamChecker;
 
 pub const STATE_QOS: QosClass = QosClass::HealthLiveness;
@@ -258,18 +258,21 @@ impl Poller {
             // and whose values only ever climb — so `container_…_oom_kills_total`
             // was scraped as `# TYPE … gauge` and exported to OTLP as a Gauge,
             // which no backend can `rate()` or delta-aggregate (#1071).
-            let mut points: Vec<(String, TelemetryValue)> = vec![
+            // The builders slug the container's name themselves (#1274); the
+            // chunk above is what the state document's key carries.
+            let name = c.name.as_str();
+            let mut points: Vec<(Subject, TelemetryValue)> = vec![
                 // A 0/1 step series, and morally `TelemetryValue::Boolean` —
                 // but changing the variant changes the payload, and this issue
                 // is about the five whose TYPE is wrong. Both render as
                 // `# TYPE … gauge` either way; the move is a separate change
                 // with its own wire note.
                 (
-                    format!("{slug}/running"),
+                    Subject::running(name),
                     TelemetryValue::Gauge(if c.is_running() { 1.0 } else { 0.0 }),
                 ),
                 (
-                    format!("{slug}/restart_count"),
+                    Subject::restart_count(name),
                     TelemetryValue::Counter(c.restart_count),
                 ),
             ];
@@ -277,36 +280,51 @@ impl Poller {
             // container is replaced — which is a new cgroup, and which the
             // origin's `alive` token cycling makes visible on the wire. That is
             // the RFC 08 §2 definition of `kind = "counter"`.
-            for (suffix, v) in [
-                ("cpu_usage_usec_total", r.cpu_usage_usec),
-                ("cpu_throttled_usec_total", r.cpu_throttled_usec),
-                ("oom_kills_total", r.oom_kills),
-                ("memory_max_events_total", r.memory_max_events),
+            for (subject, v) in [
+                (Subject::cpu_usage_usec_total(name), r.cpu_usage_usec),
+                (
+                    Subject::cpu_throttled_usec_total(name),
+                    r.cpu_throttled_usec,
+                ),
+                (Subject::oom_kills_total(name), r.oom_kills),
+                (Subject::memory_max_events_total(name), r.memory_max_events),
             ] {
                 if let Some(v) = v {
-                    points.push((format!("{slug}/{suffix}"), TelemetryValue::Counter(v)));
+                    points.push((subject, TelemetryValue::Counter(v)));
                 }
             }
             // Levels: they may fall, and falling means it fell.
-            for (suffix, v) in [
-                ("memory_bytes", r.memory_bytes.map(|v| v as f64)),
-                ("memory_max_bytes", r.memory_max_bytes.map(|v| v as f64)),
-                ("memory_peak_bytes", r.memory_peak_bytes.map(|v| v as f64)),
-                ("memory_ratio", c.memory_ratio()),
-                ("cpu_pressure_avg10", r.cpu_pressure_avg10),
-                ("memory_pressure_avg10", r.memory_pressure_avg10),
-                ("io_pressure_avg10", r.io_pressure_avg10),
-                ("pids", r.pids.map(|v| v as f64)),
-                ("exit_code", c.exit_code.map(|v| v as f64)),
+            for (subject, v) in [
                 (
-                    "uptime_secs",
+                    Subject::memory_bytes(name),
+                    r.memory_bytes.map(|v| v as f64),
+                ),
+                (
+                    Subject::memory_max_bytes(name),
+                    r.memory_max_bytes.map(|v| v as f64),
+                ),
+                (
+                    Subject::memory_peak_bytes(name),
+                    r.memory_peak_bytes.map(|v| v as f64),
+                ),
+                (Subject::memory_ratio(name), c.memory_ratio()),
+                (Subject::cpu_pressure_avg10(name), r.cpu_pressure_avg10),
+                (
+                    Subject::memory_pressure_avg10(name),
+                    r.memory_pressure_avg10,
+                ),
+                (Subject::io_pressure_avg10(name), r.io_pressure_avg10),
+                (Subject::pids(name), r.pids.map(|v| v as f64)),
+                (Subject::exit_code(name), c.exit_code.map(|v| v as f64)),
+                (
+                    Subject::uptime_secs(name),
                     c.started_at
                         .filter(|_| c.is_running())
                         .map(|s| ((now_ms / 1000) - s).max(0) as f64),
                 ),
             ] {
                 if let Some(v) = v {
-                    points.push((format!("{slug}/{suffix}"), TelemetryValue::Gauge(v)));
+                    points.push((subject, TelemetryValue::Gauge(v)));
                 }
             }
             // Not published when there is no healthcheck or none has ever run:
@@ -314,16 +332,16 @@ impl Poller {
             // wrong thing to say about a container whose PROBE is broken.
             match c.health {
                 HealthState::Healthy => {
-                    points.push((format!("{slug}/healthy"), TelemetryValue::Gauge(1.0)))
+                    points.push((Subject::healthy(name), TelemetryValue::Gauge(1.0)))
                 }
                 HealthState::Unhealthy => {
-                    points.push((format!("{slug}/healthy"), TelemetryValue::Gauge(0.0)))
+                    points.push((Subject::healthy(name), TelemetryValue::Gauge(0.0)))
                 }
                 _ => {}
             }
             if c.image.upstream_digest.is_some() {
                 points.push((
-                    format!("{slug}/image_behind_upstream"),
+                    Subject::image_behind_upstream(name),
                     TelemetryValue::Gauge(if c.image.is_behind_upstream() {
                         1.0
                     } else {
@@ -332,14 +350,15 @@ impl Poller {
                 ));
             }
 
-            for (metric, value) in points {
+            for (subject, value) in points {
                 // `source` is the host running the container, never the
                 // container (#883/#884). A container's memory comes from this
                 // host's cgroup tree; its name is unique per host, not
                 // globally, so filing the series under it made four machines
                 // running `zensight-sensor-logs` collide on one identity.
-                let p = checked_point(&self.source, &metric, value).with_labels(labels.clone());
-                if self.publisher.publish(&metric, &p).await.is_ok() {
+                let p = TelemetryPoint::for_subject(&self.source, &subject, value)
+                    .with_labels(labels.clone());
+                if self.publisher.publish_subject(&subject, &p).await.is_ok() {
                     published += 1;
                 }
             }
@@ -383,22 +402,23 @@ impl Poller {
             }
         }
 
-        for (metric, value) in [
-            ("containers/total", containers.len() as f64),
+        for (subject, value) in [
+            (Subject::ContainersTotal, containers.len() as f64),
             (
-                "containers/running",
+                Subject::ContainersRunning,
                 containers.iter().filter(|c| c.is_running()).count() as f64,
             ),
             (
-                "containers/unhealthy",
+                Subject::ContainersUnhealthy,
                 containers
                     .iter()
                     .filter(|c| c.health == HealthState::Unhealthy)
                     .count() as f64,
             ),
         ] {
-            let p = checked_point(&self.source, metric, TelemetryValue::Gauge(value));
-            if self.publisher.publish(metric, &p).await.is_ok() {
+            let p =
+                TelemetryPoint::for_subject(&self.source, &subject, TelemetryValue::Gauge(value));
+            if self.publisher.publish_subject(&subject, &p).await.is_ok() {
                 published += 1;
             }
         }

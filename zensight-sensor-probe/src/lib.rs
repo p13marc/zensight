@@ -56,5 +56,37 @@ pub mod alerts;
 pub mod check;
 pub mod config;
 pub mod poller;
-mod telemetry_guard;
 pub mod tls;
+
+#[cfg(test)]
+mod typed_subjects {
+    use zensight_common::registry::probe::Subject;
+    use zensight_common::subject::TelemetrySubject;
+
+    /// The generated subjects render the tails this sensor published by hand
+    /// (#1274): byte-identical keys, so every consumer's series carries over
+    /// — and an operator's target name is slugged by the builder exactly as
+    /// `device_chunk` slugged it at the old call site.
+    #[test]
+    fn the_registered_families_render_their_tails() {
+        for (subject, tail) in [
+            (Subject::up("forge"), "forge/up"),
+            (Subject::duration_ms("forge"), "forge/duration_ms"),
+            (Subject::timeout("forge"), "forge/timeout"),
+            (
+                Subject::tls_days_to_expiry("forge"),
+                "forge/tls_days_to_expiry",
+            ),
+            (Subject::rtt_p95_ms("forge"), "forge/rtt_p95_ms"),
+            (Subject::ntp_synchronised("forge"), "forge/ntp_synchronised"),
+            (Subject::TargetsFailing, "targets/failing"),
+        ] {
+            assert_eq!(subject.tail(), tail);
+        }
+        let chunk = zensight_sensor_core::key::device_chunk("Forge (prod)");
+        assert_eq!(
+            Subject::up("Forge (prod)").tail(),
+            format!("{}/up", chunk.as_str())
+        );
+    }
+}

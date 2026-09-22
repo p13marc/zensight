@@ -771,7 +771,11 @@ impl Evaluator {
             .filter(|r| r.status != AssertionStatus::Pass)
             .count();
         let point = crate::map::failing_point(&self.host, failing);
-        if let Err(e) = self.publisher.publish("assertions/failing", &point).await {
+        if let Err(e) = self
+            .publisher
+            .publish_subject(&crate::map::FAILING, &point)
+            .await
+        {
             tracing::warn!(error = %e, "hostspec: failed to publish failing gauge");
         }
 

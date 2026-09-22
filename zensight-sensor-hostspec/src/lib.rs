@@ -35,4 +35,18 @@ pub mod config;
 pub mod map;
 pub mod observe;
 pub mod sentinel;
-mod telemetry_guard;
+
+#[cfg(test)]
+mod typed_subjects {
+    use zensight_common::subject::TelemetrySubject;
+
+    /// The one gauge renders the tail it always had (#1274).
+    #[test]
+    fn the_failing_gauge_renders_its_tail() {
+        assert_eq!(crate::map::FAILING.tail(), "assertions/failing");
+        assert_eq!(
+            crate::map::failing_point("h", 3).metric,
+            "assertions/failing"
+        );
+    }
+}
