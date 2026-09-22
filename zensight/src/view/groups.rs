@@ -13,6 +13,39 @@ use crate::view::components::empty_state;
 use crate::view::icons::{self, IconSize};
 use crate::view::tokens::font;
 
+/// One interaction with the groups panel (#1306).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    OpenPanel,
+    ClosePanel,
+    /// The group filter (`None` = show all).
+    SetFilter(Option<u32>),
+    /// The new-group form's name.
+    NewName(String),
+    /// The new-group form's color index.
+    NewColor(usize),
+    /// Create the group the form describes.
+    Add,
+    /// Start editing a group.
+    Edit(u32),
+    EditName(String),
+    EditColor(usize),
+    SaveEdit,
+    CancelEdit,
+    Delete(u32),
+    /// Flip a device's membership of a group.
+    ToggleDevice(DeviceId, u32),
+}
+
+/// What the app has to do after a groups action.
+#[must_use]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    None,
+    /// The group set or an assignment changed: persist it.
+    Persist,
+}
+
 /// Predefined colors for groups (RGB 0.0-1.0).
 pub const GROUP_COLORS: &[(f32, f32, f32, &str)] = &[
     (0.4, 0.6, 1.0, "Blue"),
@@ -106,6 +139,39 @@ pub struct GroupsState {
 }
 
 impl GroupsState {
+    /// One panel interaction (#1306): the change happens here; whether it
+    /// needs persisting comes back as the [`Effect`].
+    pub fn update(&mut self, action: Action) -> Effect {
+        match action {
+            Action::OpenPanel => self.open_panel(),
+            Action::ClosePanel => self.close_panel(),
+            Action::SetFilter(group_id) => self.set_filter(group_id),
+            Action::NewName(name) => self.new_group_name = name,
+            Action::NewColor(index) => self.new_group_color = index,
+            Action::Add => {
+                self.add_group_from_form();
+                return Effect::Persist;
+            }
+            Action::Edit(group_id) => self.start_editing(group_id),
+            Action::EditName(name) => self.edit_name = name,
+            Action::EditColor(index) => self.edit_color = index,
+            Action::SaveEdit => {
+                self.save_edit();
+                return Effect::Persist;
+            }
+            Action::CancelEdit => self.cancel_edit(),
+            Action::Delete(group_id) => {
+                self.delete_group(group_id);
+                return Effect::Persist;
+            }
+            Action::ToggleDevice(device_id, group_id) => {
+                self.toggle_assignment(&device_id, group_id);
+                return Effect::Persist;
+            }
+        }
+        Effect::None
+    }
+
     /// Create a new groups state.
     pub fn new() -> Self {
         Self::default()
@@ -387,7 +453,7 @@ pub fn group_filter_bar(state: &GroupsState) -> Element<'_, Message> {
 
     // "All" button
     let all_btn = button(text("All").size(font::DENSE))
-        .on_press(Message::SetGroupFilter(None))
+        .on_press(Message::Groups(Action::SetFilter(None)))
         .style(if state.filter.is_none() {
             iced::widget::button::primary
         } else {
@@ -408,7 +474,7 @@ pub fn group_filter_bar(state: &GroupsState) -> Element<'_, Message> {
         .align_y(Alignment::Center);
 
         let btn = button(btn_content)
-            .on_press(Message::SetGroupFilter(Some(group.id)))
+            .on_press(Message::Groups(Action::SetFilter(Some(group.id))))
             .style(if is_active {
                 iced::widget::button::primary
             } else {
@@ -427,7 +493,7 @@ pub fn group_filter_bar(state: &GroupsState) -> Element<'_, Message> {
         .spacing(4)
         .align_y(Alignment::Center),
     )
-    .on_press(Message::OpenGroupsPanel)
+    .on_press(Message::Groups(Action::OpenPanel))
     .style(iced::widget::button::secondary);
 
     filter_row = filter_row.push(manage_btn);
@@ -440,7 +506,7 @@ pub fn groups_panel(state: &GroupsState) -> Element<'_, Message> {
     let header = row![
         text("Manage Groups").size(font::SECTION),
         button(icons::close(IconSize::Small))
-            .on_press(Message::CloseGroupsPanel)
+            .on_press(Message::Groups(Action::ClosePanel))
             .style(iced::widget::button::secondary)
     ]
     .spacing(10)
@@ -477,7 +543,7 @@ pub fn groups_panel(state: &GroupsState) -> Element<'_, Message> {
 /// Render the new group form.
 fn render_new_group_form(state: &GroupsState) -> Element<'_, Message> {
     let name_input = text_input("New group name...", &state.new_group_name)
-        .on_input(Message::SetNewGroupName)
+        .on_input(|v| Message::Groups(Action::NewName(v)))
         .padding(8)
         .width(Length::Fixed(200.0));
 
@@ -486,7 +552,7 @@ fn render_new_group_form(state: &GroupsState) -> Element<'_, Message> {
     for (i, &(r, g, b, _)) in GROUP_COLORS.iter().enumerate() {
         let is_selected = state.new_group_color == i;
         let color_btn = button(color_indicator((r, g, b), 16.0))
-            .on_press(Message::SetNewGroupColor(i))
+            .on_press(Message::Groups(Action::NewColor(i)))
             .padding(2)
             .style(if is_selected {
                 iced::widget::button::primary
@@ -497,7 +563,7 @@ fn render_new_group_form(state: &GroupsState) -> Element<'_, Message> {
     }
 
     let add_btn = button(text("Add Group").size(font::CAPTION))
-        .on_press(Message::AddGroup)
+        .on_press(Message::Groups(Action::Add))
         .style(iced::widget::button::primary);
 
     column![
@@ -543,7 +609,7 @@ fn render_group_row<'a>(
     if state.editing_group == Some(group.id) {
         // Edit mode
         let name_input = text_input("Group name...", &state.edit_name)
-            .on_input(Message::SetEditGroupName)
+            .on_input(|v| Message::Groups(Action::EditName(v)))
             .padding(6)
             .width(Length::Fixed(150.0));
 
@@ -551,7 +617,7 @@ fn render_group_row<'a>(
         for (i, &(r, g, b, _)) in GROUP_COLORS.iter().enumerate() {
             let is_selected = state.edit_color == i;
             let color_btn = button(color_indicator((r, g, b), 12.0))
-                .on_press(Message::SetEditGroupColor(i))
+                .on_press(Message::Groups(Action::EditColor(i)))
                 .padding(1)
                 .style(if is_selected {
                     iced::widget::button::primary
@@ -562,11 +628,11 @@ fn render_group_row<'a>(
         }
 
         let save_btn = button(text("Save").size(font::DENSE))
-            .on_press(Message::SaveGroupEdit)
+            .on_press(Message::Groups(Action::SaveEdit))
             .style(iced::widget::button::primary);
 
         let cancel_btn = button(text("Cancel").size(font::DENSE))
-            .on_press(Message::CancelGroupEdit)
+            .on_press(Message::Groups(Action::CancelEdit))
             .style(iced::widget::button::secondary);
 
         container(
@@ -609,11 +675,11 @@ fn render_group_row<'a>(
         .align_y(Alignment::Center);
 
         let edit_btn = button(icons::edit(IconSize::Small))
-            .on_press(Message::EditGroup(group.id))
+            .on_press(Message::Groups(Action::Edit(group.id)))
             .style(iced::widget::button::secondary);
 
         let delete_btn = button(icons::close(IconSize::Small))
-            .on_press(Message::DeleteGroup(group.id))
+            .on_press(Message::Groups(Action::Delete(group.id)))
             .style(iced::widget::button::danger);
 
         container(
@@ -675,7 +741,10 @@ pub fn device_group_menu<'a>(
             .spacing(6)
             .align_y(Alignment::Center),
         )
-        .on_press(Message::ToggleDeviceGroup(device_id_clone, group_id))
+        .on_press(Message::Groups(Action::ToggleDevice(
+            device_id_clone,
+            group_id,
+        )))
         .width(Length::Fill)
         .style(if is_assigned {
             iced::widget::button::primary
@@ -839,5 +908,38 @@ mod tests {
 
         state.set_group_color(id, 3);
         assert_eq!(state.groups.get(&id).unwrap().color_index, 3);
+    }
+}
+
+#[cfg(test)]
+mod actions {
+    use super::*;
+
+    /// Only the actions that change the persisted set ask for a save; form
+    /// edits and panel state do not.
+    #[test]
+    fn only_set_changes_persist() {
+        let mut g = GroupsState::new();
+        assert_eq!(g.update(Action::OpenPanel), Effect::None);
+        assert_eq!(g.update(Action::NewName("lab".into())), Effect::None);
+        assert_eq!(g.update(Action::NewColor(2)), Effect::None);
+        assert_eq!(g.update(Action::Add), Effect::Persist);
+        let id = *g.groups.keys().next().expect("the group was created");
+        assert_eq!(g.groups[&id].name, "lab");
+        assert_eq!(g.update(Action::Edit(id)), Effect::None);
+        assert_eq!(g.update(Action::EditName("lab-2".into())), Effect::None);
+        assert_eq!(g.update(Action::SaveEdit), Effect::Persist);
+        assert_eq!(g.groups[&id].name, "lab-2");
+        let dev = DeviceId::new("sysinfo", "h-000000000001", "host01");
+        assert_eq!(
+            g.update(Action::ToggleDevice(dev.clone(), id)),
+            Effect::Persist
+        );
+        assert!(g.device_in_group(&dev, id));
+        assert_eq!(g.update(Action::SetFilter(Some(id))), Effect::None);
+        assert_eq!(g.update(Action::CancelEdit), Effect::None);
+        assert_eq!(g.update(Action::Delete(id)), Effect::Persist);
+        assert!(g.groups.is_empty());
+        assert_eq!(g.update(Action::ClosePanel), Effect::None);
     }
 }

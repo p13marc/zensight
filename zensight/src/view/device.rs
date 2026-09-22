@@ -12,7 +12,7 @@ use zensight_common::{DeviceStatus, HostEntity, Protocol, TelemetryPoint, Teleme
 
 use crate::app::DEVICE_SEARCH_ID;
 use crate::message::{DeviceId, Message};
-use crate::view::chart::{ChartState, DataPoint, TimeWindow, chart_view};
+use crate::view::chart::{self, ChartState, DataPoint, TimeWindow, chart_view};
 use crate::view::components::empty_state;
 use crate::view::formatting::{format_timestamp, format_value};
 use crate::view::icons::{self, IconSize};
@@ -308,6 +308,47 @@ impl DeviceDetailState {
         self.chart_from_input.clear();
         self.chart_to_input.clear();
         self.chart.clear_absolute_range();
+    }
+
+    /// One chart interaction (#1306): the state change happens here, and
+    /// what the app must do about it comes back as a [`chart::Effect`] —
+    /// pure, so it is unit-tested without the app.
+    pub fn apply_chart(&mut self, action: chart::Action) -> chart::Effect {
+        use chart::{Action as A, Effect};
+        match action {
+            A::SelectMetric(name) => self.select_metric(name),
+            A::ClearSelection => self.clear_chart_selection(),
+            A::AddMetric(name) => self.add_metric_to_chart(name),
+            A::RemoveMetric(name) => self.remove_metric_from_chart(&name),
+            A::ToggleVisibility(name) => self.toggle_metric_visibility(&name),
+            A::ToggleFavorite(metric) => {
+                let now_fav = self.toggle_favorite(&metric);
+                return Effect::Favorite { metric, now_fav };
+            }
+            A::SetTimeWindow(window) => self.set_time_window(window),
+            A::SetCustomMinutes(input) => self.set_chart_custom_minutes(input),
+            A::SetRangeFrom(input) => self.chart_from_input = input,
+            A::SetRangeTo(input) => self.chart_to_input = input,
+            A::ApplyRange => {
+                return match self.apply_chart_range() {
+                    Some((from, to)) => Effect::LoadRange { from, to },
+                    None => Effect::InvalidRange,
+                };
+            }
+            A::ClearRange => self.clear_chart_range(),
+            A::ToggleExpand => self.toggle_chart_expand(),
+            A::ZoomIn => self.zoom_in(),
+            A::ZoomOut => self.zoom_out(),
+            A::ZoomReset => self.reset_zoom(),
+            A::PanLeft => self.pan_left(),
+            A::PanRight => self.pan_right(),
+            A::PanReset => self.reset_pan(),
+            A::DragStart(x) => self.start_drag(x),
+            A::DragUpdate(x, width) => self.update_drag(x, width),
+            A::DragEnd => self.end_drag(),
+            A::SetMetricFilter(filter) => self.set_metric_filter(filter),
+        }
+        Effect::None
     }
 
     /// Update the max history setting.
@@ -2104,7 +2145,7 @@ fn render_chart_section<'a>(
 ) -> Element<'a, Message> {
     // Chart header with close button and time window buttons
     let close_button = button(icons::close(IconSize::Small))
-        .on_press(Message::ClearChartSelection)
+        .on_press(Message::Chart(chart::Action::ClearSelection))
         .style(iced::widget::button::secondary);
 
     // Title depends on mode
@@ -2130,7 +2171,7 @@ fn render_chart_section<'a>(
             .map(|&window| {
                 let is_selected = state.chart.time_window() == window;
                 let btn = button(text(window.label()).size(font::DENSE))
-                    .on_press(Message::SetChartTimeWindow(window))
+                    .on_press(Message::Chart(chart::Action::SetTimeWindow(window)))
                     .style(if is_selected {
                         iced::widget::button::primary
                     } else {
@@ -2145,7 +2186,7 @@ fn render_chart_section<'a>(
 
     // Custom relative window input (#36): "last N minutes", overrides presets.
     let custom_input = text_input("min", &state.chart_custom_input)
-        .on_input(Message::SetChartCustomMinutes)
+        .on_input(|v| Message::Chart(chart::Action::SetCustomMinutes(v)))
         .width(Length::Fixed(64.0))
         .size(font::DENSE);
     let custom_window = row![text("Custom:").size(font::DENSE), custom_input]
@@ -2161,7 +2202,7 @@ fn render_chart_section<'a>(
         })
         .size(font::DENSE),
     )
-    .on_press(Message::ToggleChartExpand)
+    .on_press(Message::Chart(chart::Action::ToggleExpand))
     .style(iced::widget::button::secondary);
 
     let header = row![
@@ -2181,17 +2222,17 @@ fn render_chart_section<'a>(
     // ones is a conversion nobody should do in their head.
     let range_active = state.chart.absolute_range().is_some();
     let from_input = text_input("YYYY-MM-DD HH:MM", &state.chart_from_input)
-        .on_input(Message::SetChartRangeFrom)
-        .on_submit(Message::ApplyChartRange)
+        .on_input(|v| Message::Chart(chart::Action::SetRangeFrom(v)))
+        .on_submit(Message::Chart(chart::Action::ApplyRange))
         .width(Length::Fixed(150.0))
         .size(font::DENSE);
     let to_input = text_input("YYYY-MM-DD HH:MM", &state.chart_to_input)
-        .on_input(Message::SetChartRangeTo)
-        .on_submit(Message::ApplyChartRange)
+        .on_input(|v| Message::Chart(chart::Action::SetRangeTo(v)))
+        .on_submit(Message::Chart(chart::Action::ApplyRange))
         .width(Length::Fixed(150.0))
         .size(font::DENSE);
     let apply_btn = button(text("Apply").size(font::DENSE))
-        .on_press(Message::ApplyChartRange)
+        .on_press(Message::Chart(chart::Action::ApplyRange))
         .style(if range_active {
             iced::widget::button::primary
         } else {
@@ -2209,7 +2250,7 @@ fn render_chart_section<'a>(
     if range_active {
         range_row = range_row.push(
             button(text("Clear").size(font::DENSE))
-                .on_press(Message::ClearChartRange)
+                .on_press(Message::Chart(chart::Action::ClearRange))
                 .style(iced::widget::button::text),
         );
     }
@@ -2231,10 +2272,12 @@ fn render_chart_section<'a>(
             let name = series.name.clone();
             let toggle =
                 button(text(if series.visible { "shown" } else { "hidden" }).size(font::MICRO))
-                    .on_press(Message::ToggleMetricVisibility(name.clone()))
+                    .on_press(Message::Chart(chart::Action::ToggleVisibility(
+                        name.clone(),
+                    )))
                     .style(iced::widget::button::text);
             let remove = button(text("×").size(font::CAPTION))
-                .on_press(Message::RemoveMetricFromChart(name.clone()))
+                .on_press(Message::Chart(chart::Action::RemoveMetric(name.clone())))
                 .style(iced::widget::button::text);
             legend_row = legend_row.push(
                 row![swatch, text(name).size(font::DENSE), toggle, remove]
@@ -2374,7 +2417,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
     // Search filter input (with ID for keyboard focus)
     let search_input = text_input("Search metrics... (Ctrl+F)", state.filter_input())
         .id(DEVICE_SEARCH_ID.clone())
-        .on_input(Message::SetMetricFilter)
+        .on_input(|v| Message::Chart(chart::Action::SetMetricFilter(v)))
         .size(font::BODY)
         .padding(8)
         .width(Length::Fixed(300.0));
@@ -2423,7 +2466,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                         }),
                     }),
             )
-            .on_press(Message::ToggleMetricFavorite(row.name))
+            .on_press(Message::Chart(chart::Action::ToggleFavorite(row.name)))
             .style(iced::widget::button::text)
             .padding(0)
             .into()
@@ -2439,7 +2482,7 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
             // Make the name clickable to select for chart
             let label: Element<'_, Message> = if row.is_chartable {
                 button(text(name_display).size(font::CAPTION))
-                    .on_press(Message::SelectMetricForChart(name))
+                    .on_press(Message::Chart(chart::Action::SelectMetric(name)))
                     .style(if row.is_in_chart {
                         iced::widget::button::primary
                     } else {
@@ -2567,9 +2610,9 @@ fn render_metrics_list(state: &DeviceDetailState) -> Element<'_, Message> {
                 let chart_btn =
                     button(text(if row.is_in_chart { "−" } else { "+" }).size(font::DENSE))
                         .on_press(if row.is_in_chart {
-                            Message::RemoveMetricFromChart(metric_name)
+                            Message::Chart(chart::Action::RemoveMetric(metric_name))
                         } else {
-                            Message::AddMetricToChart(metric_name)
+                            Message::Chart(chart::Action::AddMetric(metric_name))
                         })
                         .style(if row.is_in_chart {
                             iced::widget::button::danger
@@ -3311,5 +3354,85 @@ mod tests {
             }],
         )]);
         assert_eq!(state.chart.data().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod chart_actions {
+    use super::*;
+    use crate::view::chart::{Action, Effect};
+
+    fn device() -> DeviceDetailState {
+        DeviceDetailState::new(DeviceId::new("sysinfo", "h-000000000001", "host01"))
+    }
+
+    /// The favorite flip reports its new state so the app can keep the
+    /// persisted set — the one chart action with a side effect elsewhere.
+    #[test]
+    fn toggle_favorite_reports_new_state() {
+        let mut d = device();
+        assert_eq!(
+            d.apply_chart(Action::ToggleFavorite("cpu/usage".into())),
+            Effect::Favorite {
+                metric: "cpu/usage".into(),
+                now_fav: true
+            }
+        );
+        assert!(d.is_favorite("cpu/usage"));
+        assert_eq!(
+            d.apply_chart(Action::ToggleFavorite("cpu/usage".into())),
+            Effect::Favorite {
+                metric: "cpu/usage".into(),
+                now_fav: false
+            }
+        );
+    }
+
+    /// A range that does not parse is a warning, not a load; one that does
+    /// pins the window and asks for that slice.
+    #[test]
+    fn apply_range_invalid_warns_valid_loads() {
+        let mut d = device();
+        assert_eq!(
+            d.apply_chart(Action::SetRangeFrom("nope".into())),
+            Effect::None
+        );
+        assert_eq!(d.apply_chart(Action::ApplyRange), Effect::InvalidRange);
+        assert_eq!(
+            d.apply_chart(Action::SetRangeFrom("2026-09-22 10:00".into())),
+            Effect::None
+        );
+        assert_eq!(
+            d.apply_chart(Action::SetRangeTo("2026-09-22 11:00".into())),
+            Effect::None
+        );
+        match d.apply_chart(Action::ApplyRange) {
+            Effect::LoadRange { from, to } => assert!(from < to),
+            other => panic!("expected a load, got {other:?}"),
+        }
+        assert_eq!(d.apply_chart(Action::ClearRange), Effect::None);
+        assert!(d.chart_from_input.is_empty());
+    }
+
+    /// The pure interactions change state and ask nothing of the app.
+    #[test]
+    fn navigation_actions_have_no_effect() {
+        let mut d = device();
+        for a in [
+            Action::ZoomIn,
+            Action::ZoomOut,
+            Action::ZoomReset,
+            Action::PanLeft,
+            Action::PanRight,
+            Action::PanReset,
+            Action::DragStart(1.0),
+            Action::DragUpdate(5.0, 100.0),
+            Action::DragEnd,
+            Action::ToggleExpand,
+            Action::SetMetricFilter("cpu".into()),
+        ] {
+            assert_eq!(d.apply_chart(a), Effect::None);
+        }
+        assert!(d.chart_expanded);
     }
 }

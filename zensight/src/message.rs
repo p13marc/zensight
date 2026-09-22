@@ -4,7 +4,6 @@ use zensight_common::{
 };
 
 use crate::view::alerts::ComparisonOp;
-use crate::view::chart::TimeWindow;
 use crate::view::settings::ZenohMode;
 
 /// One telemetry sample, plus **who published it** (#474).
@@ -935,11 +934,10 @@ pub enum Message {
     /// facets into one host card via correlator entities, or show per-source.
     ToggleGroupByHost,
 
-    /// User selected a metric to graph (single-series mode).
-    SelectMetricForChart(String),
-
-    /// User cleared the chart selection.
-    ClearChartSelection,
+    /// One chart interaction on the selected device (#1306): the widgets and
+    /// the canvas emit `chart::Action`s, `DeviceDetailState::apply_chart`
+    /// applies them, and the app acts on the `chart::Effect` it hands back.
+    Chart(crate::view::chart::Action),
 
     /// Promote a metric to an alert rule (#50): seed the rule/expectation form
     /// with this metric + current value and open the authoring view. Netlink
@@ -949,68 +947,6 @@ pub enum Message {
         metric: String,
         value: f64,
     },
-
-    /// Add a metric to the comparison chart (multi-series mode).
-    AddMetricToChart(String),
-
-    /// Remove a metric from the comparison chart.
-    RemoveMetricFromChart(String),
-
-    /// Toggle visibility of a metric series in the chart.
-    ToggleMetricVisibility(String),
-
-    /// Toggle a metric's favorite/pin state on the selected device (#27).
-    ToggleMetricFavorite(String),
-
-    /// User changed the chart time window.
-    SetChartTimeWindow(TimeWindow),
-
-    /// User typed a custom relative window (minutes) for the chart (#36).
-    SetChartCustomMinutes(String),
-
-    /// User edited the absolute-range `from`/`to` inputs (#36).
-    SetChartRangeFrom(String),
-    SetChartRangeTo(String),
-
-    /// Apply the absolute `from`/`to` range — pins the window + loads it from the
-    /// store (#36).
-    ApplyChartRange,
-
-    /// Clear the absolute range, returning to the preset / custom window (#36).
-    ClearChartRange,
-
-    /// Toggle the chart panel between default and expanded height (#36).
-    ToggleChartExpand,
-
-    /// Zoom in on the chart.
-    ChartZoomIn,
-
-    /// Zoom out on the chart.
-    ChartZoomOut,
-
-    /// Reset chart zoom to 100%.
-    ChartZoomReset,
-
-    /// Pan chart left (back in time).
-    ChartPanLeft,
-
-    /// Pan chart right (forward in time).
-    ChartPanRight,
-
-    /// Reset chart pan to view current time.
-    ChartPanReset,
-
-    /// Start chart drag at position.
-    ChartDragStart(f32),
-
-    /// Update chart drag to position.
-    ChartDragUpdate(f32, f32),
-
-    /// End chart drag.
-    ChartDragEnd,
-
-    /// User changed the metric search filter.
-    SetMetricFilter(String),
 
     /// Tick for periodic UI updates (e.g., relative timestamps).
     Tick,
@@ -1308,45 +1244,9 @@ pub enum Message {
     /// Escape key pressed - close dialogs, clear selection, etc.
     EscapePressed,
 
-    // Group management messages
-    /// Open the groups management panel.
-    OpenGroupsPanel,
-
-    /// Close the groups management panel.
-    CloseGroupsPanel,
-
-    /// Set the group filter (None = show all).
-    SetGroupFilter(Option<u32>),
-
-    /// Set new group name in form.
-    SetNewGroupName(String),
-
-    /// Set new group color in form.
-    SetNewGroupColor(usize),
-
-    /// Add a new group from the form.
-    AddGroup,
-
-    /// Start editing a group.
-    EditGroup(u32),
-
-    /// Set edit group name.
-    SetEditGroupName(String),
-
-    /// Set edit group color.
-    SetEditGroupColor(usize),
-
-    /// Save group edit.
-    SaveGroupEdit,
-
-    /// Cancel group edit.
-    CancelGroupEdit,
-
-    /// Delete a group.
-    DeleteGroup(u32),
-
-    /// Toggle device assignment to a group.
-    ToggleDeviceGroup(DeviceId, u32),
+    /// One groups-panel interaction (#1306): `GroupsState::update` applies
+    /// it and says whether the set must be persisted.
+    Groups(crate::view::groups::Action),
 
     // Overview messages
     /// Select a producer tab for the overview section.

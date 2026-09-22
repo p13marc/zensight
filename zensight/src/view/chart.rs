@@ -3,7 +3,7 @@
 use iced::keyboard;
 use iced::mouse;
 use iced::widget::canvas::{
-    self, Action, Cache, Canvas, Event, Frame, Geometry, Path, Stroke, Text,
+    self, Action as CanvasAction, Cache, Canvas, Event, Frame, Geometry, Path, Stroke, Text,
 };
 use iced::{Color, Element, Length, Point, Rectangle, Renderer, Size, Theme};
 
@@ -12,6 +12,73 @@ use zensight_common::TelemetryValue;
 use super::components::kit;
 use super::formatting::{format_time_offset, format_value};
 use super::theme;
+
+/// One chart interaction on the selected device (#1306) — what the widgets
+/// and the canvas emit, in place of one `Message` variant each.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Action {
+    /// Graph one metric (single-series mode).
+    SelectMetric(String),
+    /// Clear the chart selection.
+    ClearSelection,
+    /// Add a metric to the comparison chart (multi-series mode).
+    AddMetric(String),
+    /// Remove a metric from the comparison chart.
+    RemoveMetric(String),
+    /// Toggle a series' visibility.
+    ToggleVisibility(String),
+    /// Toggle a metric's favorite/pin state on this device (#27).
+    ToggleFavorite(String),
+    /// A preset time window.
+    SetTimeWindow(TimeWindow),
+    /// A custom relative window, in minutes, as typed (#36).
+    SetCustomMinutes(String),
+    /// The absolute-range `from` input (#36).
+    SetRangeFrom(String),
+    /// The absolute-range `to` input (#36).
+    SetRangeTo(String),
+    /// Apply the absolute range: pin the window, then load that slice (#36).
+    ApplyRange,
+    /// Back to the preset / custom window (#36).
+    ClearRange,
+    /// Default ⇄ expanded panel height (#36).
+    ToggleExpand,
+    ZoomIn,
+    ZoomOut,
+    ZoomReset,
+    /// Back in time.
+    PanLeft,
+    /// Forward in time.
+    PanRight,
+    /// Back to now.
+    PanReset,
+    DragStart(f32),
+    DragUpdate(f32, f32),
+    DragEnd,
+    /// The metric search filter.
+    SetMetricFilter(String),
+}
+
+/// What the app has to do after a chart action, named in the chart's terms —
+/// the state change itself already happened in
+/// `DeviceDetailState::apply_chart`.
+#[must_use]
+#[derive(Debug, Clone, PartialEq)]
+pub enum Effect {
+    None,
+    /// A favorite flipped: the app keeps the persisted fleet-wide set.
+    Favorite {
+        metric: String,
+        now_fav: bool,
+    },
+    /// An absolute range was pinned: load that slice from the store.
+    LoadRange {
+        from: i64,
+        to: i64,
+    },
+    /// The from/to inputs did not parse, or from was not before to.
+    InvalidRange,
+}
 
 /// Map a timestamp to a horizontal fraction `[0,1]` of the plot area, centering
 /// the point when the time range is zero (single sample / all-same timestamp).
@@ -883,7 +950,7 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
         event: &Event,
         bounds: Rectangle,
         cursor: mouse::Cursor,
-    ) -> Option<Action<crate::message::Message>> {
+    ) -> Option<CanvasAction<crate::message::Message>> {
         match event {
             // Track Ctrl key state
             Event::Keyboard(keyboard::Event::ModifiersChanged(modifiers)) => {
@@ -897,21 +964,33 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
                     keyboard::Key::Character(c) => {
                         let c_str = c.as_str();
                         if c_str == "+" || c_str == "=" {
-                            return Some(Action::publish(crate::message::Message::ChartZoomIn));
+                            return Some(CanvasAction::publish(crate::message::Message::Chart(
+                                Action::ZoomIn,
+                            )));
                         } else if c_str == "-" || c_str == "_" {
-                            return Some(Action::publish(crate::message::Message::ChartZoomOut));
+                            return Some(CanvasAction::publish(crate::message::Message::Chart(
+                                Action::ZoomOut,
+                            )));
                         } else if c_str == "0" {
-                            return Some(Action::publish(crate::message::Message::ChartZoomReset));
+                            return Some(CanvasAction::publish(crate::message::Message::Chart(
+                                Action::ZoomReset,
+                            )));
                         }
                     }
                     keyboard::Key::Named(keyboard::key::Named::ArrowLeft) => {
-                        return Some(Action::publish(crate::message::Message::ChartPanLeft));
+                        return Some(CanvasAction::publish(crate::message::Message::Chart(
+                            Action::PanLeft,
+                        )));
                     }
                     keyboard::Key::Named(keyboard::key::Named::ArrowRight) => {
-                        return Some(Action::publish(crate::message::Message::ChartPanRight));
+                        return Some(CanvasAction::publish(crate::message::Message::Chart(
+                            Action::PanRight,
+                        )));
                     }
                     keyboard::Key::Named(keyboard::key::Named::Home) => {
-                        return Some(Action::publish(crate::message::Message::ChartPanReset));
+                        return Some(CanvasAction::publish(crate::message::Message::Chart(
+                            Action::PanReset,
+                        )));
                     }
                     _ => {}
                 }
@@ -927,9 +1006,13 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
                     };
 
                     if zoom_delta > 0.0 {
-                        return Some(Action::publish(crate::message::Message::ChartZoomIn));
+                        return Some(CanvasAction::publish(crate::message::Message::Chart(
+                            Action::ZoomIn,
+                        )));
                     } else if zoom_delta < 0.0 {
-                        return Some(Action::publish(crate::message::Message::ChartZoomOut));
+                        return Some(CanvasAction::publish(crate::message::Message::Chart(
+                            Action::ZoomOut,
+                        )));
                     }
                 }
                 None
@@ -941,8 +1024,8 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
                     && let Some(pos) = cursor.position()
                 {
                     state.dragging = true;
-                    return Some(Action::publish(crate::message::Message::ChartDragStart(
-                        pos.x,
+                    return Some(CanvasAction::publish(crate::message::Message::Chart(
+                        Action::DragStart(pos.x),
                     )));
                 }
                 None
@@ -951,9 +1034,8 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
             Event::Mouse(mouse::Event::CursorMoved { position }) => {
                 if state.dragging {
                     let chart_width = bounds.width - 100.0;
-                    return Some(Action::publish(crate::message::Message::ChartDragUpdate(
-                        position.x,
-                        chart_width,
+                    return Some(CanvasAction::publish(crate::message::Message::Chart(
+                        Action::DragUpdate(position.x, chart_width),
                     )));
                 }
                 None
@@ -962,7 +1044,9 @@ impl<'a> canvas::Program<crate::message::Message> for Chart<'a> {
             Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)) => {
                 if state.dragging {
                     state.dragging = false;
-                    return Some(Action::publish(crate::message::Message::ChartDragEnd));
+                    return Some(CanvasAction::publish(crate::message::Message::Chart(
+                        Action::DragEnd,
+                    )));
                 }
                 None
             }

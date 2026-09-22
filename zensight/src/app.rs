@@ -679,28 +679,15 @@ impl ZenSight {
         }
     }
 
-    /// Handle incoming messages.
-    /// #132: chart / metric-selection interactions, all scoped to the selected device.
-    ///
-    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
-    /// can fall through to the next handler.
-    fn update_chart(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
-        match message {
-            Message::SelectMetricForChart(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.select_metric(metric_name);
-                }
-            }
-
-            Message::ClearChartSelection => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.clear_chart_selection();
-                }
-            }
-
-            Message::ToggleMetricFavorite(metric) => {
-                if let Some(ref mut device) = self.selected_device {
-                    let now_fav = device.toggle_favorite(&metric);
+    /// Act on what a chart interaction reported (#1306): the favorite set
+    /// and the range load are the app's, the words for a bad range are the
+    /// chart's.
+    fn chart_effect(&mut self, effect: crate::view::chart::Effect) -> Task<Message> {
+        use crate::view::chart::Effect;
+        match effect {
+            Effect::None => Task::none(),
+            Effect::Favorite { metric, now_fav } => {
+                if let Some(device) = &self.selected_device {
                     let key = fav_key(&device.device_id, &metric);
                     if now_fav {
                         self.favorites.insert(key);
@@ -709,258 +696,26 @@ impl ZenSight {
                     }
                     self.save_favorites();
                 }
+                Task::none()
             }
-
-            Message::PromoteMetricToAlert {
-                device,
-                metric,
-                value,
-            } => {
-                // #50/#933. This used to branch on `protocol == Netlink`,
-                // because netlink was the only sensor with a channel that could
-                // receive a threshold; everything else was seeded into the
-                // GUI's local rule engine, whose alerts reached nothing — not
-                // the bus, not the exporters, not the notifier.
-                //
-                // Since #931 every producer evaluates the operator's
-                // `ThresholdsConfig` on its own publish path, so promotion goes
-                // to the sensor that publishes the metric, whichever it is.
-                use crate::view::expectations::ExpTarget;
-                let producer = device.producer.clone();
-                let origin = device.remote_origin();
-                if origin.is_none() {
-                    // No origin means no single host to address, and a
-                    // threshold rule is never a fleet-wide push. Say so rather
-                    // than opening a form that cannot submit.
-                    self.toasts.push(
-                        ToastSeverity::Error,
-                        format!(
-                            "No host known for {producer}/{} — a threshold rule is \
-                             addressed to one host",
-                            device.source
-                        ),
-                    );
-                    return ControlFlow::Break(Task::none());
-                }
-                self.expectations.target = ExpTarget::Thresholds;
-                self.expectations.thresholds_producer = producer;
-                self.expectations.thresholds_origin = origin;
-                self.expectations.thresholds_applied = None;
-                self.expectations.status_note = None;
-                self.expectations.new_metric = metric.clone();
-                self.expectations.new_value = format!("{value}");
-                self.expectations.new_name = slugify_rule_name(&metric);
-                // The rule fires when the metric goes ABOVE the value it has
-                // now, which is the assumption behind clicking "alert" on a
-                // number you are looking at. An operator who meant the other
-                // direction changes one pick-list.
-                self.expectations.new_op = zensight_common::ComparisonOp::GreaterThan;
-                self.set_view(CurrentView::Expectations);
-                // Read what the sensor is already running before anything is
-                // added to it — `thresholds/set` replaces wholesale.
-                return ControlFlow::Break(self.query_thresholds());
+            Effect::LoadRange { from, to } => {
+                // Pin the absolute window, then range-query the store so the
+                // chart shows that exact slice (not just whatever the hot ring
+                // holds).
+                let Some(device_id) = self.selected_device.as_ref().map(|d| d.device_id.clone())
+                else {
+                    return Task::none();
+                };
+                self.load_device_history_range(device_id, from, to)
             }
-
-            Message::AddMetricToChart(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.add_metric_to_chart(metric_name);
-                }
-            }
-
-            Message::RemoveMetricFromChart(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.remove_metric_from_chart(&metric_name);
-                }
-            }
-
-            Message::ToggleMetricVisibility(metric_name) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.toggle_metric_visibility(&metric_name);
-                }
-            }
-
-            Message::SetChartTimeWindow(window) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.set_time_window(window);
-                }
-            }
-
-            Message::SetChartCustomMinutes(input) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.set_chart_custom_minutes(input);
-                }
-            }
-
-            Message::ToggleChartExpand => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.toggle_chart_expand();
-                }
-            }
-
-            Message::SetChartRangeFrom(input) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.chart_from_input = input;
-                }
-            }
-
-            Message::SetChartRangeTo(input) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.chart_to_input = input;
-                }
-            }
-
-            Message::ApplyChartRange => {
-                // Pin the absolute window, then range-query the store so the chart
-                // shows that exact slice (not just whatever the hot ring holds).
-                if let Some((from, to)) = self
-                    .selected_device
-                    .as_mut()
-                    .and_then(|d| d.apply_chart_range())
-                {
-                    let device_id = self.selected_device.as_ref().unwrap().device_id.clone();
-                    return ControlFlow::Break(self.load_device_history_range(device_id, from, to));
-                }
+            Effect::InvalidRange => {
                 self.toasts.push(
                     ToastSeverity::Warning,
                     "Enter a valid from/to range (YYYY-MM-DD HH:MM, from before to)".to_string(),
                 );
+                Task::none()
             }
-
-            Message::ClearChartRange => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.clear_chart_range();
-                }
-            }
-
-            Message::ChartZoomIn => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.zoom_in();
-                }
-            }
-
-            Message::ChartZoomOut => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.zoom_out();
-                }
-            }
-
-            Message::ChartZoomReset => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.reset_zoom();
-                }
-            }
-
-            Message::ChartPanLeft => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.pan_left();
-                }
-            }
-
-            Message::ChartPanRight => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.pan_right();
-                }
-            }
-
-            Message::ChartPanReset => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.reset_pan();
-                }
-            }
-
-            Message::ChartDragStart(x) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.start_drag(x);
-                }
-            }
-
-            Message::ChartDragUpdate(x, width) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.update_drag(x, width);
-                }
-            }
-
-            Message::ChartDragEnd => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.end_drag();
-                }
-            }
-
-            Message::SetMetricFilter(filter) => {
-                if let Some(ref mut device) = self.selected_device {
-                    device.set_metric_filter(filter);
-                }
-            }
-            other => return ControlFlow::Continue(other),
         }
-        ControlFlow::Break(Task::none())
-    }
-
-    /// #132: device-group management.
-    ///
-    /// Returns `Err(message)` for anything it does not own so [`Self::update`]
-    /// can fall through to the next handler.
-    fn update_groups(&mut self, message: Message) -> ControlFlow<Task<Message>, Message> {
-        match message {
-            // Group management messages
-            Message::OpenGroupsPanel => {
-                self.groups.open_panel();
-            }
-
-            Message::CloseGroupsPanel => {
-                self.groups.close_panel();
-            }
-
-            Message::SetGroupFilter(group_id) => {
-                self.groups.set_filter(group_id);
-            }
-
-            Message::SetNewGroupName(name) => {
-                self.groups.new_group_name = name;
-            }
-
-            Message::SetNewGroupColor(index) => {
-                self.groups.new_group_color = index;
-            }
-
-            Message::AddGroup => {
-                self.groups.add_group_from_form();
-                self.save_groups();
-            }
-
-            Message::EditGroup(group_id) => {
-                self.groups.start_editing(group_id);
-            }
-
-            Message::SetEditGroupName(name) => {
-                self.groups.edit_name = name;
-            }
-
-            Message::SetEditGroupColor(index) => {
-                self.groups.edit_color = index;
-            }
-
-            Message::SaveGroupEdit => {
-                self.groups.save_edit();
-                self.save_groups();
-            }
-
-            Message::CancelGroupEdit => {
-                self.groups.cancel_edit();
-            }
-
-            Message::DeleteGroup(group_id) => {
-                self.groups.delete_group(group_id);
-                self.save_groups();
-            }
-
-            Message::ToggleDeviceGroup(device_id, group_id) => {
-                self.groups.toggle_assignment(&device_id, group_id);
-                self.save_groups();
-            }
-            other => return ControlFlow::Continue(other),
-        }
-        ControlFlow::Break(Task::none())
     }
 
     /// #132: topology canvas interactions plus flow / neighbor edge replies.
@@ -1819,14 +1574,6 @@ impl ZenSight {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         // #132: per-domain handlers — each consumes the message and returns a
         // Task, or hands the message back (Err) for the next handler / the match.
-        let message = match self.update_chart(message) {
-            ControlFlow::Break(t) => return t,
-            ControlFlow::Continue(m) => m,
-        };
-        let message = match self.update_groups(message) {
-            ControlFlow::Break(t) => return t,
-            ControlFlow::Continue(m) => m,
-        };
         let message = match self.update_topology_msg(message) {
             ControlFlow::Break(t) => return t,
             ControlFlow::Continue(m) => m,
@@ -1840,6 +1587,71 @@ impl ZenSight {
             ControlFlow::Continue(m) => m,
         };
         match message {
+            // Per-view actions (#1306): the view's state applies the action
+            // and names what the app must do about it.
+            Message::Chart(action) => {
+                if let Some(device) = self.selected_device.as_mut() {
+                    let effect = device.apply_chart(action);
+                    return self.chart_effect(effect);
+                }
+            }
+
+            Message::Groups(action) => {
+                if self.groups.update(action) == crate::view::groups::Effect::Persist {
+                    self.save_groups();
+                }
+            }
+
+            Message::PromoteMetricToAlert {
+                device,
+                metric,
+                value,
+            } => {
+                // #50/#933. This used to branch on `protocol == Netlink`,
+                // because netlink was the only sensor with a channel that could
+                // receive a threshold; everything else was seeded into the
+                // GUI's local rule engine, whose alerts reached nothing — not
+                // the bus, not the exporters, not the notifier.
+                //
+                // Since #931 every producer evaluates the operator's
+                // `ThresholdsConfig` on its own publish path, so promotion goes
+                // to the sensor that publishes the metric, whichever it is.
+                use crate::view::expectations::ExpTarget;
+                let producer = device.producer.clone();
+                let origin = device.remote_origin();
+                if origin.is_none() {
+                    // No origin means no single host to address, and a
+                    // threshold rule is never a fleet-wide push. Say so rather
+                    // than opening a form that cannot submit.
+                    self.toasts.push(
+                        ToastSeverity::Error,
+                        format!(
+                            "No host known for {producer}/{} — a threshold rule is \
+                             addressed to one host",
+                            device.source
+                        ),
+                    );
+                    return Task::none();
+                }
+                self.expectations.target = ExpTarget::Thresholds;
+                self.expectations.thresholds_producer = producer;
+                self.expectations.thresholds_origin = origin;
+                self.expectations.thresholds_applied = None;
+                self.expectations.status_note = None;
+                self.expectations.new_metric = metric.clone();
+                self.expectations.new_value = format!("{value}");
+                self.expectations.new_name = slugify_rule_name(&metric);
+                // The rule fires when the metric goes ABOVE the value it has
+                // now, which is the assumption behind clicking "alert" on a
+                // number you are looking at. An operator who meant the other
+                // direction changes one pick-list.
+                self.expectations.new_op = zensight_common::ComparisonOp::GreaterThan;
+                self.set_view(CurrentView::Expectations);
+                // Read what the sensor is already running before anything is
+                // added to it — `thresholds/set` replaces wholesale.
+                return self.query_thresholds();
+            }
+
             Message::TelemetryReceived(point) => {
                 self.handle_telemetry(point);
             }
@@ -10014,11 +9826,10 @@ mod update_routing_tests {
     #[test]
     fn handler_claims_its_own_domain() {
         let mut a = app();
-        // Chart interactions are owned by update_chart even with no device open.
-        assert!(matches!(
-            a.update_chart(Message::ChartZoomIn),
-            ControlFlow::Break(_)
-        ));
+        // A chart action with no device open is applied to nothing and asks
+        // for nothing (#1306).
+        let _ = a.update(Message::Chart(crate::view::chart::Action::ZoomIn));
+        assert!(a.selected_device.is_none());
         // Syslog panel toggle is owned by update_syslog.
         assert!(matches!(
             a.update_syslog(Message::ToggleSyslogFilterPanel),
@@ -10041,10 +9852,6 @@ mod update_routing_tests {
         // None of these handlers own ToggleTheme — each must hand it back so a
         // later stage (here, the main match) gets a chance.
         assert!(matches!(
-            a.update_chart(Message::ToggleTheme),
-            ControlFlow::Continue(_)
-        ));
-        assert!(matches!(
             a.update_detail(Message::ToggleTheme),
             ControlFlow::Continue(_)
         ));
@@ -10057,7 +9864,7 @@ mod update_routing_tests {
     #[test]
     fn update_falls_through_to_main_match() {
         let mut a = app();
-        // ToggleTheme is owned by the main match, past all five handlers; routing
+        // ToggleTheme is owned by the main match, past every handler; routing
         // must reach it and flip the theme.
         let was_dark = matches!(a.theme, AppTheme::Dark);
         let _ = a.update(Message::ToggleTheme);

@@ -8,9 +8,11 @@ and gives a one-paragraph tour of each routable view.
 
 Each view owns a plain state struct that holds everything it renders, and a free
 `*_view(&state) -> Element<Message>` function that renders it. State is mutated
-only in the app's `update` loop in response to a `Message`; view functions are
-pure (state in, widgets out), which is what makes them testable in isolation
-(see [`testing.md`](testing.md)). Representative state structs:
+only by the app's `update` loop in response to a `Message` — either directly,
+or through the view's own `State::update(Action) -> Effect` (below), which is
+pure and unit-tested; view functions are pure (state in, widgets out), which is
+what makes them testable in isolation (see [`testing.md`](testing.md)).
+Representative state structs:
 
 | State | View | Holds |
 |-------|------|-------|
@@ -25,6 +27,39 @@ Views that need per-protocol drill-downs live under `view/specialized/`
 (`netlink`, `netring`, `sysinfo`, `syslog`, …), each pairing an overview module
 with a `*_detail.rs` tabbed detail panel. Cross-protocol summary panels live
 under `view/overview/`.
+
+### Actions and effects (#1306)
+
+A view's interactions are one `Message` variant carrying the view's own
+`Action` enum, not one variant each. The view module declares the `Action`
+(one variant per interaction, typed payloads) and an `Effect` naming what the
+app has to do about it in the view's terms; the state applies the action and
+hands the effect back, so the state change is pure and unit-tested without the
+app, and the app's arm is one line:
+
+```rust
+Message::Groups(action) => {
+    if self.groups.update(action) == groups::Effect::Persist {
+        self.save_groups();
+    }
+}
+```
+
+An effect is a persist hook (`Persist`), a named outcome the app turns into a
+`Task` (`chart::Effect::LoadRange { from, to }` → the store range query), or
+the words for a toast (`chart::Effect::InvalidRange`). The sub-enum never sees
+a `Task`, the session or another view's state; a clock-needing action takes
+`now_ms` as an argument. The groups that have moved:
+
+| View | `Action` | `Effect` variants |
+|------|----------|-------------------|
+| chart (on `DeviceDetailState::apply_chart`) | `chart::Action` — select/add/remove/toggle series, windows, ranges, zoom/pan/drag, the filter | `Favorite { metric, now_fav }`, `LoadRange { from, to }`, `InvalidRange` |
+| groups (`GroupsState::update`) | `groups::Action` — panel, filter, the two forms, delete, membership | `Persist` |
+
+Kept as top-level variants by design: navigation (`Open*`/`Close*`), wire
+ingress, `Call`/`Reply`/`Batch`/`Arm`/`Confirm`/`Written`, and the few
+app-wide toggles (`ToggleTheme`, `ToggleGroupByHost`, `SetFocusHost`) whose
+effect is the app's own state.
 
 ### Producer-agnostic intake (#1256)
 
