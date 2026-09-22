@@ -11,6 +11,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use zensight_common::registry::systemd::Subject;
 use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{Publisher, SensorHealth};
 
@@ -416,9 +417,8 @@ impl SystemdCollector {
         }
 
         let n = points.len();
-        for point in &points {
-            let suffix = point.metric.clone();
-            if let Err(e) = self.publisher.publish(&suffix, point).await {
+        for (subject, point) in &points {
+            if let Err(e) = self.publisher.publish_subject(subject, point).await {
                 tracing::warn!(error = %e, metric = %point.metric, "publish failed");
             } else {
                 self.health.record_metrics_published(1);
@@ -510,26 +510,32 @@ pub fn build_points(
     counts: &ManagerCounts,
     boot: Option<&BootTimestamps>,
     aggregates: Option<&Aggregates>,
-) -> Vec<TelemetryPoint> {
-    let gauge = |metric: &str, v: f64| {
-        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
+) -> Vec<crate::map::Built> {
+    let gauge = |subject: Subject, v: f64| {
+        let point = TelemetryPoint::for_subject(source, &subject, TelemetryValue::Gauge(v));
+        (subject, point)
     };
     let mut points = vec![
-        gauge("manager/n_names", counts.n_names as f64),
-        gauge("manager/n_failed_units", counts.n_failed_units as f64),
-        gauge("manager/n_jobs", counts.n_jobs as f64),
-        gauge("manager/n_installed_jobs", counts.n_installed_jobs as f64),
+        gauge(Subject::ManagerNNames, counts.n_names as f64),
+        gauge(Subject::ManagerNFailedUnits, counts.n_failed_units as f64),
+        gauge(Subject::ManagerNJobs, counts.n_jobs as f64),
+        gauge(
+            Subject::ManagerNInstalledJobs,
+            counts.n_installed_jobs as f64,
+        ),
     ];
     if let Some(a) = aggregates {
-        points.push(gauge("units/total", a.total as f64));
-        points.push(gauge("units/active", a.active as f64));
-        points.push(gauge("units/failed", a.failed as f64));
-        points.push(gauge("units/loaded", a.loaded as f64));
-        points.push(gauge("units/inactive", a.inactive as f64));
+        points.push(gauge(Subject::UnitsTotal, a.total as f64));
+        points.push(gauge(Subject::UnitsActive, a.active as f64));
+        points.push(gauge(Subject::UnitsFailed, a.failed as f64));
+        points.push(gauge(Subject::UnitsLoaded, a.loaded as f64));
+        points.push(gauge(Subject::UnitsInactive, a.inactive as f64));
     }
     if let Some(ts) = boot {
         for (phase, usec) in boot_phases(*ts) {
-            points.push(gauge(&format!("boot/{phase}_usec"), usec as f64));
+            // `{phase}` binds the whole chunk, `<phase>_usec` — a legal chunk
+            // the builder passes through.
+            points.push(gauge(Subject::boot(format!("{phase}_usec")), usec as f64));
         }
     }
     points
@@ -758,15 +764,21 @@ mod tests {
             Some(&BootTimestamps::default()),
             Some(&agg),
         );
-        let by: std::collections::HashMap<_, _> =
-            pts.iter().map(|p| (p.metric.as_str(), &p.value)).collect();
+        let by: std::collections::HashMap<_, _> = pts
+            .iter()
+            .map(|(_, p)| (p.metric.as_str(), &p.value))
+            .collect();
         assert_eq!(by["manager/n_failed_units"], &TelemetryValue::Gauge(2.0));
         assert_eq!(by["units/total"], &TelemetryValue::Gauge(300.0));
         assert!(by.contains_key("boot/total_usec"));
-        assert_eq!(pts[0].source, "host01");
+        assert_eq!(pts[0].1.source, "host01");
         // Gating: no units, no boot → only the 4 manager scalars.
         let scalar_only = build_points("host01", &counts, None, None);
         assert_eq!(scalar_only.len(), 4);
-        assert!(scalar_only.iter().all(|p| p.metric.starts_with("manager/")));
+        assert!(
+            scalar_only
+                .iter()
+                .all(|(_, p)| p.metric.starts_with("manager/"))
+        );
     }
 }

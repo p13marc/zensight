@@ -51,8 +51,10 @@ fn full_unit() -> UnitSample {
 #[test]
 fn every_registered_family_has_an_emitter() {
     let mut emitted: Vec<String> = Vec::new();
-    let mut push = |pts: Vec<zensight_common::TelemetryPoint>| {
-        emitted.extend(pts.into_iter().map(|p| p.metric));
+    // The builders hand back the subject beside the point (#1274); the
+    // point's metric is the subject's tail, which is what this audit reads.
+    let mut push = |pts: Vec<map::Built>| {
+        emitted.extend(pts.into_iter().map(|(_, p)| p.metric));
     };
 
     push(map::unit_points("h", &full_unit()));
