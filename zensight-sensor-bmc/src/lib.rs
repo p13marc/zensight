@@ -63,9 +63,18 @@
 /// becomes an LWW ghost nothing ever overwrites.
 ///
 pub fn chassis_chunk(endpoint: &str, chassis_id: &str) -> String {
-    zensight_sensor_core::key::device_chunk(format!("{endpoint}-{chassis_id}"))
+    zensight_sensor_core::key::device_chunk(chassis_value(endpoint, chassis_id))
         .as_str()
         .to_string()
+}
+
+/// The `{chassis}` value **before** it is a chunk — what the generated
+/// telemetry builders take (#1274). The builder slugs it exactly as
+/// [`chassis_chunk`] does, once; handing it the chunk would escape it a
+/// second time (the slug is injective), so a key site uses this and a state
+/// key or a label uses [`chassis_chunk`], and the two name the same chassis.
+pub fn chassis_value(endpoint: &str, chassis_id: &str) -> String {
+    format!("{endpoint}-{chassis_id}")
 }
 
 /// The chunk for a fact about the **endpoint** rather than about any one
@@ -83,4 +92,78 @@ pub mod config;
 pub mod ipmi;
 pub mod poller;
 pub mod redfish;
-mod telemetry_guard;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zensight_common::registry::bmc::Subject;
+    use zensight_common::subject::TelemetrySubject;
+
+    /// Every telemetry family renders the tail it rendered when the chunks
+    /// were spelled by hand (#1274): the builder is handed the raw
+    /// `endpoint-chassis` pair and the raw component id.
+    #[test]
+    fn typed_subjects_render_the_hand_spelled_tails() {
+        let raw = chassis_value("rack-a", "1");
+        let cases = [
+            (Subject::psu_present(&raw, "0"), "rack-a-1/psu/0/present"),
+            (
+                Subject::psu_input_watts(&raw, "0"),
+                "rack-a-1/psu/0/input_watts",
+            ),
+            (
+                Subject::psu_output_watts(&raw, "0"),
+                "rack-a-1/psu/0/output_watts",
+            ),
+            (
+                Subject::psu_capacity_watts(&raw, "0"),
+                "rack-a-1/psu/0/capacity_watts",
+            ),
+            (Subject::fan_rpm(&raw, "3"), "rack-a-1/fan/3/rpm"),
+            (
+                Subject::thermal_celsius(&raw, "cpu1"),
+                "rack-a-1/thermal/cpu1/celsius",
+            ),
+            (
+                Subject::thermal_upper_critical_c(&raw, "cpu1"),
+                "rack-a-1/thermal/cpu1/upper_critical_c",
+            ),
+            (
+                Subject::thermal_upper_warning_c(&raw, "cpu1"),
+                "rack-a-1/thermal/cpu1/upper_warning_c",
+            ),
+            (
+                Subject::drive_life_left_percent(&raw, "0"),
+                "rack-a-1/drive/0/life_left_percent",
+            ),
+            (Subject::reachable("rack-a"), "rack-a/reachable"),
+        ];
+        for (subject, tail) in cases {
+            assert_eq!(subject.tail(), tail, "{subject:?}");
+        }
+    }
+
+    /// The builder's slug is `device_chunk`'s, applied once: the `{chassis}`
+    /// chunk a telemetry key carries is the chunk the state key and the
+    /// `chassis` label carry, for a legal id and a foreign one alike.
+    #[test]
+    fn the_builder_slugs_as_the_chunk_helpers_do() {
+        for (endpoint, id) in [
+            ("rack-a", "1"),
+            ("Rack A", "Self"),
+            ("bmc.example", "Enclosure 2"),
+        ] {
+            let subject = Subject::psu_present(chassis_value(endpoint, id), "Bay 1");
+            let vars = subject.vars();
+            assert_eq!(vars[0], ("chassis", chassis_chunk(endpoint, id)));
+            assert_eq!(
+                vars[1].1,
+                zensight_sensor_core::key::device_chunk("Bay 1")
+                    .as_str()
+                    .to_string()
+            );
+            let reachable = Subject::reachable(endpoint);
+            assert_eq!(reachable.vars()[0].1, endpoint_chunk(endpoint));
+        }
+    }
+}
