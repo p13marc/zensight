@@ -57,6 +57,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
+  A 22-hour outage of `forgejo.service` on a live host reported green
+  throughout: the deployment's watchdog had five `origin-down` rules, which
+  judge host liveness, and the host was fine. The section names the three
+  sensors that catch a service down on a live host (`systemd`'s
+  `expect-service-active`, `hostspec`'s `listening:`, `probe`'s HTTP check),
+  the one line each needs, the fleet-wide `"systemd/expectations"` route
+  through the policy file, and the alert selector a watchdog or notifier must
+  GET-seed. The systemd sensor's docs and the shipped config now say that
+  `inactive` is not `failed`: a stopped or OOM-killed unit fires no threshold
+  rule, only the sentinel. The vocabulary half — a watchdog rule over the alert
+  plane — is marcpardo/zenkey#463; a seeding bug in `zenwatch`'s `alerts` rule
+  found on the way is marcpardo/zenkey#464.
+
 - **The subscription follows the definition** (#1262, gate 6 of #1253 —
   the last: the system-view ratchet wears no `should_panic` any more, and a
   producer this GUI was never compiled with is seen, modelled, rendered,

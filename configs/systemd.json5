@@ -92,10 +92,17 @@
     // the sentinel itself runs whenever alerting is on, so a host with no block
     // still receives a set authored fleet-wide on @desired (#849). Omit it to
     // start empty; `alerts.enabled: false` turns the sentinel off.
+    //
+    // WITHOUT a services_active entry a STOPPED service pages nobody: the
+    // threshold rules see `failed`, not `inactive`, and a clean stop or an
+    // OOM kill is `inactive`. A 22 h outage of the fleet's most important
+    // service once reported green throughout for exactly this reason (#1286).
+    // Name every service whose absence should page, here or in the fleet
+    // policy file ("systemd/expectations", docs/DEPLOYMENT.md §8).
     // expectations: {
     //   eval_interval_secs: 10,
     //   for_secs: 15,
-    //   services_active: [{ unit: "sshd.service" }],
+    //   services_active: [{ unit: "sshd.service" }, { unit: "forgejo.service" }],
     //   targets_active: [{ target: "multi-user.target" }],
     //   // Two timer strengths (#824): `within_secs` proves the timer FIRED;
     //   // `succeeded_within_secs` proves it fired AND its service's last run

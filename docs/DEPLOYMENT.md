@@ -404,3 +404,87 @@ On the GUI machine, after starting a container on another host you should see:
 - `podman logs zensight-sensors` on the monitored machine: the detected
   capture interface, no preflight WARNs (if all mounts were given), and
   per-sensor startup lines.
+
+## 8. Supervising services, not just hosts
+
+Everything above proves a **host** is alive: its sensors publish, the catalog
+lists it, a watchdog `origin-down` rule sees its liveliness token. None of it
+says whether the *service the host exists for* is running. On 2026-09-21
+`forgejo.service` was OOM-killed on a host whose sensors kept reporting
+normally for the 22 hours it stayed down, and a watchdog configured with five
+`origin-down` rules said `ok` throughout — truthfully, because the host was
+fine (#1286). A monitor that is confidently green during a total outage is
+worse than none, so this section is about the three sensors that catch a
+service down on a live host, and the one line each needs.
+
+**Nothing below is on by default.** A stock install alerts on a host going
+silent, a disk filling, a unit entering `failed` — and on nothing about a unit
+that was *stopped*: a clean exit, an OOM kill, a dependency that never came
+up all leave a unit `inactive`, and `inactive` is not `failed` to any
+threshold rule. What follows has to be written down, once, per service that
+matters.
+
+| The question | Sensor | The line | Fires as |
+|---|---|---|---|
+| Is the unit active? | `systemd` sentinel | `services_active: [{ unit: "forgejo.service" }]` | `expect-service-active`, critical |
+| Does it answer on its port? | `hostspec` | `listening: [{ name: "forge", port: 3000, severity: "critical" }]` | `listen:forge`, critical |
+| Does the public URL answer 200 with the right body? | `probe` (from another host) | `{ name: "forge", kind: "http", target: "https://…", expect_status: [200], expect_body: "Forgejo" }` | `probe-down` / `probe-timeout`, critical |
+
+They overlap on purpose. The unit can be active with its socket closed; the
+socket can be open on a host the world cannot reach; the probe runs from
+**outside** and is the only one that needs no sensor on the target at all. All
+three are read-only, and all three publish the same document family —
+`zensight/v1/<origin>/state/<producer>/alert/<alert_key>`, `Put` while firing,
+tombstoned on resolve — so every consumer already watching alerts (the GUI,
+both exporters, the historian, a notifier) sees them without configuration.
+
+### Write it once, fleet-wide
+
+The `systemd` and `hostspec` expectation sets are `@desired` documents, so the
+place to write them is the policy file from §6, not eighteen host configs:
+
+```json5
+{
+  name: "forge-hosts",
+  extends: ["all-hosts"],
+  matches: { any: [{ hostname_glob: "vm-apps-*" }] },
+  docs: {
+    "systemd/expectations": {
+      services_active: [{ unit: "forgejo.service" }, { unit: "postgresql.service" }],
+      forbid_failed: true,
+    },
+    "hostspec/expectations": {
+      listening: [{ name: "forge", port: 3000, severity: "critical" }],
+    },
+  },
+}
+```
+
+The sentinel runs whenever alerting is on, with or without a local
+`expectations` block, precisely so a host with no block still receives the set
+the controller publishes; `state/systemd/applied/expectations` says which
+writer's set is in force. Probe targets are the exception — a probe is a
+client of the *target*, configured on whichever host runs it, so they live in
+that host's `probe.json5`.
+
+### What a watchdog needs to read
+
+`zenctl watchdog`'s rules judge the **bus**: a stream's rate, silence,
+validity, QoS, an origin's presence. They are the right tool for "is the
+monitoring itself alive" and the wrong one for "is the service alive", because
+the sensors above have already made that judgement and published it. The
+selector a watchdog or notifier has to consume is the fleet-wide firing set
+
+```
+zensight/v1/*/state/*/alert/*
+```
+
+and it has to **GET it at start, not only subscribe**: a firing alert is
+republished on a content change, not on a schedule, so a subscriber that
+starts mid-incident sees nothing until the incident *changes*. Every consumer
+in this tree seeds that way; `zenwatch`'s `alerts` rule does not yet
+(marcpardo/zenkey#464), and `zenctl watchdog` has no rule over the alert plane
+at all — `alert-firing <SEL> [<MIN-SEVERITY>]` is asked for as
+marcpardo/zenkey#463. Until it lands, a deployment's supervision of
+supervision is: `origin-down` per host for liveness, plus a notifier on the
+selector above for everything the sensors judge.
