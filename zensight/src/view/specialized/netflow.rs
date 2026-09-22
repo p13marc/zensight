@@ -34,6 +34,14 @@ use crate::view::icons::{self, IconSize};
 use crate::view::theme;
 use crate::view::tokens::{font, space};
 
+/// The `flows` call's params: how many records to ask the sensor's ring for.
+const FLOWS_PARAMS: &str = "max=200";
+
+/// The fetched flow ring, when the `flows` call answered with one (#1261).
+fn flows(state: &DeviceDetailState) -> Option<&Vec<NetflowRecord>> {
+    state.calls.decoded("flows").and_then(Result::ok)
+}
+
 /// IANA protocol number → name, for the handful that actually show up. NetFlow
 /// carries the number; a human reads the name.
 fn protocol_name(proto: u8) -> &'static str {
@@ -306,7 +314,7 @@ fn render_top_talkers(state: &DeviceDetailState) -> Element<'_, Message> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let Some(records) = state.netflow_detail.flows.ready() else {
+    let Some(records) = flows(state) else {
         return column![
             title,
             empty_state("Fetch the flow ring below to see talkers.", None)
@@ -375,23 +383,35 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
     .spacing(8)
     .align_y(Alignment::Center);
 
-    let detail = &state.netflow_detail;
+    let calls = &state.calls;
 
-    if detail.flows.is_loading() {
+    if calls.is_loading("flows") {
         return column![title, empty_state("Fetching the flow ring…", None)]
             .spacing(10)
             .into();
     }
-    if let Some(err) = detail.flows.error() {
+    if let Some(err) = calls.fetch("flows").error() {
         return column![title, empty_state(format!("Fetch failed: {err}"), None)]
             .spacing(10)
             .into();
     }
     let fetch = button(text("Fetch flows").size(font::CAPTION))
         .padding([4, 10])
-        .on_press(Message::FetchNetflowFlows);
+        .on_press(Message::Call {
+            procedure: "flows".into(),
+            params: FLOWS_PARAMS.into(),
+        });
 
-    let Some(records) = detail.flows.ready() else {
+    let fetched = match calls.decoded::<Vec<NetflowRecord>>("flows") {
+        Some(Ok(records)) => Some(records),
+        Some(Err(err)) => {
+            return column![title, empty_state(format!("Fetch failed: {err}"), None)]
+                .spacing(space::SM)
+                .into();
+        }
+        None => None,
+    };
+    let Some(records) = fetched else {
         return column![
             title,
             text(
@@ -413,6 +433,7 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
         .spacing(10)
         .into();
     }
+    let default_table = crate::view::components::TableState::default();
 
     let columns = vec![
         TableColumn::fill("source", 3, |r: &NetflowRecord| {
@@ -453,11 +474,19 @@ fn render_flow_table(state: &DeviceDetailState) -> Element<'_, Message> {
                 let t = Tuple::of(r);
                 format!("{} {}", t.src_endpoint(), t.dst_endpoint())
             })
-            .on_sort(Message::NetflowTableSort)
-            .on_filter(Message::NetflowTableFilter)
-            .on_more(Message::NetflowTableMore)
+            .on_sort(|column| Message::DetailTableSort {
+                table: "flows".into(),
+                column,
+            })
+            .on_filter(|query| Message::DetailTableFilter {
+                table: "flows".into(),
+                query,
+            })
+            .on_more(Message::DetailTableMore {
+                table: "flows".into(),
+            })
             .noun("flows")
-            .view(records, &detail.table),
+            .view(records, state.tables.get("flows").unwrap_or(&default_table)),
     ]
     .spacing(10)
     .into()
@@ -519,9 +548,11 @@ mod tests {
     fn the_flow_table_renders_fetched_records() {
         let device_id = DeviceId::fixture("netflow", "router01");
         let mut state = DeviceDetailState::new(device_id);
-        state
-            .netflow_detail
-            .apply(Ok(vec![record("10.0.0.5", "1.1.1.1", 6, 4096)]));
+        state.calls.set_ready(
+            "flows",
+            FLOWS_PARAMS,
+            serde_json::to_value(vec![record("10.0.0.5", "1.1.1.1", 6, 4096)]).unwrap(),
+        );
 
         let mut ui = iced_test::simulator(netflow_traffic_view(&state));
         assert!(ui.find("10.0.0.5:51234").is_ok());

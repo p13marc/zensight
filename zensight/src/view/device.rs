@@ -66,6 +66,17 @@ fn current_timestamp() -> i64 {
         .unwrap_or(0)
 }
 
+/// A pivot into a device view (#313): what the user came to see, carried
+/// from the view that offered the pivot. A view that has no use for the
+/// pivot ignores it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pivot {
+    /// One process, from a unit's MainPID or a socket's owner. `start_time`
+    /// is the `(pid, start_time)` identity pair — the stale-generation
+    /// guard: a reused pid renders as "exited", never as the wrong process.
+    Process { pid: i32, start_time: Option<u64> },
+}
+
 /// State for the device detail view.
 #[derive(Debug)]
 pub struct DeviceDetailState {
@@ -100,15 +111,21 @@ pub struct DeviceDetailState {
     /// On-demand netring flow detail, fetched lazily from `@rpc/netring/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
     pub systemd_detail: crate::view::specialized::systemd_detail::SystemdDetailState,
-    /// On-demand NetFlow record ring, fetched lazily from `@rpc/netflow/flows`
-    /// (#469). NetFlow publishes only rollups — the per-flow detail is pulled.
-    pub netflow_detail: crate::view::specialized::netflow_detail::NetflowDetailState,
     /// Parallax stream catalogue + live preview tiles, fetched/opened on
     /// demand from the sensor's stream-control channels (#408).
     pub parallax_detail: crate::view::specialized::parallax_detail::ParallaxDetailState,
-    /// On-demand sysinfo process explorer, fetched lazily from
-    /// `@rpc/sysinfo/processes` (#47).
-    pub sysinfo_detail: crate::view::specialized::sysinfo_detail::SysinfoDetailState,
+    /// The read procedures this view has called, by procedure path
+    /// (#1261): the generic answer store every on-demand panel reads —
+    /// bespoke ones decode a type from it, the default view renders it as
+    /// it came.
+    pub calls: crate::call::Calls,
+    /// UI state (sort, filter, page) of the on-demand tables a view draws,
+    /// by the name the view gives each (#1261).
+    pub tables: std::collections::BTreeMap<String, crate::view::components::TableState>,
+    /// How the user arrived, when it was a pivot (#313): the process
+    /// explorer's pid filter with its stale-generation guard. `None` is the
+    /// plain view.
+    pub pivot: Option<Pivot>,
     /// SNMP device detail (#530): the joined `InterfaceTable` state doc
     /// (LWW off the bus) + interface-table UI state.
     pub snmp_detail: crate::view::specialized::snmp::SnmpDetailState,
@@ -179,9 +196,10 @@ impl DeviceDetailState {
             netlink_detail: Default::default(),
             netring_detail: Default::default(),
             systemd_detail: Default::default(),
-            netflow_detail: Default::default(),
             parallax_detail: Default::default(),
-            sysinfo_detail: Default::default(),
+            calls: Default::default(),
+            tables: Default::default(),
+            pivot: None,
             snmp_detail: Default::default(),
             chart_expanded: false,
             chart_custom_input: String::new(),
@@ -1193,6 +1211,9 @@ fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
         }
     }
     body = body.push(metrics);
+    if let Some(procedures) = render_procedures(state) {
+        body = body.push(procedures);
+    }
     if !state.documents.is_empty() {
         body = body.push(render_documents(state));
     }
@@ -1200,6 +1221,196 @@ fn generic_device_body(state: &DeviceDetailState) -> Element<'_, Message> {
         body = body.push(render_events(state));
     }
     body.into()
+}
+
+/// How many rows of a reply the generic renderer draws.
+const REPLY_ROWS: usize = 200;
+
+/// The fields that identify a row of a reply, in order of preference.
+const ID_KEYS: [&str; 8] = ["id", "pid", "name", "unit", "target", "key", "path", "host"];
+
+/// The read procedures a device's slice declares and the GUI can call with
+/// no request (#1261, design §5.5): a card per procedure with its reply
+/// type and description, a call button, and the answer rendered as the
+/// reply's own shape — rows of objects as a table, an object as facts. What
+/// a producer the GUI was not compiled with can still be asked. `None`
+/// when the slice declares nothing callable, or is unknown.
+fn render_procedures(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
+    use crate::view::components::card;
+    use crate::view::specialized::fetch::Fetch;
+    let family = state.family.as_ref()?;
+    let procedures: Vec<&crate::view::family::Procedure> = family.callable().collect();
+    if procedures.is_empty() {
+        return None;
+    }
+    let mut col =
+        column![text("Procedures").size(font::EMPHASIS)].spacing(crate::view::tokens::space::SM);
+    for procedure in procedures {
+        let fetch = state.calls.fetch(&procedure.path);
+        let mut head = row![text(procedure.path.clone()).size(font::BODY)]
+            .spacing(crate::view::tokens::space::SM)
+            .align_y(Alignment::Center);
+        if let Some(reply) = &procedure.reply {
+            head = head.push(text(reply.clone()).size(font::CAPTION).style(muted_caption));
+        }
+        let label = match fetch {
+            Fetch::Idle => "Call",
+            Fetch::Loading => "Calling…",
+            Fetch::Ready(_) | Fetch::Error(_) => "Call again",
+        };
+        let mut call = button(text(label).size(font::DENSE))
+            .padding([
+                crate::view::tokens::space::XS,
+                crate::view::tokens::space::SM,
+            ])
+            .style(iced::widget::button::secondary);
+        if !fetch.is_loading() {
+            call = call.on_press(Message::Call {
+                procedure: procedure.path.clone(),
+                params: String::new(),
+            });
+        }
+        head = head.push(call);
+        let mut body = column![head].spacing(crate::view::tokens::space::XS);
+        if let Some(description) = &procedure.description {
+            body = body.push(
+                text(description.clone())
+                    .size(font::CAPTION)
+                    .style(muted_caption),
+            );
+        }
+        match fetch {
+            Fetch::Error(error) => {
+                body = body.push(
+                    text(format!("call failed: {error}"))
+                        .size(font::CAPTION)
+                        .style(|t: &Theme| text::Style {
+                            color: Some(crate::view::theme::colors(t).danger_text()),
+                        }),
+                );
+            }
+            Fetch::Ready(reply) => {
+                let total = reply.items().len();
+                if let Some(panel) = render_panels(vec![reply_panel(&procedure.path, reply)]) {
+                    body = body.push(panel);
+                }
+                if total > REPLY_ROWS {
+                    body = body.push(
+                        text(format!("showing {REPLY_ROWS} of {total} rows"))
+                            .size(font::CAPTION)
+                            .style(muted_caption),
+                    );
+                }
+                if let Some(page) = &reply.page
+                    && page.partial
+                {
+                    // The envelope's word, not a guess (RFC 05 §3.2): a short
+                    // page is not the end when the producer says it stopped.
+                    let more = match &page.next_cursor {
+                        Some(_) => "partial answer — the producer stopped early; more follows",
+                        None => "partial answer — the producer could not cover what was asked",
+                    };
+                    body = body.push(text(more).size(font::CAPTION).style(muted_caption));
+                }
+                body = body.push(
+                    text(format!("as of {}", format_timestamp(reply.received_ms)))
+                        .size(font::MICRO)
+                        .style(muted_caption),
+                );
+            }
+            Fetch::Idle | Fetch::Loading => {}
+        }
+        col = col.push(card(body));
+    }
+    Some(col.into())
+}
+
+/// A reply as a family panel (#1261): rows of objects become a table whose
+/// columns are the objects' keys and whose instance is the row's
+/// identifying field (`id`, `pid`, `name`, … — else the first key, which
+/// is alphabetical, because JSON objects carry no order); one object is a
+/// facts list; anything else is one `value` row. The
+/// default renderer draws it like any family, so a reply from a producer
+/// the GUI has never heard of looks like everything else on the screen.
+pub fn reply_panel(procedure: &str, reply: &crate::call::Reply) -> FamilyPanel {
+    fn scalar(value: &serde_json::Value) -> String {
+        const CLIP: usize = 80;
+        match value {
+            serde_json::Value::Null => "—".to_string(),
+            serde_json::Value::Bool(true) => "yes".to_string(),
+            serde_json::Value::Bool(false) => "no".to_string(),
+            serde_json::Value::Number(n) => n.to_string(),
+            serde_json::Value::String(s) => s.clone(),
+            other => {
+                let mut compact = other.to_string();
+                if compact.len() > CLIP {
+                    let cut = compact
+                        .char_indices()
+                        .map(|(i, _)| i)
+                        .take_while(|&i| i <= CLIP)
+                        .last()
+                        .unwrap_or(0);
+                    compact.truncate(cut);
+                    compact.push('…');
+                }
+                compact
+            }
+        }
+    }
+    fn row(instance: String, cells: Vec<FamilyCell>) -> FamilyRow {
+        FamilyRow {
+            instance,
+            cells,
+            verdict: None,
+            note: None,
+            limits: None,
+        }
+    }
+    let items = reply.items();
+    let is_table = reply.value.is_array() || reply.page.is_some();
+    let rows: Vec<FamilyRow> = items
+        .iter()
+        .take(REPLY_ROWS)
+        .enumerate()
+        .map(|(i, item)| match item.as_object() {
+            Some(object) => {
+                let cells: Vec<FamilyCell> = object
+                    .iter()
+                    .map(|(k, v)| FamilyCell {
+                        field: k.clone(),
+                        text: scalar(v),
+                    })
+                    .collect();
+                let instance = if is_table {
+                    ID_KEYS
+                        .iter()
+                        .find_map(|k| cells.iter().find(|c| c.field == *k))
+                        .or_else(|| cells.first())
+                        .map_or_else(|| i.to_string(), |c| c.text.clone())
+                } else {
+                    procedure.to_string()
+                };
+                row(instance, cells)
+            }
+            None => row(
+                if is_table {
+                    i.to_string()
+                } else {
+                    procedure.to_string()
+                },
+                vec![FamilyCell {
+                    field: "value".to_string(),
+                    text: scalar(item),
+                }],
+            ),
+        })
+        .collect();
+    FamilyPanel {
+        title: procedure.to_string(),
+        group: None,
+        is_table,
+        rows,
+    }
 }
 
 /// One rendered cell of a family row: the field and its presented value.
@@ -2419,6 +2630,117 @@ mod tests {
 
     /// The honesty finding (#1256, gate 4): a device with an undeclared
     /// subject renders the marker; one without renders no such word.
+    /// A reply renders as its own shape (#1261): a list of objects is a
+    /// table keyed by the first field, one object is a facts list, an
+    /// envelope's rows are its `items`, and a long answer is capped.
+    #[test]
+    fn a_reply_is_a_table_of_objects_or_a_facts_list() {
+        use crate::call::Reply;
+        use serde_json::json;
+        let list = Reply::new(
+            json!([{ "pid": 42, "name": "redis", "cpu": 1.5, "user": null, "live": true }]),
+            0,
+        );
+        let panel = reply_panel("processes", &list);
+        assert!(panel.is_table);
+        assert_eq!(panel.title, "processes");
+        assert_eq!(panel.rows[0].instance, "42");
+        let cells: Vec<(&str, &str)> = panel.rows[0]
+            .cells
+            .iter()
+            .map(|c| (c.field.as_str(), c.text.as_str()))
+            .collect();
+        assert!(cells.contains(&("name", "redis")));
+        assert!(cells.contains(&("cpu", "1.5")));
+        assert!(
+            cells.contains(&("user", "—")),
+            "null is shown as absent, not as `null`"
+        );
+        assert!(cells.contains(&("live", "yes")));
+
+        let one = Reply::new(json!({ "available": false, "window_secs": 10 }), 0);
+        let panel = reply_panel("latency", &one);
+        assert!(!panel.is_table);
+        assert_eq!(panel.rows.len(), 1);
+        assert_eq!(panel.rows[0].instance, "latency");
+        assert_eq!(panel.rows[0].cells[0].text, "no");
+
+        let page = Reply::new(
+            json!({ "items": [{ "id": "a" }, { "id": "b" }], "partial": true }),
+            0,
+        );
+        let panel = reply_panel("events", &page);
+        assert!(panel.is_table);
+        assert_eq!(panel.rows.len(), 2);
+
+        let long: Vec<serde_json::Value> = (0..300).map(|i| json!({ "i": i })).collect();
+        let panel = reply_panel("many", &Reply::new(json!(long), 0));
+        assert_eq!(panel.rows.len(), REPLY_ROWS);
+
+        let scalar = Reply::new(json!(7), 0);
+        let panel = reply_panel("count", &scalar);
+        assert_eq!(panel.rows[0].cells[0].field, "value");
+        assert_eq!(panel.rows[0].cells[0].text, "7");
+    }
+
+    /// The generic view offers every callable read procedure of the slice,
+    /// and draws the answer, the failure, or the fact that it is on its way
+    /// (#1261). `sysinfo`'s slice declares `processes`, `latency` and
+    /// `thresholds` without a request type; `thresholds/set` needs one and
+    /// `introspect` is the GUI's own, so neither is offered.
+    #[test]
+    fn the_generic_view_offers_the_slice_s_read_procedures() {
+        use iced_test::simulator;
+        let mut state = DeviceDetailState::new(DeviceId::fixture("sysinfo", "server01"));
+        state.family = crate::view::family::FamilyModel::for_producer("sysinfo");
+        let offered: Vec<&str> = state
+            .family
+            .as_ref()
+            .unwrap()
+            .callable()
+            .map(|p| p.path.as_str())
+            .collect();
+        assert_eq!(offered, ["processes", "latency", "thresholds"]);
+
+        let mut ui = simulator(render_procedures(&state).expect("callable procedures"));
+        assert!(ui.find("Procedures").is_ok());
+        assert!(ui.find("LatencyReport").is_ok(), "the reply type is named");
+        let _ = ui.click("Call");
+        let msgs: Vec<Message> = ui.into_messages().collect();
+        assert!(
+            msgs.iter().any(|m| matches!(
+                m,
+                Message::Call { procedure, params } if procedure == "processes" && params.is_empty()
+            )),
+            "the first card's button calls its procedure with no params"
+        );
+
+        state.calls.loading("latency", "");
+        let mut ui = simulator(render_procedures(&state).unwrap());
+        assert!(ui.find("Calling…").is_ok());
+        drop(ui);
+
+        state
+            .calls
+            .set_ready("latency", "", serde_json::json!({ "available": false }));
+        let mut ui = simulator(render_procedures(&state).unwrap());
+        assert!(ui.find("available").is_ok());
+        assert!(ui.find("no").is_ok());
+        assert!(ui.find("Call again").is_ok());
+        drop(ui);
+
+        state
+            .calls
+            .set_failed("thresholds", "No sysinfo sensor responded");
+        let mut ui = simulator(render_procedures(&state).unwrap());
+        assert!(ui.find("call failed: No sysinfo sensor responded").is_ok());
+
+        // A device whose producer the GUI does not know offers nothing —
+        // there is no slice to read procedures from.
+        let unknown = DeviceDetailState::new(DeviceId::fixture("fake-sensor", "rack7"));
+        assert!(render_procedures(&unknown).is_none());
+    }
+
     #[test]
     fn undeclared_marker_renders_only_when_there_is_something_undeclared() {
         use iced_test::simulator;

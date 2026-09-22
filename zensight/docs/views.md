@@ -238,6 +238,54 @@ the bus explorer's and the conformance judges' job. `zensight
 and bundled definitions alone, which is what `scripts/demo-verify.sh` reads
 to say the GUI does not fetch the firehose.
 
+### Calls and replies (#1261)
+
+An on-demand panel used to be a pair of messages (`FetchX` / `XReceived`), a
+typed fetch function, a `*DetailState` field and an `update` arm per producer
+— and a producer the GUI was not compiled with could not be asked anything.
+The wire needs none of it: a read procedure is a GET on
+`@rpc/<producer>/<procedure>?<params>`, and its reply is a value whose type
+the producer's `describe` names. So there is one message to ask with,
+`Message::Call { procedure, params }`, on the selected device, and one to
+land with, `Message::Reply { device, procedure, params, result }`. The answer
+lives in `DeviceDetailState::calls` (`call::Calls`), keyed by procedure, as
+the JSON value the producer sent plus the RFC 05 §3.2 page signal when the
+reply was an envelope.
+
+Three rules, each a bug the old shape had:
+
+- **a reply lands only where it was asked.** It carries the device and the
+  params; `Calls::apply` keeps it only when the device is still selected and
+  those params are the ones in flight. A slow answer to an old sort no longer
+  overwrites the new one, and a deselected device's answer is dropped.
+- **a bespoke view decodes once and borrows.** `Reply::decoded::<T>()`
+  memoises the typed projection in the reply, so a `DataTable` can borrow its
+  rows for as long as the element lives; the JSON stays beside it for the
+  default renderer. A wrong-typed answer is a failure on screen ("Fetch
+  failed: invalid type: map, expected a sequence"), never an empty table.
+  One reply, one type: a second type asked of the same reply is an error.
+- **the default view offers every callable procedure.** `FamilyModel`
+  carries the slice's procedures; `callable()` is every `kind = read`
+  declaration without a `request` type, minus the framework's own
+  (`introspect`, `describe`, `views`, `artifact/*`). The generic device view
+  draws a *Procedures* section: a card per procedure with its reply type,
+  description and a **Call** button, and the answer as the reply's own shape
+  (`reply_panel`) — rows of objects as a table keyed by `id`/`pid`/`name`,
+  one object as facts, a scalar as one `value` row, capped at 200 rows, the
+  envelope's `partial` stated in the producer's words. That is what a sensor
+  the GUI has never heard of can be asked, today.
+
+The on-demand tables' UI state (sort, filter, page) moved with it:
+`DeviceDetailState::tables` by the name the view gives each, driven by
+`DetailTableSort`/`DetailTableFilter`/`DetailTableMore { table }`. A pivot
+into a device (#313) is `DeviceDetailState::pivot` — `Pivot::Process { pid,
+start_time }` for the process explorer's pid filter, cleared by `ClearPivot`.
+
+**Retired so far**: sysinfo (`processes`, `latency`; `SysinfoDetailState`,
+`ProcessSort` now lives in `specialized/sysinfo.rs` and round-trips through
+the call's params) and netflow (`flows`; `NetflowDetailState`). The rest go
+one producer per PR; a view's `Fetch<T>` field is the sign it has not moved.
+
 ## Routing: `CurrentView`
 
 `CurrentView` (in `src/app.rs`) enumerates the routable views:
@@ -919,7 +967,7 @@ UP/DOWN, erroring, total throughput). The old lifetime-counter rankings and
 
 **NetFlow** (`view/specialized/netflow.rs`) — `flows_total` / `bytes_total` /
   `by_proto/{proto}/flows` stream; individual flows come from
-  `@rpc/netflow/flows`. Until this was wired, the view *reconstructed* flows
+  `@rpc/netflow/flows` (a `Message::Call`, #1261). Until this was wired, the view *reconstructed* flows
   from telemetry labels the sensor does not emit (it publishes
   `labels: HashMap::new()`), so every row it drew read `0.0.0.0:0 → 0.0.0.0:0`.
   Fields now come from the exporter's template, and a field the template omits
@@ -1003,8 +1051,9 @@ the question has*:
 - **`fetch_records_all`** — a fleet selector (`v1/*/@rpc/…`), where every host
   is expected to answer and the rows are concatenated (#309).
 
-`fetch_records` takes every reply rather than the first because nothing on the
-wire enforces "one origin, one instance". Two processes minting the same host
+`fetch_records` takes every reply rather than the first — and
+`call::fold_replies` applies the same rule to a generic call (#1261) —
+because nothing on the wire enforces "one origin, one instance". Two processes minting the same host
 origin — a stray second sensor, or two hosts cloned from one `machine-id` —
 both declare the same `@rpc` key and both answer. First-reply-wins then made
 *every* on-demand panel flap: the live sensor's rows on one fetch, the idle

@@ -725,26 +725,40 @@ pub enum Message {
         root: Option<zenkey::ContentHash>,
         filename: String,
     },
-    /// Fetch the on-demand sysinfo process explorer for the selected host,
-    /// sorted as requested (#47).
-    FetchSysinfoProcesses(crate::view::specialized::sysinfo_detail::ProcessSort),
-    /// A sysinfo process-explorer reply: the decoded records, or an error.
-    SysinfoProcessesReceived(Result<Vec<zensight_common::ProcessRecord>, String>),
-    /// Fetch the recent-flow ring (`@rpc/netflow/flows`) for the selected exporter (#469).
-    FetchNetflowFlows,
-    /// A netflow flow-ring reply: the decoded records, or an error message.
-    NetflowFlowsReceived(Result<Vec<zensight_common::NetflowRecord>, String>),
-    /// Sort the netflow flow table by column index.
-    NetflowTableSort(usize),
-    /// Filter the netflow flow table.
-    NetflowTableFilter(String),
-    /// Show more rows of the netflow flow table.
-    NetflowTableMore,
-    /// Fetch the eBPF saturation histograms (`@rpc/sysinfo/latency`) for the
-    /// selected host (#99).
-    FetchSysinfoLatency,
-    /// A sysinfo latency reply: run-queue + block-I/O histograms, or an error.
-    SysinfoLatencyReceived(Result<zensight_common::LatencyReport, String>),
+    /// Call a read procedure of the selected device's producer (#1261,
+    /// design §5.5): `@rpc/<producer>/<procedure>?<params>` on the device's
+    /// origin. The one message every on-demand panel asks with; the answer
+    /// lands as [`Message::Reply`] in the device's [`crate::call::Calls`].
+    Call {
+        procedure: String,
+        /// The `?`-less query string (`sort=cpu&top=50`); empty for none.
+        params: String,
+    },
+    /// A read procedure answered (or did not). Carries the device and the
+    /// params it answers, so a reply to a superseded call — or to a device
+    /// no longer selected — is dropped, not shown.
+    Reply {
+        device: DeviceId,
+        procedure: String,
+        params: String,
+        result: Result<crate::call::Reply, String>,
+    },
+    /// Sort a device view's on-demand table by column index (#1261). The
+    /// table is named by the view (`flows`), the state lives in
+    /// `DeviceDetailState::tables`.
+    DetailTableSort {
+        table: String,
+        column: usize,
+    },
+    /// Filter a device view's on-demand table.
+    DetailTableFilter {
+        table: String,
+        query: String,
+    },
+    /// Show more rows of a device view's on-demand table.
+    DetailTableMore {
+        table: String,
+    },
     /// Fetch the parallax stream catalogue (`@rpc/parallax/streams`) for the
     /// selected host (#408).
     FetchParallaxStreams,
@@ -939,8 +953,9 @@ pub enum Message {
         pid: i32,
         start_time: Option<u64>,
     },
-    /// Clear the process explorer's pivot pid filter.
-    ClearSysinfoPidFilter,
+    /// Clear the selected device's pivot (#313): the process explorer's
+    /// pid filter, or whatever a later pivot carries.
+    ClearPivot,
     /// Pivot to the Logs view pre-filtered to one unit *run* (journald
     /// `_SYSTEMD_INVOCATION_ID`), from the unit drill-down's "logs for this run".
     OpenLogsForInvocation {

@@ -1624,9 +1624,9 @@ impl ZenSight {
             } => {
                 return ControlFlow::Break(self.pivot_to_process(host, pid, start_time));
             }
-            Message::ClearSysinfoPidFilter => {
+            Message::ClearPivot => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.sysinfo_detail.pid_filter = None;
+                    device.pivot = None;
                 }
             }
             Message::OpenLogsForInvocation {
@@ -1973,61 +1973,40 @@ impl ZenSight {
                     device.netring_detail.apply_http(result);
                 }
             }
-            Message::FetchSysinfoProcesses(sort) => {
-                let host = self.selected_device.as_mut().map(|device| {
-                    device.sysinfo_detail.loading(sort);
-                    device.device_id.source.clone()
-                });
-                if let Some(host) = host {
-                    return ControlFlow::Break(self.query_sysinfo_processes(host, sort));
-                }
-            }
-            Message::SysinfoProcessesReceived(result) => {
+            Message::Call { procedure, params } => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.sysinfo_detail.apply(result);
+                    device.calls.loading(&procedure, &params);
+                    return ControlFlow::Break(self.query_call(procedure, params));
                 }
             }
-            Message::FetchNetflowFlows => {
-                let host = self.selected_device.as_mut().map(|device| {
-                    device.netflow_detail.loading();
-                    device.device_id.source.clone()
-                });
-                if let Some(host) = host {
-                    return ControlFlow::Break(self.query_netflow_flows(host));
+            Message::Reply {
+                device,
+                procedure,
+                params,
+                result,
+            } => {
+                // Landed only on the device that asked, and only for the
+                // params still in flight (#1261): a slow answer to an old
+                // sort, or to a device since deselected, is dropped.
+                if let Some(selected) = self.selected_device.as_mut()
+                    && selected.device_id == device
+                {
+                    selected.calls.apply(&procedure, &params, result);
                 }
             }
-            Message::NetflowFlowsReceived(result) => {
+            Message::DetailTableSort { table, column } => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.netflow_detail.apply(result);
+                    device.tables.entry(table).or_default().toggle_sort(column);
                 }
             }
-            Message::NetflowTableSort(col) => {
+            Message::DetailTableFilter { table, query } => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.netflow_detail.table.toggle_sort(col);
+                    device.tables.entry(table).or_default().set_filter(query);
                 }
             }
-            Message::NetflowTableFilter(q) => {
+            Message::DetailTableMore { table } => {
                 if let Some(device) = self.selected_device.as_mut() {
-                    device.netflow_detail.table.set_filter(q);
-                }
-            }
-            Message::NetflowTableMore => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.netflow_detail.table.load_more();
-                }
-            }
-            Message::FetchSysinfoLatency => {
-                let host = self.selected_device.as_mut().map(|device| {
-                    device.sysinfo_detail.loading_latency();
-                    device.device_id.source.clone()
-                });
-                if let Some(host) = host {
-                    return ControlFlow::Break(self.query_sysinfo_latency(host));
-                }
-            }
-            Message::SysinfoLatencyReceived(result) => {
-                if let Some(device) = self.selected_device.as_mut() {
-                    device.sysinfo_detail.apply_latency(result);
+                    device.tables.entry(table).or_default().load_more();
                 }
             }
             Message::FetchParallaxStreams => {
@@ -6937,7 +6916,6 @@ impl ZenSight {
         pid: i32,
         start_time: Option<u64>,
     ) -> Task<Message> {
-        use crate::view::specialized::sysinfo_detail::PidFilter;
         let Some(id) = self.dashboard.resolve_device("sysinfo", &host) else {
             self.toasts.push(
                 ToastSeverity::Info,
@@ -6946,12 +6924,12 @@ impl ZenSight {
             return Task::none();
         };
         let select = self.select_device(id);
-        let sort = crate::view::specialized::sysinfo_detail::ProcessSort::default();
+        let params = crate::view::specialized::sysinfo::ProcessSort::default().params();
         if let Some(device) = self.selected_device.as_mut() {
-            device.sysinfo_detail.pid_filter = Some(PidFilter { pid, start_time });
-            device.sysinfo_detail.loading(sort);
+            device.pivot = Some(crate::view::device::Pivot::Process { pid, start_time });
+            device.calls.loading("processes", &params);
         }
-        Task::batch([select, self.query_sysinfo_processes(host, sort)])
+        Task::batch([select, self.query_call("processes".to_string(), params)])
     }
 
     fn query_netlink_detail(
@@ -8110,67 +8088,38 @@ impl ZenSight {
         })
     }
 
-    /// Fetch the on-demand sysinfo process explorer for `host` (#47). The sysinfo
-    /// query channel is host-scoped, so the key carries the device source.
-    fn query_sysinfo_processes(
-        &self,
-        host: String,
-        sort: crate::view::specialized::sysinfo_detail::ProcessSort,
-    ) -> Task<Message> {
-        use crate::view::specialized::sysinfo_detail::fetch_processes;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::SysinfoProcessesReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
+    /// Call a read procedure on the selected device (#1261): its origin's
+    /// concrete key once the source→origin map has learned it, else the
+    /// fleet selector. The answer lands as [`Message::Reply`] on that device
+    /// and no other.
+    fn query_call(&self, procedure: String, params: String) -> Task<Message> {
+        let Some(device) = self.selected_device.as_ref() else {
+            return Task::none();
         };
-        let origin = self.origin_for(zensight_common::Protocol::Sysinfo, &host);
-        Task::future(async move {
-            let result = fetch_processes(session, origin, sort)
-                .await
-                .ok_or_else(|| "No sysinfo sensor responded".to_string());
-            Message::SysinfoProcessesReceived(result)
-        })
-    }
-
-    /// Fetch the recent-flow ring for the selected exporter's host (#469).
-    ///
-    /// The exporter's `source` is the *exporter* name, not the host running the
-    /// collector, so the origin comes from the device's origin map like every
-    /// other drill-down.
-    fn query_netflow_flows(&self, host: String) -> Task<Message> {
-        use crate::view::specialized::netflow_detail::fetch_flows;
+        let id = device.device_id.clone();
         let Some(session) = self.session.clone() else {
-            return Task::done(Message::NetflowFlowsReceived(Err(
-                "Not connected to Zenoh".to_string()
-            )));
+            return Task::done(Message::Reply {
+                device: id,
+                procedure,
+                params,
+                result: Err("Not connected to Zenoh".to_string()),
+            });
         };
-        let origin = self.origin_for(zensight_common::Protocol::Netflow, &host);
+        let origin = self
+            .dashboard
+            .resolve_device(&id.producer, &id.source)
+            .and_then(|d| d.remote_origin());
+        let producer = id.producer.clone();
         Task::future(async move {
-            let result = fetch_flows(session, origin)
-                .await
-                .ok_or_else(|| "No netflow sensor responded".to_string());
-            Message::NetflowFlowsReceived(result)
-        })
-    }
-
-    /// Fetch the eBPF saturation histograms for `host` (#99).
-    ///
-    /// The sensor declares this queryable even without the `ebpf` feature (it
-    /// replies `available: false`), so "no sensor responded" and "not built with
-    /// eBPF" are genuinely different answers — and the view says which.
-    fn query_sysinfo_latency(&self, host: String) -> Task<Message> {
-        use crate::view::specialized::sysinfo_detail::fetch_latency;
-        let Some(session) = self.session.clone() else {
-            return Task::done(Message::SysinfoLatencyReceived(Err(
-                "Not connected to Zenoh".to_string(),
-            )));
-        };
-        let origin = self.origin_for(zensight_common::Protocol::Sysinfo, &host);
-        Task::future(async move {
-            let result = fetch_latency(session, origin)
-                .await
-                .ok_or_else(|| "No sysinfo sensor responded".to_string());
-            Message::SysinfoLatencyReceived(result)
+            let result =
+                crate::call::call(session, origin, producer, procedure.clone(), params.clone())
+                    .await;
+            Message::Reply {
+                device: id,
+                procedure,
+                params,
+                result,
+            }
         })
     }
 
@@ -10746,7 +10695,6 @@ impl FleetQueriers {
 
 fn prefetch_channels(producer: &str) -> Vec<Message> {
     use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
-    use crate::view::specialized::sysinfo_detail::ProcessSort;
     use zensight_common::Protocol;
 
     // A producer outside the enum has no on-demand channel the GUI knows to
@@ -10769,7 +10717,10 @@ fn prefetch_channels(producer: &str) -> Vec<Message> {
         // render — otherwise a PDU's outlets appear controlless for a beat on
         // a deployment where control is on.
         Protocol::Snmp => vec![Message::FetchSnmpOutletCapability],
-        Protocol::Sysinfo => vec![Message::FetchSysinfoProcesses(ProcessSort::default())],
+        Protocol::Sysinfo => vec![Message::Call {
+            procedure: "processes".to_string(),
+            params: crate::view::specialized::sysinfo::ProcessSort::default().params(),
+        }],
         Protocol::Parallax => vec![Message::FetchParallaxStreams],
         _ => Vec::new(),
     }
@@ -10968,7 +10919,7 @@ mod prefetch_tests {
         ));
         assert!(matches!(
             prefetch_channels("sysinfo").as_slice(),
-            [Message::FetchSysinfoProcesses(_)]
+            [Message::Call { procedure, .. }] if procedure == "processes"
         ));
 
         // Parallax prefetches the stream catalogue (#408).
