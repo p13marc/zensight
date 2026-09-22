@@ -82,7 +82,7 @@ pub async fn run_drains(
     // Assemble the full set of periodic aggregate points from the shared state.
     // `final_flush` controls whether duration/RTT/latency percentiles are taken
     // (always true — at both tick and EOF we want the windowed distribution).
-    let build_aggregate = |sensor_id: &str| -> Vec<zensight_common::TelemetryPoint> {
+    let build_aggregate = |sensor_id: &str| -> Vec<map::Built> {
         let s = started.load(Ordering::Relaxed);
         let e = ended.load(Ordering::Relaxed);
         let active = s.saturating_sub(e);
@@ -244,15 +244,13 @@ pub async fn run_drains(
             // Telemetry points from monitor callbacks.
             point = channels.telemetry.recv() => {
                 match point {
-                    Some(point) => { health.record_metrics_published(1);
-                        let suffix = point.metric.clone();
-                        if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); } }
+                    Some((subject, point)) => { health.record_metrics_published(1);
+                        if let Err(e) = registry.publish_subject(&subject, &point).await { tracing::warn!(error=%e, "publish failed"); } }
                     None => {
                         // Monitor finished (e.g. pcap EOF / shutdown): flush a final
                         // aggregate so short replays still emit their counts.
-                        for point in build_aggregate(&sensor_id) {
-                            let suffix = point.metric.clone();
-                            let _ = registry.publish(&suffix, &point).await;
+                        for (subject, point) in build_aggregate(&sensor_id) {
+                            let _ = registry.publish_subject(&subject, &point).await;
                         }
                         // Drain any detector anomalies / sensor alerts still queued so a
                         // trailing alert isn't lost when the telemetry channel closes first
@@ -273,9 +271,8 @@ pub async fn run_drains(
                         }
                         // Flush a final per-detector count so short replays surface totals.
                         for (kind, count) in &anomaly_counts {
-                            let point = map::anomaly_count_point(&sensor_id, kind, *count);
-                            let suffix = point.metric.clone();
-                            let _ = registry.publish(&suffix, &point).await;
+                            let (subject, point) = map::anomaly_count_point(&sensor_id, kind, *count);
+                            let _ = registry.publish_subject(&subject, &point).await;
                         }
                         // Give late subscribers a moment to pull from the cache.
                         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -311,17 +308,15 @@ pub async fn run_drains(
             }
             // Periodic aggregates.
             _ = flow_tick.tick() => {
-                for point in build_aggregate(&sensor_id) {
+                for (subject, point) in build_aggregate(&sensor_id) {
                     health.record_metrics_published(1);
-                    let suffix = point.metric.clone();
-                    if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
+                    if let Err(e) = registry.publish_subject(&subject, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }
                 // Per-detector anomaly counters (#254): re-emit the running totals.
                 for (kind, count) in &anomaly_counts {
-                    let point = map::anomaly_count_point(&sensor_id, kind, *count);
+                    let (subject, point) = map::anomaly_count_point(&sensor_id, kind, *count);
                     health.record_metrics_published(1);
-                    let suffix = point.metric.clone();
-                    if let Err(e) = registry.publish(&suffix, &point).await { tracing::warn!(error=%e, "publish failed"); }
+                    if let Err(e) = registry.publish_subject(&subject, &point).await { tracing::warn!(error=%e, "publish failed"); }
                 }
                 // The capture host responded this window.
                 health.record_device_success(&sensor_id);

@@ -111,8 +111,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   caller of the advanced tier's `publish_subject`, which read its producer
   by parsing its own prefix as a key — and a prefix is not a key (RFC 03
   §1.6), so every typed publish on that tier failed; it reads the prefix's
-  last chunk now. netring and the four rest-var producers remain on
-  `publish(&str)`.
+  last chunk now. **netring** follows: every `map.rs` builder hands back a
+  `map::Built` pair, the monitor's and the capture-to-disk writer's telemetry
+  channels carry the pair, and `publish.rs`'s five sites publish through the
+  subject; the capture source index, the `<leaf>_total` families whose
+  variable binds the whole leaf (`icmp/by_kind`, `dns/responses_by_rcode`,
+  `http/methods`), the per-app bandwidth gauge, the detector slug and the
+  RED quantile bind their chunks, pinned byte-identical. The debug-only
+  `is_registered_telemetry` guard in netring's `point()` is gone with the
+  string it guarded. The four rest-var producers remain on `publish(&str)`.
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green

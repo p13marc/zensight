@@ -11,7 +11,7 @@ use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use zensight_common::{
     Alert, AssetRecord, ElephantRecord, EncryptedDnsRecord, FlowRecord, Ja4hRecord,
-    NameObservation, QuicRecord, SshRecord, TelemetryPoint, TlsRecord,
+    NameObservation, QuicRecord, SshRecord, TlsRecord,
 };
 
 use crate::bounded::{self, BoundedTable};
@@ -394,7 +394,7 @@ pub struct IcmpState {
 
 /// Channels the monitor emits on, drained by [`crate::publish`] tasks.
 pub struct MonitorChannels {
-    pub telemetry: mpsc::UnboundedReceiver<TelemetryPoint>,
+    pub telemetry: mpsc::UnboundedReceiver<map::Built>,
     pub anomalies: mpsc::UnboundedReceiver<flowscope::OwnedAnomaly>,
     /// Typed sensor alerts produced directly on the capture path (ICMP
     /// flow-killed). Never lossy — kept on its own channel, off the telemetry bus.
@@ -804,7 +804,7 @@ fn dns_client_ip(key: FiveTupleKey) -> Option<std::net::IpAddr> {
 pub type BuiltMonitor = (
     netring::monitor::Monitor,
     MonitorChannels,
-    mpsc::UnboundedSender<TelemetryPoint>,
+    mpsc::UnboundedSender<map::Built>,
     DetectorHandle,
     Option<usize>,
 );
@@ -823,7 +823,7 @@ pub fn build(
     // command channel mutates it through the returned handle.
     let detector_handle = DetectorHandle::new(cfg.anomalies.clone());
     let det_cfg: LiveConfig = detector_handle.shared();
-    let (tel_tx, tel_rx) = mpsc::unbounded_channel::<TelemetryPoint>();
+    let (tel_tx, tel_rx) = mpsc::unbounded_channel::<map::Built>();
     let (anom_tx, anom_rx) = mpsc::unbounded_channel::<flowscope::OwnedAnomaly>();
     let (alert_tx, alert_rx) = mpsc::unbounded_channel::<Alert>();
     let flow_started = Arc::new(AtomicU64::new(0));

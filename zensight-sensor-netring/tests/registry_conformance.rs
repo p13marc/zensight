@@ -1,7 +1,7 @@
 //! Reverse registry conformance for netring (#654, RFC 08 §6.1).
 //!
-//! Forward (*published ⊆ registered*) is enforced at runtime by the metric
-//! guard and by the mapper unit tests. This is the other direction:
+//! Forward (*published ⊆ registered*) holds by construction: every builder
+//! hands back the generated `Subject` beside its point (#1274). This is the other direction:
 //! *registered ⊆ emittable*. A family the registry advertises that no build can
 //! publish is a surface `introspect` promises the fleet and nobody serves.
 //!
@@ -22,12 +22,12 @@ fn every_registered_family_has_an_emitter() {
     let mut emitted: Vec<String> = Vec::new();
     macro_rules! push {
         ($pts:expr) => {
-            emitted.extend($pts.into_iter().map(|p| p.metric))
+            emitted.extend($pts.into_iter().map(|(_, p)| p.metric))
         };
     }
     macro_rules! push1 {
         ($pt:expr) => {
-            emitted.push($pt.metric)
+            emitted.push($pt.1.metric)
         };
     }
 
