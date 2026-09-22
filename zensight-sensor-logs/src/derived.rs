@@ -13,7 +13,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use zensight_common::alert::{Alert, AlertKind, AlertSeverity};
-use zensight_common::telemetry::{Protocol, TelemetryPoint, TelemetryValue};
+use zensight_common::registry::logs::Subject;
+use zensight_common::telemetry::{Protocol, TelemetryValue};
+
+use crate::built::{Built, built};
 
 use crate::parser::{Severity, SyslogMessage};
 use crate::receiver::JournaldStatsSnapshot;
@@ -138,7 +141,7 @@ fn update_streak(prev_streak: u32, over_budget: bool, burn_windows: u32) -> (u32
 /// call (#105). All fields are additive to the existing `logs/*` stream.
 pub struct BudgetTick {
     /// `logs/by_unit/<unit>/error_ratio` and `.../burn_rate` gauges.
-    pub points: Vec<TelemetryPoint>,
+    pub points: Vec<Built>,
     /// Units in sustained burn this tick → `AlertReporter::observe`.
     pub firing: Vec<Alert>,
     /// `alert_key`s of all currently-burning units → `AlertReporter::reconcile`
@@ -214,14 +217,10 @@ impl LogAggregator {
     /// totals, per-unit) let the GUI/Prometheus derive rates; the
     /// units-in-failure gauge is windowed and reset here. `stats` adds journald
     /// throughput when the journald source is active.
-    pub fn emit(&self, source: &str, stats: Option<JournaldStatsSnapshot>) -> Vec<TelemetryPoint> {
+    pub fn emit(&self, source: &str, stats: Option<JournaldStatsSnapshot>) -> Vec<Built> {
         let mut points = Vec::new();
-        let counter = |metric: String, v: u64| {
-            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Counter(v))
-        };
-        let gauge = |metric: String, v: f64| {
-            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
-        };
+        let counter = |subject: Subject, v: u64| built(source, subject, TelemetryValue::Counter(v));
+        let gauge = |subject: Subject, v: f64| built(source, subject, TelemetryValue::Gauge(v));
 
         let Ok(mut inner) = self.inner.lock() else {
             return points;
@@ -229,40 +228,40 @@ impl LogAggregator {
 
         for (code, count) in inner.by_severity.iter().enumerate() {
             if let Some(name) = severity_name(code as u8) {
-                points.push(counter(format!("by_severity/{name}_total"), *count));
+                // `{severity}` binds the whole chunk, `<name>_total`.
+                points.push(counter(
+                    Subject::by_severity(format!("{name}_total")),
+                    *count,
+                ));
             }
         }
-        points.push(counter("errors_total".into(), inner.errors_total));
-        points.push(counter("warnings_total".into(), inner.warnings_total));
+        points.push(counter(Subject::ErrorsTotal, inner.errors_total));
+        points.push(counter(Subject::WarningsTotal, inner.warnings_total));
 
+        // The builder slugs the unit name (#1274) — RFC 03 §2's injective
+        // escape, where the hand-rolled map this replaces never folded case
+        // and was not injective (#843's two defects, one crate over).
         for (unit, c) in &inner.units {
-            let slug = sanitize_unit(unit);
-            points.push(counter(
-                format!("by_unit/{slug}/messages_total"),
-                c.messages,
-            ));
+            points.push(counter(Subject::by_unit_messages_total(unit), c.messages));
             if c.errors > 0 {
-                points.push(counter(format!("by_unit/{slug}/errors_total"), c.errors));
+                points.push(counter(Subject::by_unit_errors_total(unit), c.errors));
             }
         }
 
         // Units-in-failure is a windowed gauge: distinct units that logged an
         // error/critical since the last emit. Reset for the next window.
         points.push(gauge(
-            "units_in_failure".into(),
+            Subject::UnitsInFailure,
             inner.failed_units_window.len() as f64,
         ));
         inner.failed_units_window.clear();
 
         if let Some(s) = stats {
-            points.push(counter("journald/read_total".into(), s.read));
-            points.push(counter("journald/published_total".into(), s.published));
-            points.push(counter("journald/dropped_total".into(), s.dropped));
-            points.push(counter("journald/sampled_out_total".into(), s.sampled_out));
-            points.push(counter(
-                "journald/self_excluded_total".into(),
-                s.self_excluded,
-            ));
+            points.push(counter(Subject::JournaldReadTotal, s.read));
+            points.push(counter(Subject::JournaldPublishedTotal, s.published));
+            points.push(counter(Subject::JournaldDroppedTotal, s.dropped));
+            points.push(counter(Subject::JournaldSampledOutTotal, s.sampled_out));
+            points.push(counter(Subject::JournaldSelfExcludedTotal, s.self_excluded));
         }
 
         points
@@ -280,9 +279,7 @@ impl LogAggregator {
     /// [`BudgetParams`]) are returned as firing [`Alert`]s plus the full firing
     /// key set for reconcile; quiet/healthy units never fire.
     pub fn tick_budgets(&self, source: &str) -> BudgetTick {
-        let gauge = |metric: String, v: f64| {
-            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
-        };
+        let gauge = |subject: Subject, v: f64| built(source, subject, TelemetryValue::Gauge(v));
         let p = self.budget;
         let mut out = BudgetTick {
             points: Vec::new(),
@@ -306,12 +303,11 @@ impl LogAggregator {
             let de = cur.errors.saturating_sub(prev.errors);
             let eval = evaluate_window(dm, de, &p);
 
-            let slug = sanitize_unit(unit);
             out.points
-                .push(gauge(format!("by_unit/{slug}/error_ratio"), eval.ratio));
+                .push(gauge(Subject::by_unit_error_ratio(unit), eval.ratio));
             if p.target_ratio > 0.0 {
                 out.points.push(gauge(
-                    format!("by_unit/{slug}/burn_rate"),
+                    Subject::by_unit_burn_rate(unit),
                     eval.ratio / p.target_ratio,
                 ));
             }
@@ -395,20 +391,6 @@ fn severity_name(code: u8) -> Option<&'static str> {
     }
 }
 
-/// Make a unit name safe as a key-expression segment: no `/`, no whitespace.
-/// (`nginx.service` stays readable; `user@1000.service/foo` loses the slash.)
-fn sanitize_unit(unit: &str) -> String {
-    unit.chars()
-        .map(|c| {
-            if c == '/' || c.is_whitespace() {
-                '_'
-            } else {
-                c
-            }
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,7 +415,7 @@ mod tests {
     ///
     /// A family here with no emitter is a surface `introspect` advertises to the
     /// fleet and no build can deliver. The forward direction is enforced at run
-    /// time by `telemetry_guard::checked_point`; this is the half that needs no
+    /// time by the typed subject (`TelemetryPoint::for_subject`, #1274); this is the half that needs no
     /// Zenoh session and no live journal.
     #[test]
     fn every_registered_family_has_an_emitter() {
@@ -475,14 +457,14 @@ mod tests {
                     }),
                 )
                 .into_iter()
-                .map(|p| p.metric),
+                .map(|(_, p)| p.metric),
         );
         emitted.extend(
             counters
                 .tick_budgets("h")
                 .points
                 .into_iter()
-                .map(|p| p.metric),
+                .map(|(_, p)| p.metric),
         );
 
         // Template rollups live in their own counter type.
@@ -491,7 +473,7 @@ mod tests {
         templates.observe("connection from 10.0.0.1 failed", true);
         templates.observe("connection from 10.0.0.2 failed", true);
         templates.observe("started unit foo", false);
-        emitted.extend(templates.emit("h").into_iter().map(|p| p.metric));
+        emitted.extend(templates.emit("h").into_iter().map(|(_, p)| p.metric));
 
         // And the ingest counters.
         emitted.extend(
@@ -503,7 +485,7 @@ mod tests {
             }
             .to_points("h")
             .into_iter()
-            .map(|p| p.metric),
+            .map(|(_, p)| p.metric),
         );
 
         registry_audit::assert_families_covered(
@@ -525,8 +507,11 @@ mod tests {
         m
     }
 
-    fn find<'a>(points: &'a [TelemetryPoint], metric: &str) -> Option<&'a TelemetryPoint> {
-        points.iter().find(|p| p.metric == metric)
+    fn find<'a>(points: &'a [Built], metric: &str) -> Option<&'a zensight_common::TelemetryPoint> {
+        points
+            .iter()
+            .find(|(_, p)| p.metric == metric)
+            .map(|(_, p)| p)
     }
 
     #[test]
@@ -589,7 +574,9 @@ mod tests {
         let pts = agg.emit("h", None);
         let unit_series = pts
             .iter()
-            .filter(|p| p.metric.starts_with("by_unit/") && p.metric.ends_with("/messages_total"))
+            .filter(|(_, p)| {
+                p.metric.starts_with("by_unit/") && p.metric.ends_with("/messages_total")
+            })
             .count();
         // 2 tracked units + the `other` bucket = 3 series max.
         assert_eq!(unit_series, 3);

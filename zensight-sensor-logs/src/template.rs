@@ -22,7 +22,7 @@ use std::sync::Mutex;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
-use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::TelemetryValue;
 
 /// Wildcard token for positions that vary within a cluster.
 const WILDCARD: &str = "<*>";
@@ -379,18 +379,19 @@ impl TemplateAggregator {
 
     /// Snapshot the per-template counters into telemetry points published under
     /// the v1 telemetry prefix (metric `logs/by_template/<id>/{count,errors}_total`).
-    pub fn emit(&self, source: &str) -> Vec<TelemetryPoint> {
+    pub fn emit(&self, source: &str) -> Vec<crate::built::Built> {
+        use zensight_common::registry::logs::Subject;
         let mut points = Vec::new();
         let Ok(inner) = self.inner.lock() else {
             return points;
         };
-        let counter = |metric: String, v: u64| {
-            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Counter(v))
+        let counter = |subject: Subject, v: u64| {
+            crate::built::built(source, subject, TelemetryValue::Counter(v))
         };
         for (id, c) in &inner.counts {
-            points.push(counter(format!("by_template/{id}/count_total"), c.count));
+            points.push(counter(Subject::by_template_count_total(id), c.count));
             if c.errors > 0 {
-                points.push(counter(format!("by_template/{id}/errors_total"), c.errors));
+                points.push(counter(Subject::by_template_errors_total(id), c.errors));
             }
         }
         points
@@ -509,14 +510,14 @@ mod tests {
         let pts = agg.emit("host01");
         let count = pts
             .iter()
-            .find(|p| p.metric == format!("by_template/{id}/count_total"))
+            .find(|(_, p)| p.metric == format!("by_template/{id}/count_total"))
             .unwrap();
-        assert_eq!(count.value, TelemetryValue::Counter(2));
+        assert_eq!(count.1.value, TelemetryValue::Counter(2));
         let errors = pts
             .iter()
-            .find(|p| p.metric == format!("by_template/{id}/errors_total"))
+            .find(|(_, p)| p.metric == format!("by_template/{id}/errors_total"))
             .unwrap();
-        assert_eq!(errors.value, TelemetryValue::Counter(1));
+        assert_eq!(errors.1.value, TelemetryValue::Counter(1));
     }
 
     #[test]
@@ -539,12 +540,14 @@ mod tests {
         let pts = agg.emit("h");
         let series = pts
             .iter()
-            .filter(|p| p.metric.starts_with("by_template/") && p.metric.ends_with("/count_total"))
+            .filter(|(_, p)| {
+                p.metric.starts_with("by_template/") && p.metric.ends_with("/count_total")
+            })
             .count();
         assert_eq!(series, 3, "2 tracked templates + the `other` bucket");
         assert!(
             pts.iter()
-                .any(|p| p.metric.starts_with("by_template/other/count_total"))
+                .any(|(_, p)| p.metric.starts_with("by_template/other/count_total"))
         );
     }
 }
