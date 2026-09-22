@@ -231,9 +231,16 @@ impl DeviceDetailState {
 
     /// A view filter's value, `""` when unset (#1261).
     pub fn filter(&self, table: &str, key: &str) -> &str {
+        self.filter_opt(table, key).unwrap_or("")
+    }
+
+    /// A view filter's value, `None` when never set — for a control whose
+    /// untouched state means a default and whose cleared state (`""`) means
+    /// everything (#1261).
+    pub fn filter_opt(&self, table: &str, key: &str) -> Option<&str> {
         self.filters
             .get(&format!("{table}/{key}"))
-            .map_or("", String::as_str)
+            .map(String::as_str)
     }
 
     /// Replace the favorited-metric set for this device (#27). Called on selection

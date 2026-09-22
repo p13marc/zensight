@@ -260,6 +260,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NetlinkTable{Sort,Filter,More}`, `NetlinkDetailState`,
   `NetlinkDetailData`, `NetlinkTable`, `query_netlink_detail`. `Message` is
   424 variants.
+- **systemd's read side retired onto `Call`/`Reply`** (#1261, the fourth
+  producer). `units`, `timers`, `events`, `cgroups`, `actions`,
+  `action/capability`, `unit?name=` and `unit/file?name=` are calls; the
+  unit chips are `units/state`/`units/type` filters (`SetDetailFilter`), the
+  open drill-down is `units/selected`, and the service-control gate is a
+  free `action_gate(capability, inflight, unit)` over the probe's answer —
+  the same allowlist function as before, the same verdicts. New:
+  `ForgetCall { procedure }` (the unit file's "Hide"), `app::call_now` for
+  the app's own calls, `DeviceDetailState::filter_opt`. `SystemdDetailState`
+  keeps only the action machine (armed, in flight, job counter); the write
+  path and `SystemdSelectUnit` stay until the request-schema step. Gone:
+  `FetchSystemdDetail`, `SystemdDetailReceived`,
+  `SystemdSetUnit{Filter,TypeFilter}`, `SystemdUnitsTable{Sort,Filter,More}`,
+  `SystemdFetchUnitFile`, `SystemdUnitFileReceived`, `SystemdHideUnitFile`,
+  `FetchSystemdActionCapability`, `SystemdActionCapabilityReceived`,
+  `SystemdUnitDetailReceived`, `SystemdDetailData`, `query_systemd_*`.
+  `Message` is 412 variants.
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in

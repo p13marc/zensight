@@ -294,15 +294,31 @@ A tab's prefetch is a list the view owns (`netlink::tab_procedures(tab)`) and
 `app::prefetch_calls` asks for each once — an answered, failed or in-flight
 procedure is not asked again.
 
+A parameterised call keys its answer by procedure, so one answer per
+procedure at a time: the unit drill-down's `unit?name=<u>` and
+`unit/file?name=<u>` replace each other as the selection moves, which is
+what the old single `Fetch` slot did. `ForgetCall { procedure }` clears one
+(the unit file's "Hide"). The app's own calls — a pivot, a refresh after an
+action — go through `app::call_now`, which marks the call in flight the way
+the `Call` arm does.
+
 **Retired so far**: sysinfo (`processes`, `latency`; `SysinfoDetailState`,
 `ProcessSort` now lives in `specialized/sysinfo.rs` and round-trips through
-the call's params), netflow (`flows`; `NetflowDetailState`) and netlink (the
+the call's params), netflow (`flows`; `NetflowDetailState`), netlink (the
 eleven `@rpc/netlink/*` topics; `NetlinkDetailState`, `NetlinkDetailData`,
 `NetlinkTable` and the nine netlink messages — `netlink_detail.rs` keeps the
 record types, `NetlinkDetailTopic` as the procedure vocabulary, the socket
-filter and `fetch_records`, which netring and the app's joins still use).
-The rest go one producer per PR; a view's `Fetch<T>` field is the sign it
-has not moved.
+filter and `fetch_records`, which netring and the app's joins still use)
+and systemd's read side (`units`, `timers`, `events`, `cgroups`, `actions`,
+`action/capability`, `unit?name=`, `unit/file?name=`; the unit chips are
+`units/state` and `units/type` filters, the open drill-down `units/selected`,
+the gate a free `action_gate(capability, inflight, unit)` over the probe's
+answer). What `SystemdDetailState` still holds is the **action machine** —
+an armed action, one in flight, the job counter the auto-refresh watches —
+and `SystemdSelectUnit`, `SystemdUnitAction{Arm,Cancel,Confirm,Result}`
+stay with it: the write path goes through the audited seam and its form is
+the request-schema step of #1261, not a read call. The rest go one producer
+per PR; a view's `Fetch<T>` field is the sign it has not moved.
 
 ## Routing: `CurrentView`
 

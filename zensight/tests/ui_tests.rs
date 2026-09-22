@@ -4468,7 +4468,6 @@ fn test_systemd_specialized_view_tabs() {
 #[test]
 fn test_systemd_units_tab_fetches_on_demand() {
     use zensight::view::specialized::specialized_view;
-    use zensight::view::specialized::systemd_detail::SystemdDetailTopic;
 
     let id = DeviceId::fixture("systemd", "server01".to_string());
     let mut state = DeviceDetailState::new(id);
@@ -4482,7 +4481,7 @@ fn test_systemd_units_tab_fetches_on_demand() {
     assert!(
         messages
             .iter()
-            .any(|m| matches!(m, Message::FetchSystemdDetail(SystemdDetailTopic::Units)))
+            .any(|m| matches!(m, Message::Call { procedure, .. } if procedure == "units"))
     );
 }
 
@@ -4538,31 +4537,31 @@ fn systemd_units_state(
     units: &[&str],
     capability: zensight_common::action::ActionCapability,
 ) -> DeviceDetailState {
-    use zensight::view::specialized::fetch::Fetch;
-    use zensight::view::specialized::systemd_detail::{SystemdDetailData, SystemdDetailTopic};
     use zensight_common::query_detail::UnitRecord;
 
     let id = DeviceId::fixture("systemd", "server01".to_string());
     let mut state = DeviceDetailState::new(id);
     state.specialized_tab = zensight::view::specialized::SpecializedTab::Units;
-    state.systemd_detail.apply(
-        SystemdDetailTopic::Units,
-        Ok(SystemdDetailData::Units(
-            units
-                .iter()
-                .map(|n| UnitRecord {
-                    name: (*n).into(),
-                    description: format!("{n} description"),
-                    load_state: "loaded".into(),
-                    active_state: "active".into(),
-                    sub_state: "running".into(),
-                    job: None,
-                    unit_file_state: Some("enabled".into()),
-                })
-                .collect(),
-        )),
+    let units: Vec<UnitRecord> = units
+        .iter()
+        .map(|n| UnitRecord {
+            name: (*n).into(),
+            description: format!("{n} description"),
+            load_state: "loaded".into(),
+            active_state: "active".into(),
+            sub_state: "running".into(),
+            job: None,
+            unit_file_state: Some("enabled".into()),
+        })
+        .collect();
+    state
+        .calls
+        .set_ready("units", "", serde_json::to_value(units).unwrap());
+    state.calls.set_ready(
+        "action/capability",
+        "",
+        serde_json::to_value(capability).unwrap(),
     );
-    state.systemd_detail.capability = Fetch::Ready(capability);
     state
 }
 
@@ -4653,17 +4652,18 @@ fn test_systemd_units_table_filters_and_sorts() {
     let _ = ui.click("Unit");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::SystemdUnitsTableSort(0))),
+        messages.iter().any(
+            |m| matches!(m, Message::DetailTableSort { table, column: 0 } if table == "units")
+        ),
         "the Unit header sorts"
     );
 
     // The filter narrows the rows, and the footer reports honestly rather than
     // silently truncating the way the old hand-rolled table did at 400.
     state
-        .systemd_detail
-        .units_table
+        .tables
+        .entry("units".into())
+        .or_default()
         .set_filter("nginx".to_string());
     let mut ui = simulator(specialized_view(&state, None, None).expect("systemd view"));
     assert!(ui.find("showing 1 of 1 units").is_ok());
@@ -4683,9 +4683,11 @@ fn test_systemd_units_table_defaults_to_services() {
     let _ = ui.click("all types");
     let messages: Vec<Message> = ui.into_messages().collect();
     assert!(
-        messages
-            .iter()
-            .any(|m| matches!(m, Message::SystemdSetUnitTypeFilter(None))),
+        messages.iter().any(|m| matches!(
+            m,
+            Message::SetDetailFilter { table, key, value }
+                if table == "units" && key == "type" && value.is_empty()
+        )),
         "the all-types chip clears the filter"
     );
 }
