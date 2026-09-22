@@ -450,7 +450,7 @@ fn parse_probe_match(xml: &str) -> Option<ProbeMatch> {
 }
 
 /// `http://10.0.0.7:8000/onvif/device_service` -> `10.0.0.7:8000`.
-fn authority_of(url: &str) -> Option<String> {
+pub(crate) fn authority_of(url: &str) -> Option<String> {
     let rest = url.split_once("://")?.1;
     let authority = rest.split(['/', '?', '#']).next()?;
     (!authority.is_empty()).then(|| authority.to_string())
@@ -562,7 +562,7 @@ fn suggest(name: &str, address: &str, url: Option<&str>) -> String {
 
 /// A stream name a config would accept: the advertised instance name reduced to
 /// the catalogue's charset, or the address when nothing usable survives.
-fn stream_name(name: &str, address: &str) -> String {
+pub(crate) fn stream_name(name: &str, address: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| {

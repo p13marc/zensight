@@ -29,7 +29,8 @@ Evidence is a **claim, not a verdict**. Two provenance kinds, distinguished by t
 - **self-report** (`observer: None`) — a sensor reporting about the host it runs
   on. Strong.
 - **third-party claim** (`observer: Some(sensor)`) — a sensor reporting a device it
-  merely *observed* on the wire (netring assets, netlink neighbors, snmp
+  merely *observed* on the wire (netring assets, netlink neighbors, parallax
+  cameras — configured RTSP targets and discovered responders, #413 — snmp
   sysName). Merge rules weigh these lower.
 
 Evidence is TTL-scoped: consumers ignore any record whose `last_updated` is older

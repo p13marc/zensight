@@ -107,6 +107,14 @@ pub struct ParallaxConfig {
     /// ever added to the catalogue or opened.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discovery: Option<crate::discovery::DiscoveryConfig>,
+
+    /// Identity evidence for the cameras this sensor polls or discovers
+    /// (#413): observer-role `HostEvidence` claims on
+    /// `state/parallax/evidence/device/<stream>`, so the correlator files a
+    /// camera as a host and its streams become attributable. On by default,
+    /// like every other remote sensor's `evidence` block.
+    #[serde(default)]
+    pub evidence: crate::evidence::EvidenceConfig,
 }
 
 impl Default for ParallaxConfig {
@@ -121,6 +129,7 @@ impl Default for ParallaxConfig {
             idle_timeout_secs: default_idle_timeout(),
             stats_interval_secs: default_stats_interval(),
             discovery: None,
+            evidence: crate::evidence::EvidenceConfig::default(),
         }
     }
 }
@@ -451,6 +460,10 @@ impl ParallaxSensorConfig {
     /// Validate the configuration.
     pub fn validate(&self) -> Result<(), ConfigError> {
         let p = &self.parallax;
+
+        p.evidence
+            .validate()
+            .map_err(|e| ConfigError::Validation(e.to_string()))?;
 
         // Configured stream names must be unique (V4L2 enumeration derives its
         // own names at runtime and disambiguates itself).

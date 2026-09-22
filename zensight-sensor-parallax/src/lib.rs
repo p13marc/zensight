@@ -21,6 +21,7 @@ pub mod command;
 pub mod config;
 pub mod discovery;
 pub mod egress;
+pub mod evidence;
 pub mod hotplug;
 pub mod pipeline;
 pub mod query;
@@ -52,6 +53,9 @@ mod typed_subjects {
                 Subject::rx_frame_age_ms_p50("cam1", "high"),
                 "cam1/rx/high/frame_age_ms_p50",
             ),
+            // The observed-camera claim (#413) is a state subject; the
+            // builder exists because the registry declares it.
+            (Subject::evidence_device("door"), "evidence/device/door"),
         ] {
             assert_eq!(subject.tail(), tail);
         }

@@ -10,7 +10,7 @@
 # gauge.
 
 [registry]
-version = "1.11"
+version = "1.12"
 app = "zensight"
 convention = 1
 
@@ -223,6 +223,16 @@ type = "HostEvidence"
 ttl_s = 900
 since = "1.0"
 description = "self-identity claim (RFC 06 §4)"
+
+[[subject]]
+path = "evidence/device/{device}"
+common = "evidence_device"
+class = "state"
+type = "HostEvidence"
+cardinality = 64
+ttl_s = 900
+since = "1.12"
+description = "observed-camera identity claim (#413): a configured RTSP target's or a discovered responder's ip/hostname, observer role (RFC 06 §4) — never a MAC or a host_id, so it merges on the ip/hostname rungs only"
 
 [[subject]]
 path = "alert/{alert_key}"
