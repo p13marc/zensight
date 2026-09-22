@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use zensight_common::comparison::ComparisonOp;
+use zensight_common::registry::sysinfo::Subject;
 use zensight_common::threshold::{ThresholdRule, ThresholdsConfig};
 use zensight_common::{
     Alert, AlertState, Format, Protocol, TelemetryPoint, TelemetryValue, decode_auto,
@@ -58,7 +59,7 @@ fn rules() -> ThresholdsConfig {
 }
 
 fn point(source: &str, value: f64) -> TelemetryPoint {
-    TelemetryPoint::new(source, "cpu/usage", TelemetryValue::Gauge(value))
+    TelemetryPoint::for_subject(source, &Subject::CpuUsage, TelemetryValue::Gauge(value))
 }
 
 async fn next_alert(
@@ -101,7 +102,7 @@ async fn a_published_point_becomes_an_alert_on_the_bus() {
 
     // Under the threshold: nothing at all.
     publisher
-        .publish("cpu/usage", &point(&source, 12.0))
+        .publish_subject(&Subject::CpuUsage, &point(&source, 12.0))
         .await
         .expect("publish");
     let quiet = tokio::time::timeout(Duration::from_millis(600), sub.recv_async()).await;
@@ -109,7 +110,7 @@ async fn a_published_point_becomes_an_alert_on_the_bus() {
 
     // Over it: an alert, on the bus, with the rule and the value in it.
     publisher
-        .publish("cpu/usage", &point(&source, 96.0))
+        .publish_subject(&Subject::CpuUsage, &point(&source, 96.0))
         .await
         .expect("publish");
     let (kind, alert) = next_alert(&sub).await;
@@ -123,7 +124,7 @@ async fn a_published_point_becomes_an_alert_on_the_bus() {
 
     // …and back under it resolves, with the tombstone.
     publisher
-        .publish("cpu/usage", &point(&source, 5.0))
+        .publish_subject(&Subject::CpuUsage, &point(&source, 5.0))
         .await
         .expect("publish");
     let mut saw_resolved = false;
@@ -177,7 +178,7 @@ async fn the_advanced_publisher_path_evaluates_too() {
 
     let source = unique_source();
     advanced
-        .publish("cpu/usage", &point(&source, 99.0))
+        .publish_subject(&Subject::CpuUsage, &point(&source, 99.0))
         .await
         .expect("publish");
 
@@ -203,7 +204,7 @@ async fn a_registry_with_no_observer_publishes_unchanged() {
     let publisher = Publisher::new(session.clone(), "sysinfo", Format::Json);
     let source = unique_source();
     publisher
-        .publish("cpu/usage", &point(&source, 99.0))
+        .publish_subject(&Subject::CpuUsage, &point(&source, 99.0))
         .await
         .expect("publish");
 
@@ -242,7 +243,7 @@ async fn a_rule_set_pushed_at_runtime_takes_effect_without_a_restart() {
 
     let source = unique_source();
     publisher
-        .publish("cpu/usage", &point(&source, 99.0))
+        .publish_subject(&Subject::CpuUsage, &point(&source, 99.0))
         .await
         .expect("publish");
     let quiet = tokio::time::timeout(Duration::from_millis(600), sub.recv_async()).await;
@@ -251,7 +252,7 @@ async fn a_rule_set_pushed_at_runtime_takes_effect_without_a_restart() {
     // An operator pushes a rule.
     evaluator.set_config(rules());
     publisher
-        .publish("cpu/usage", &point(&source, 99.0))
+        .publish_subject(&Subject::CpuUsage, &point(&source, 99.0))
         .await
         .expect("publish");
     let (_, alert) = next_alert(&sub).await;

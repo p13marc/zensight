@@ -67,8 +67,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer disagree. A subject the registry does not declare has no
   constructor, which is the compile-time answer to the runtime question the
   metric guard asks on every put; a state subject handed to the telemetry
-  path is refused by name. The `&str`-suffix `publish` stays as the interim
-  while the sensors move, one per PR. **bmc** is the exemplar (it shipped
+  path is refused by name. The `&str`-suffix `publish` stayed as the interim
+  while the sensors moved, one per PR, and is deleted with the last of them
+  (below). **bmc** is the exemplar (it shipped
   after the API, not with it — the PR that claimed it carried only the
   framework): its `telemetry_guard.rs` is gone, the builders take the raw
   `endpoint-chassis` pair (`chassis_value`, beside `chassis_chunk` for the
@@ -132,7 +133,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the subject beside each point, and `exporter_slug` is a test that pins the
   builder's slug. A modbus device the operator named with a space in it
   published under an illegal key before; it is slugged now, like every other
-  foreign name. No sensor crate spells a telemetry key any more.
+  foreign name. No sensor crate spells a telemetry key any more, and the
+  string-suffix API is **deleted**: `Publisher::publish(&str)`,
+  `publish_batch(&str)`, `build_key` and the advanced tier's `publish(&str)`
+  / `build_key`. What is left on both tiers is `publish_subject` /
+  `publish_batch_subjects` and `publish_to_key` for a key already rendered;
+  sensor-core's own tests publish through subjects.
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green

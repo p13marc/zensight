@@ -8,6 +8,7 @@
 //! netring, snmp and logs — counted nothing at all.
 
 use std::sync::Arc;
+use zensight_common::registry::sysinfo::Subject;
 use zensight_common::{Format, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{
     AdvancedPublisherConfig, AdvancedPublisherRegistry, Publish, Publisher,
@@ -54,13 +55,14 @@ async fn the_advanced_tier_counts_into_the_shared_set() {
         AdvancedPublisherConfig::default(),
         counters.clone(),
     );
-    let point = TelemetryPoint::new("host", "system/uptime", TelemetryValue::Gauge(1.0));
+    let point =
+        TelemetryPoint::for_subject("host", &Subject::SystemUptime, TelemetryValue::Gauge(1.0));
     registry
-        .publish("system/uptime", &point)
+        .publish_subject(&Subject::SystemUptime, &point)
         .await
         .expect("publish");
     registry
-        .publish("system/uptime", &point)
+        .publish_subject(&Subject::SystemUptime, &point)
         .await
         .expect("publish again");
     assert_eq!(counters.published_total(), 2, "both deliveries counted");

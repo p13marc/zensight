@@ -143,9 +143,9 @@ There are **two tiers, one contract** (#1155 — the `Publish` trait in
   generated `zensight_common::registry::<producer>::Subject` in, the key
   rendered from it, the point built by `TelemetryPoint::for_subject` so its
   metric is the subject's tail — a subject the registry does not declare has
-  no constructor, and the metric guard has nothing left to say), `publish` /
-  `publish_to_key` / `publish_batch` as the `&str`-suffix interim while the
-  sensors move (checked on every put by the guard), `publish_raw` /
+  no constructor, and the metric guard has nothing left to say) — the
+  `&str`-suffix `publish` / `publish_batch` / `build_key` are gone with their
+  last caller — `publish_to_key` for a key already rendered, `publish_raw` /
   `publish_json` / `delete` for state documents. A builder slugs the foreign
   value itself: hand it the raw value, never a chunk — the slug is injective
   and would escape a chunk a second time. `bmc` is the exemplar. The four

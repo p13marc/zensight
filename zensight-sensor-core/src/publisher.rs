@@ -16,7 +16,7 @@ use crate::v1::V1Context;
 /// Wraps a Zenoh session and provides convenient methods for publishing
 /// [`TelemetryPoint`] values with automatic serialization.
 ///
-/// **Telemetry** (`publish` / `publish_to_key` / `publish_batch`) publishes
+/// **Telemetry** (`publish_subject` / `publish_batch_subjects` / `publish_to_key`) publishes
 /// under the v1 grammar (`<base>/v1/<origin>/telemetry/<producer>/…`) on the
 /// **baseline delivery tier** (RFC 04 §3.2): plain declared publishers, no
 /// per-key cache/heartbeat machinery — a late joiner waits out the next
@@ -99,34 +99,6 @@ impl Publisher {
         &self.control
     }
 
-    /// Build a full key expression from a suffix.
-    ///
-    /// Debug-asserts that `suffix` doesn't contain double slashes; the real
-    /// check is downstream, on every put — `zensight_common::metric_guard`
-    /// refuses a key outside the v1 grammar in release as well as debug
-    /// (#1153), so a chunk that skipped [`crate::key::device_chunk`] is loud
-    /// wherever it happens.
-    pub fn build_key(&self, suffix: &str) -> String {
-        debug_assert!(!suffix.contains("//"), "key suffix must not contain '//'");
-        if suffix.is_empty() {
-            self.telemetry_prefix.clone()
-        } else {
-            format!("{}/{}", self.telemetry_prefix, suffix)
-        }
-    }
-
-    /// Publish a telemetry point (baseline tier: plain declared publisher).
-    ///
-    /// The key is constructed by appending `key_suffix` to the publisher's
-    /// prefix. **The string form is the interim** (#1274): a suffix is spelled
-    /// by hand and checked on every put by the metric guard, where
-    /// [`Self::publish_subject`] takes the generated subject and cannot spell
-    /// one the registry does not declare. Retired when the last caller moves.
-    pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
-        let key = self.build_key(key_suffix);
-        self.publish_to_key(&key, point).await
-    }
-
     /// Publish a telemetry point under its generated subject (#1274): the
     /// key is rendered from the subject as this publisher's producer, so a
     /// subject the registry does not declare does not compile, and the
@@ -202,28 +174,6 @@ impl Publisher {
         observer: std::sync::Arc<dyn zensight_common::point_observer::PointObserver>,
     ) {
         self.control.set_observer(observer);
-    }
-
-    /// Publish a batch of telemetry points.
-    ///
-    /// Returns the number of successfully published points and logs errors.
-    pub async fn publish_batch<'a, I>(&self, points: I) -> PublishStats
-    where
-        I: IntoIterator<Item = (&'a str, &'a TelemetryPoint)>,
-    {
-        let mut stats = PublishStats::default();
-
-        for (key_suffix, point) in points {
-            match self.publish(key_suffix, point).await {
-                Ok(()) => stats.success += 1,
-                Err(e) => {
-                    stats.failed += 1;
-                    tracing::warn!(error = %e, "Failed to publish telemetry");
-                }
-            }
-        }
-
-        stats
     }
 
     /// Publish pre-encoded bytes to a control-plane key with an explicit QoS

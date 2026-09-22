@@ -22,8 +22,9 @@
 //!     AdvancedPublisherConfig::default(),
 //! ).await?;
 //!
-//! // Publish a telemetry point (publisher is created on first use)
-//! registry.publish("router01/cpu", &point).await?;
+//! // Publish a telemetry point under its generated subject (publisher is
+//! // created on first use for the key it renders)
+//! registry.publish_subject(&subject, &point).await?;
 //! ```
 
 use std::collections::HashMap;
@@ -192,19 +193,6 @@ impl AdvancedPublisherRegistry {
 
     /// Build a full key expression from a suffix.
     ///
-    /// The registry-conformance guard (RFC 08 §5) runs on the put, not here
-    /// (#1155): this tier declares its own publishers rather than going
-    /// through [`zensight_common::PublisherRegistry`], and guarding only the
-    /// keys *it* built left `publish_to_key`, `publish_serializable` and
-    /// `tombstone` unchecked.
-    fn build_key(&self, suffix: &str) -> String {
-        if suffix.is_empty() {
-            self.telemetry_prefix.clone()
-        } else {
-            format!("{}/{}", self.telemetry_prefix, suffix)
-        }
-    }
-
     /// Get or create an advanced publisher for the given key.
     async fn get_or_create_publisher(&self, key: &str) -> Result<()> {
         // Take write lock upfront to avoid TOCTOU race between read-check and write-insert
@@ -250,16 +238,6 @@ impl AdvancedPublisherRegistry {
         tracing::debug!(key = %key, cache_size = %self.config.cache_size, "Created advanced publisher");
 
         Ok(())
-    }
-
-    /// Publish a telemetry point using an advanced publisher.
-    ///
-    /// The publisher for this key is created on first use and cached. The
-    /// string form is the interim (#1274) — see
-    /// [`Publisher::publish`](crate::publisher::Publisher::publish).
-    pub async fn publish(&self, key_suffix: &str, point: &TelemetryPoint) -> Result<()> {
-        let key = self.build_key(key_suffix);
-        self.publish_to_key(&key, point).await
     }
 
     /// Publish a telemetry point under its generated subject (#1274) — the
@@ -432,28 +410,6 @@ impl AdvancedPublisherRegistry {
         Ok(())
     }
 
-    /// Publish a batch of telemetry points.
-    ///
-    /// Returns statistics about the batch operation.
-    pub async fn publish_batch<'a, I>(&self, points: I) -> PublishStats
-    where
-        I: IntoIterator<Item = (&'a str, &'a TelemetryPoint)>,
-    {
-        let mut stats = PublishStats::default();
-
-        for (key_suffix, point) in points {
-            match self.publish(key_suffix, point).await {
-                Ok(()) => stats.success += 1,
-                Err(e) => {
-                    stats.failed += 1;
-                    tracing::warn!(error = %e, "Failed to publish telemetry");
-                }
-            }
-        }
-
-        stats
-    }
-
     /// Get the number of active publishers.
     pub async fn publisher_count(&self) -> usize {
         self.publishers.read().await.len()
@@ -468,10 +424,6 @@ impl AdvancedPublisherRegistry {
         tracing::debug!("Cleared all advanced publishers");
     }
 }
-
-// One `PublishStats`, not two: the batch outcome is the same shape on both
-// tiers, and this module used to carry a byte-for-byte copy (#1155).
-pub use crate::publisher::PublishStats;
 
 #[cfg(test)]
 mod tests {
