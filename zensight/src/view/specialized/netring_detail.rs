@@ -2,8 +2,7 @@
 //! `@rpc/netring/*` read procedures by (the calls go through `Message::Call`
 //! and land in `DeviceDetailState::calls`, #1261 — principle P2, pulled only
 //! when a user drills into a netring host, never streamed), and what is not
-//! an answer to a call: the anomalies projected onto the device and the
-//! flow↔process join slot.
+//! an answer to a call: the flow↔process join slot.
 //!
 //! The `*_key` builders and `fetch_*` helpers remain for the fleet-wide
 //! joins (topology, the Security drill-down) that fetch with the `*` origin
@@ -161,13 +160,11 @@ pub fn http_key(origin: Option<&zenkey::RemoteOrigin>) -> String {
     format!("{}?top={TOP_N}", rpc_key(origin, "http"))
 }
 
-/// What the netring view holds that is not an answer to a call (#1261).
+/// What the netring view holds that is not an answer to a call (#1261):
+/// the flow↔process join slot. (The device's firing anomalies are
+/// `DeviceDetailState::alerts`.)
 #[derive(Debug, Clone, Default)]
 pub struct NetringDetailState {
-    /// Firing netring anomalies scoped to this device's source (#253), projected
-    /// by the app from the external alert set so the Security tab + Overview
-    /// anomaly strip render without threading `AlertsState` through the view.
-    pub anomalies: Vec<zensight_common::Alert>,
     /// The flow↔process join result for one flow row (#309): `(flow key,
     /// fetched attribution)`. One in-flight join at a time — clicking another
     /// row's "who?" replaces it.

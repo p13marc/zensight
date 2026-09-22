@@ -22,10 +22,21 @@ use crate::view::specialized::SpecializedTab;
 use crate::view::specialized::fetch::Fetch;
 use crate::view::specialized::netring_detail::NetringTopic;
 
-/// The procedures a tab calls when it opens (#1261): what
-/// `prefetch_netring_tab` asks for, each once, so a tab opens with its rows
-/// on the way. Overview, Bandwidth and Security stream; JA4H is served only
-/// by `ja4plus` builds, so it is fetched by hand rather than with its tab.
+/// The firing netring anomalies on this device (#253): the device's alerts
+/// (`DeviceDetailState::alerts`, projected by the app) of kind `Anomaly`.
+fn anomalies(state: &DeviceDetailState) -> Vec<zensight_common::Alert> {
+    state
+        .alerts
+        .iter()
+        .filter(|a| a.kind == zensight_common::AlertKind::Anomaly)
+        .cloned()
+        .collect()
+}
+
+/// The procedures a tab calls when it opens (#1261): what the app's tab
+/// prefetch asks for, each once, so a tab opens with its rows on the way.
+/// Overview, Bandwidth and Security stream; JA4H is served only by `ja4plus`
+/// builds, so it is fetched by hand rather than with its tab.
 pub fn tab_procedures(tab: SpecializedTab) -> &'static [NetringTopic] {
     use NetringTopic as T;
     match tab {
@@ -95,8 +106,8 @@ fn netring_tabs(
             has_prefix(state, "assets/") || !matches!(state.calls.fetch("assets"), Fetch::Idle),
         ),
         TabItem::new(Security, "Security")
-            .visible(!state.netring_detail.anomalies.is_empty())
-            .badge(state.netring_detail.anomalies.len()),
+            .visible(!anomalies(state).is_empty())
+            .badge(anomalies(state).len()),
         TabItem::new(Capture, "Capture")
             .visible(state.metrics.keys().any(|k| k.starts_with("capture/")) || capture_advertised),
     ]
@@ -2132,7 +2143,7 @@ fn anomaly_technique(a: &zensight_common::Alert) -> Option<&str> {
 /// Overview anomaly strip (#253): a one-line rollup of firing netring detectors
 /// that click-throughs to the Security tab. `None` when there are no anomalies.
 fn anomaly_strip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
-    let anoms = &state.netring_detail.anomalies;
+    let anoms = &anomalies(state);
     if anoms.is_empty() {
         return None;
     }
@@ -2174,7 +2185,7 @@ fn anomaly_strip(state: &DeviceDetailState) -> Option<Element<'_, Message>> {
 /// and pivots each anomaly to its offending flows. Deliberately compact — it
 /// does not duplicate the full Security view.
 fn render_netring_security(state: &DeviceDetailState) -> Element<'_, Message> {
-    let anoms = &state.netring_detail.anomalies;
+    let anoms = &anomalies(state);
     let open = button(text("Open Security view").size(font::CAPTION))
         .padding([4, 10])
         .on_press(Message::OpenSecurity);

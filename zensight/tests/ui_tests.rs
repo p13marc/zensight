@@ -3741,7 +3741,7 @@ fn test_netring_security_tab_and_strip() {
 
     let device_id = DeviceId::fixture("netring", "wiretap1");
     let mut state = DeviceDetailState::new(device_id);
-    state.netring_detail.anomalies = vec![Alert {
+    state.alerts = vec![Alert {
         timestamp: 0,
         observed_at_ms: None,
         source: "wiretap1".into(),

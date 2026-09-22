@@ -1504,15 +1504,10 @@ impl ZenSight {
                 {
                     device.specialized_tab = tab;
                 }
-                // Prefetch the newly-activated tab's on-demand channel(s) so it
-                // isn't empty until a manual fetch.
-                let prefetch = match device_id.protocol() {
-                    Some(zensight_common::Protocol::Netring) => self.prefetch_netring_tab(tab),
-                    Some(zensight_common::Protocol::Netlink) => self.prefetch_netlink_tab(tab),
-                    Some(zensight_common::Protocol::Systemd) => self.prefetch_systemd_tab(tab),
-                    _ => None,
-                };
-                if let Some(task) = prefetch {
+                // Prefetch the newly-activated tab's procedures so it isn't
+                // empty until a manual fetch — the view's own list (#1261).
+                let calls = crate::view::specialized::tab_calls(&device_id.producer, tab);
+                if let Some(task) = self.prefetch_calls(calls) {
                     return ControlFlow::Break(task);
                 }
             }
@@ -2009,7 +2004,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
-                self.refresh_netring_anomalies();
+                self.refresh_device_alerts();
             }
 
             Message::AlertCleared {
@@ -2024,7 +2019,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
-                self.refresh_netring_anomalies();
+                self.refresh_device_alerts();
             }
 
             Message::AlertsSeed(alerts) => {
@@ -2042,7 +2037,7 @@ impl ZenSight {
                 if self.current_view == CurrentView::Topology {
                     self.topology.apply_alerts(&self.alerts.external);
                 }
-                self.refresh_netring_anomalies();
+                self.refresh_device_alerts();
             }
 
             Message::CatalogSeed(snapshot) => {
@@ -2600,9 +2595,10 @@ impl ZenSight {
                 // Topology refresh (#391): while the map is open, re-pull
                 // matrix/flows/neighbors every ~10 s so edge rates stay live.
                 let topo_fetch = self.maybe_refresh_topology();
-                // Units refresh (#283): while the systemd Units tab is open,
-                // re-pull it when the host reports a unit job completing.
-                let units_fetch = self.maybe_refresh_systemd_units();
+                // Counter-driven refresh (#283, #1261): while a tab that
+                // watches a streamed counter is open (systemd's Units), re-call
+                // its procedure when the counter moves.
+                let units_fetch = self.maybe_refresh_on_counter();
                 let log_fetch = match (log_fetch, topo_fetch) {
                     (Some(a), Some(b)) => Some(Task::batch([a, b])),
                     (Some(a), None) | (None, Some(a)) => Some(a),
@@ -5916,43 +5912,35 @@ impl ZenSight {
         })
     }
 
-    /// Re-pull the Units table when the host reports that a unit job finished.
+    /// Re-call a procedure when a streamed counter the open tab watches moves
+    /// (#283, #1261). The sensor already streams the counter, so this needs
+    /// no new wire surface: a change means the state behind the table moved,
+    /// whether ZenSight caused it or someone acted on the host directly.
+    /// Without this the table silently showed whatever was true when it was
+    /// last fetched. Which counter, on which tab, re-calls what is the view's
+    /// (`specialized::refresh_when_moves`).
     ///
-    /// The sensor already streams `events/job_removed_total`, so this needs no
-    /// new wire surface: a change in that counter means some unit's state moved,
-    /// whether ZenSight caused it or someone ran `systemctl` over SSH. Without
-    /// this the table silently showed whatever was true when it was last
-    /// fetched.
-    ///
-    /// Runs off the 1 Hz tick, so it is inherently rate-limited, and skips while
-    /// a fetch is already in flight.
-    fn maybe_refresh_systemd_units(&mut self) -> Option<Task<Message>> {
-        use crate::view::specialized::SpecializedTab;
-
+    /// Runs off the 1 Hz tick, so it is inherently rate-limited; skips while
+    /// the call is in flight; and seeds on first sight rather than
+    /// refreshing — arriving at a host that has restarted units at some point
+    /// in its life is not news.
+    fn maybe_refresh_on_counter(&mut self) -> Option<Task<Message>> {
         let device = self.selected_device.as_mut()?;
-        if !device.device_id.is(zensight_common::Protocol::Systemd)
-            || device.specialized_tab != SpecializedTab::Units
-        {
-            return None;
-        }
-        let jobs = match device
-            .metrics
-            .get("events/job_removed_total")
-            .map(|p| &p.value)
-        {
+        let (metric, procedure, params) = crate::view::specialized::refresh_when_moves(
+            &device.device_id.producer,
+            device.specialized_tab,
+        )?;
+        let now = match device.metrics.get(metric).map(|p| &p.value) {
             Some(zensight_common::TelemetryValue::Counter(v)) => *v as f64,
             Some(zensight_common::TelemetryValue::Gauge(v)) => *v,
             _ => return None,
         };
-        let moved = device.systemd_detail.job_events_seen != Some(jobs);
-        // Seed on first sight rather than refreshing: arriving at a host that
-        // has restarted units at some point in its life is not news.
-        let first_sight = device.systemd_detail.job_events_seen.is_none();
-        device.systemd_detail.job_events_seen = Some(jobs);
-        if !moved || first_sight || device.calls.is_loading("units") {
+        let seen = device.counters_seen.insert(metric.to_string(), now);
+        let moved = seen.is_some_and(|s| s != now);
+        if !moved || device.calls.is_loading(procedure) {
             return None;
         }
-        Some(self.call_now("units", String::new()))
+        Some(self.call_now(procedure, params.to_string()))
     }
 
     /// Query the netring sensor's current detector config (#121, status
@@ -6039,21 +6027,6 @@ impl ZenSight {
                 }
             }
         })
-    }
-
-    /// Fetch an on-demand netlink detail table from the sensor's query channel.
-    /// Prefetch the systemd procedure(s) a newly-activated tab renders, so
-    /// the panel isn't empty until a manual refresh (#281); the Units tab
-    /// also asks what this host permits before it decides which controls to
-    /// offer. Each asked once (#1261).
-    fn prefetch_systemd_tab(
-        &mut self,
-        tab: crate::view::specialized::SpecializedTab,
-    ) -> Option<Task<Message>> {
-        let procedures = crate::view::specialized::systemd::tab_procedures(tab)
-            .iter()
-            .map(|p| (p.to_string(), String::new()));
-        self.prefetch_calls(procedures)
     }
 
     /// Cross-view pivot (#313): open the systemd device for `host` on the Units
@@ -6361,29 +6334,6 @@ impl ZenSight {
                 .ok_or_else(|| not_responding.to_string());
             into_message(result)
         })
-    }
-
-    /// On tab activation (#243), prefetch the procedures that back a netring
-    /// tab — each once (#1261), so a loaded table is never clobbered and an
-    /// in-flight call never re-fired. `None` when the tab streams.
-    fn prefetch_netring_tab(
-        &mut self,
-        tab: crate::view::specialized::SpecializedTab,
-    ) -> Option<Task<Message>> {
-        let procedures = crate::view::specialized::netring::tab_procedures(tab)
-            .iter()
-            .map(|t| (t.procedure().to_string(), t.params()));
-        self.prefetch_calls(procedures)
-    }
-
-    fn prefetch_netlink_tab(
-        &mut self,
-        tab: crate::view::specialized::SpecializedTab,
-    ) -> Option<Task<Message>> {
-        let procedures = crate::view::specialized::netlink::tab_procedures(tab)
-            .iter()
-            .map(|t| (t.procedure().to_string(), String::new()));
-        self.prefetch_calls(procedures)
     }
 
     /// Call every procedure of a tab not yet asked (#1261), so it opens with
@@ -8911,29 +8861,28 @@ impl ZenSight {
     /// Select a device to view in detail. Returns a task that pre-loads this
     /// device's restart-survived history from the local store off the UI thread
     /// (#22), so the detail chart opens pre-populated with persisted trends.
-    /// Project the firing external anomalies scoped to the selected netring
-    /// device's source into its detail state, so the Security tab + Overview
-    /// anomaly strip render without threading `AlertsState` through the view
-    /// (#253). No-op unless a netring device is open.
-    fn refresh_netring_anomalies(&mut self) {
-        use zensight_common::{AlertKind, Protocol};
-        let Some(source) = self
+    /// Project the firing external alerts scoped to the selected device —
+    /// its source and its producer — into its detail state, so a view
+    /// renders them (netring's Security tab and Overview anomaly strip,
+    /// #253) without threading `AlertsState` through (#1261). No-op with no
+    /// device open.
+    fn refresh_device_alerts(&mut self) {
+        let Some((producer, source)) = self
             .selected_device
             .as_ref()
-            .filter(|d| d.device_id.is(Protocol::Netring))
-            .map(|d| d.device_id.source.clone())
+            .map(|d| (d.device_id.producer.clone(), d.device_id.source.clone()))
         else {
             return;
         };
-        let anomalies: Vec<zensight_common::Alert> = self
+        let alerts: Vec<zensight_common::Alert> = self
             .alerts
             .active_external()
             .into_iter()
-            .filter(|a| a.kind == AlertKind::Anomaly && a.source == source)
+            .filter(|a| a.source == source && a.protocol.as_str() == producer)
             .cloned()
             .collect();
         if let Some(device) = self.selected_device.as_mut() {
-            device.netring_detail.anomalies = anomalies;
+            device.alerts = alerts;
         }
     }
 
@@ -8985,7 +8934,7 @@ impl ZenSight {
         self.sync_selected_intake();
         self.set_view(CurrentView::Device);
         // Project firing anomalies for this source into the netring view (#253).
-        self.refresh_netring_anomalies();
+        self.refresh_device_alerts();
 
         // Prefetch this protocol's primary detail channels so the drill-in opens
         // pre-populated rather than Idle-until-clicked (#127).
@@ -9569,15 +9518,12 @@ impl FleetQueriers {
 
 fn prefetch_channels(producer: &str) -> Vec<Message> {
     use crate::view::specialized::netlink_detail::NetlinkDetailTopic;
-    use zensight_common::Protocol;
 
-    // A producer outside the enum has no on-demand channel the GUI knows to
-    // prefetch; its device opens with what it streams (#1256).
-    let Ok(protocol) = producer.parse::<Protocol>() else {
-        return Vec::new();
-    };
-    match protocol {
-        Protocol::Netlink => vec![
+    // A producer with no bespoke view has no procedure the GUI knows to ask
+    // for on open; its device opens with what it streams and the generic
+    // view's Procedures section (#1256, #1261).
+    match producer {
+        "netlink" => vec![
             NetlinkDetailTopic::Sockets.call(),
             NetlinkDetailTopic::Routes.call(),
             NetlinkDetailTopic::Neighbors.call(),
@@ -9585,22 +9531,20 @@ fn prefetch_channels(producer: &str) -> Vec<Message> {
             // on open, not behind an extra click.
             NetlinkDetailTopic::RouteChanges.call(),
         ],
-        Protocol::Netring => {
-            vec![crate::view::specialized::netring_detail::NetringTopic::Flows.call()]
-        }
+        "netring" => vec![crate::view::specialized::netring_detail::NetringTopic::Flows.call()],
         // The outlet panel decides what to offer from the sensor's advertised
         // gate (#956), so the probe has to have been asked before the first
         // render — otherwise a PDU's outlets appear controlless for a beat on
         // a deployment where control is on.
-        Protocol::Snmp => vec![Message::Call {
+        "snmp" => vec![Message::Call {
             procedure: "action/capability".to_string(),
             params: String::new(),
         }],
-        Protocol::Sysinfo => vec![Message::Call {
+        "sysinfo" => vec![Message::Call {
             procedure: "processes".to_string(),
             params: crate::view::specialized::sysinfo::ProcessSort::default().params(),
         }],
-        Protocol::Parallax => vec![Message::Call {
+        "parallax" => vec![Message::Call {
             procedure: "streams".to_string(),
             params: String::new(),
         }],
