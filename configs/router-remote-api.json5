@@ -1,0 +1,134 @@
+// Configuration for the zenoh REMOTE-API bridge: the process a browser talks
+// to (#705, first step of #704). A browser cannot open a zenoh session; the
+// `zenoh-ts` library speaks over a WebSocket to `zenoh-plugin-remote-api`,
+// which runs a native session per browser tab inside this process and
+// proxies control and data. The framing between the two is binary, so
+// `@media` payloads and CBOR attachments cross intact.
+//
+//   just remote-api                               # install (once) + run
+//   zenoh-bridge-remote-api -c configs/router-remote-api.json5
+//   zenoh-bridge-remote-api -c configs/router-remote-api.json5 -m client
+//
+// PREFER THE STANDALONE BRIDGE, NOT `zenohd` + A DYNAMIC PLUGIN. Rust has no
+// stable ABI: a plugin must be built from the same zenoh sources, the same
+// rustc and the same feature set as the router that dlopens it, or the pair
+// SIGSEGVs (or, more quietly, is refused at load and serves nothing — see the
+// three traps on `just router-plugins`). `zenoh-bridge-remote-api` is the
+// plugin statically linked with a zenoh runtime, so there is nothing to
+// mismatch:
+//
+//   cargo install zenoh-bridge-remote-api --version 1.10.1 --locked
+//
+// The version tracks the workspace's `zenoh` (`Cargo.lock`: 1.10.1). It need
+// not equal an installed `zenohd` — the bridge is its own process and only
+// the wire protocol has to agree — but it must stay on the same minor.
+//
+// This file also loads into a `zenohd -c …` whose build ships a matching
+// `libzenoh_plugin_remote_api.so` (same `plugins.remote_api` block; that is
+// the route the plugin's own README documents). Nothing in this tree builds
+// that .so.
+//
+// THE BRIDGE IS A PEER, NOT A ROUTER. `zenoh-bridge-remote-api` accepts
+// `-m peer` (its default) or `-m client` and sets the mode from that flag,
+// overriding any `mode` in this file — which is why this file sets none. It
+// joins an existing deployment through `connect` below; it is not the hub. In
+// the default single-GUI deployment (`just gui listen=tcp/0.0.0.0:7447`) that
+// hub is the GUI; with a zenohd router it is the router, and `-m client` is
+// then the right mode.
+//
+// ---------------------------------------------------------------------------
+// THE NAMESPACE IS SET HERE, ON THE BRIDGE — NOT IN THE BROWSER
+//
+// Application code never spells the deployment base: every ZenSight process
+// speaks base-less keys (`v1/<origin>/…`) and the *session* `namespace`
+// prefixes them on the wire (RFC 03 §1.1, #466). A browser client is no
+// different, and it has no way to be: the remote-api wire format carries no
+// namespace, and the plugin creates each browser's session from this
+// process's runtime — `zenoh::session::init(runtime)` — whose `namespace` is
+// read once from THIS config (`zenoh/src/net/runtime/mod.rs`, `Runtime::new`
+// → every session it hands out is wrapped in `Namespace`). So:
+//
+//   * the browser subscribes to `v1/*/telemetry/parallax/**`, exactly as the
+//     iced GUI does;
+//   * this file's `namespace` must equal the fleet's `zenoh.namespace` —
+//     empty by default (no base; keys sit at the bus root), `"zensight"` or
+//     whatever the deployment chose;
+//   * one bridge serves one deployment. Two deployments sharing a Zenoh
+//     infrastructure need two bridges, one per namespace.
+//
+// The reverse mistake — a browser that spells `zensight/v1/…` against a
+// bridge whose namespace is also `zensight` — publishes to
+// `zensight/zensight/v1/…`, which nothing reads and nothing rejects.
+// ---------------------------------------------------------------------------
+// THE WEBSOCKET IS THE WHOLE BUS, UNAUTHENTICATED
+//
+// The plugin has no authentication and no authorization of its own: anyone
+// who can open the WebSocket holds a full zenoh session — every subscribe,
+// every GET, and every PUT and `@rpc` call the bridge's own session may make.
+// Treat the port as you would the router's:
+//
+//   * bind it to loopback (`"127.0.0.1:10000"`) and put an authenticating
+//     reverse proxy in front, or firewall it to the operator network;
+//   * serve `wss://` (the `secure_websocket` block) whenever the page is
+//     served over https — browsers refuse a plain `ws://` from an https
+//     origin as mixed content;
+//   * if the deployment's router enforces `access_control`, the bridge's link
+//     to it is where a read-only browser is expressed (an ACL rule keyed on
+//     the bridge's id or certificate, denying `put`/`delete`/`declare_
+//     queryable`). That is a router-side policy and is not exercised here.
+// ---------------------------------------------------------------------------
+// NOT A STORAGE
+//
+// This file declares no `storage_manager`, so the `complete`-storage rule the
+// other `router-*.json5` files carry (RFC 05 §2.1) cannot be broken here;
+// `no_storage_claims_completeness` in `zensight-common/tests/router_storage.rs`
+// scans it anyway, because the glob is the guard.
+{
+  // Where the deployment is. Mode-aware like every ZenSight config (#626):
+  // an explicit `connect` with scouting off, so the bridge never joins a
+  // fleet by multicast accident. Repeat for a second hub if you run one.
+  connect: {
+    endpoints: ["tcp/localhost:7447"],
+  },
+  // Nothing dials the bridge over zenoh — browsers arrive on the WebSocket,
+  // the bridge dials the hub. Without this a peer also listens on a random
+  // TCP port on every interface, which is one open port more than needed.
+  listen: {
+    endpoints: [],
+  },
+  scouting: {
+    multicast: { enabled: false },
+  },
+
+  // The deployment base. EMPTY IS THE DEFAULT and means "no namespace":
+  // leave this line commented for a stock deployment. Set it to the same
+  // value as the fleet's `zenoh.namespace` (see above) — never to `v1`.
+  //
+  // namespace: "zensight",
+
+  // Timestamps on the samples this process originates (a browser's PUTs and
+  // `@rpc` calls), as every sensor session sets them (#616).
+  timestamping: {
+    enabled: { router: true, peer: true, client: true },
+  },
+
+  // For a `zenohd -c` host of the dynamic plugin; the bridge sets this itself.
+  plugins_loading: { enabled: true },
+
+  plugins: {
+    remote_api: {
+      // "<port>" binds every interface (`[::]`); "<ip>:<port>" one of them.
+      // 10000 is the plugin's default. Loopback + a reverse proxy is the
+      // shape for anything beyond a lab — see the header.
+      websocket_port: "10000",
+
+      // TLS for the WebSocket (`wss://`). Both paths or neither; the plugin
+      // refuses to start with one. PEM in both files.
+      //
+      // secure_websocket: {
+      //   certificate_path: "/etc/zensight/tls/bridge.crt",
+      //   private_key_path: "/etc/zensight/tls/bridge.key",
+      // },
+    },
+  },
+}

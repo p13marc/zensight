@@ -488,3 +488,63 @@ at all — `alert-firing <SEL> [<MIN-SEVERITY>]` is asked for as
 marcpardo/zenkey#463. Until it lands, a deployment's supervision of
 supervision is: `origin-down` per host for liveness, plus a notifier on the
 selector above for everything the sensors judge.
+
+## 9. A browser on the bus: the remote-api bridge
+
+A browser cannot open a zenoh session. What it can do is speak to
+**`zenoh-bridge-remote-api`** over a WebSocket: the bridge runs one native
+zenoh session per browser tab and proxies subscribe, GET, PUT, liveliness and
+`@rpc` calls with binary framing, so `@media` payloads and CBOR attachments
+cross intact (#705, the first step of the browser frontend epic #704). Nothing
+in this tree is a browser client yet; this section is the piece every later
+one needs running.
+
+```bash
+cargo install zenoh-bridge-remote-api --version 1.10.1 --locked   # once
+just remote-api                                                   # hub = the GUI's 7447
+just remote-api connect=tcp/<router-host>:7447 mode=client        # beside a router
+```
+
+`configs/router-remote-api.json5` is the config and its header is the
+contract; the four facts that matter:
+
+- **Use the standalone bridge, not `zenohd` plus a dynamic plugin.** Rust has
+  no stable ABI: a plugin must be built from the same zenoh sources, rustc
+  and feature set as the router that loads it, or the pair SIGSEGVs — or is
+  refused at load and quietly serves nothing, the failure `just
+  router-plugins` documents three traps for. The bridge links the plugin
+  statically. Its version follows the workspace's `zenoh` (`Cargo.lock`),
+  not an installed `zenohd`; they only have to share a minor.
+- **It is a peer (or client), not a router.** The bridge joins the deployment
+  through `connect`; the mode is a CLI flag on the binary (`-m peer` default,
+  `-m client` beside a router) and overrides anything in the file. It
+  listens on no zenoh port of its own — only the WebSocket.
+- **The namespace is set on the bridge, never in the browser.** The remote-api
+  wire format carries no namespace, and the plugin creates every browser
+  session from the bridge's runtime, whose `namespace` is read once from the
+  config. A browser therefore spells base-less keys — `v1/*/telemetry/parallax/**`
+  — exactly as the iced GUI does, and the bridge's `namespace` must equal the
+  fleet's `zenoh.namespace` (empty by default). One bridge per deployment;
+  two namespaces need two bridges.
+- **The WebSocket is the whole bus, unauthenticated.** The plugin has no
+  authentication or authorization of its own: whoever reaches the port
+  holds a full session. Bind it to loopback and put an authenticating
+  reverse proxy in front, or firewall it to the operator network; serve
+  `wss://` (the `secure_websocket` block, both PEM paths) whenever the page
+  is https, or the browser refuses the socket as mixed content. A read-only
+  browser is a router-side `access_control` rule on the bridge's link, not a
+  bridge setting.
+
+To run it under systemd, `packaging/systemd/zenoh-bridge-remote-api.service`
+is the unit: `-m client`, no capabilities, the full sandbox block, a
+`MemoryMax` that is a starting point (one session per open tab; an H.264
+tier per tile is the expensive case), and the binary at `/usr/local/bin`
+because it comes from `cargo install`, not the release tarball. It has no
+quadlet twin — upstream publishes no container image for it — and
+`scripts/packaging-check.sh` says so by name.
+
+What was verified here, and what was not: the bridge starts with the shipped
+config, loads `remote_api` from its static library, opens only the WebSocket
+port and answers an upgrade with `101 Switching Protocols`. No browser client
+ran against it — that is #706 — so the namespace paragraph rests on reading
+the zenoh runtime, not on a subscription observed end to end.

@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 /// document, collect no `self_stats`, and construct no `MemoryGovernor`, so a
 /// `resources` block would parse and then be read by nothing. Giving them a
 /// budget means giving them the health plane first — filed separately rather
-/// than faked here. The `router-*` files are zenohd's own configuration and
-/// are not ZenSight configs at all.
+/// than faked here. The `router-*` files are zenoh's own configuration (a
+/// zenohd's storages, or the remote-api bridge's, #705) and are not ZenSight
+/// configs at all.
 const NOT_A_SENSOR: &[&str] = &[
     "correlator.json5",
     "desired.json5",
@@ -32,6 +33,7 @@ const NOT_A_SENSOR: &[&str] = &[
     "router-events-storage.json5",
     "router-evidence-storage.json5",
     "router-pdns-influxdb-storage.json5",
+    "router-remote-api.json5",
 ];
 
 fn configs_dir() -> PathBuf {

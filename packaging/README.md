@@ -56,6 +56,7 @@ later. Capabilities are the `.service`'s `AmbientCapabilities` without the
 
 | Unit | Exposure | Capabilities | `MemoryMax` | `budget_rss_mb` |
 |---|---|---|---:|---:|
+| `zenoh-bridge-remote-api` | 1.7 OK | — | 256M | — |
 | `zensight-correlator` | 1.7 OK | — | 128M | 96 |
 | `zensight-desired` | 1.7 OK | — | 96M | 72 |
 | `zensight-exporter-otel` | 1.7 OK | — | 128M | 96 |

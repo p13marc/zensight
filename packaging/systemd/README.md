@@ -1,7 +1,10 @@
 # ZenSight systemd units
 
 One unit per sensor / exporter (plus the correlator, the historian and the
-fleet policy compiler). These units ship inside each
+fleet policy compiler), and one for a binary that is not ours:
+`zenoh-bridge-remote-api.service` runs the upstream zenoh remote-api bridge
+that puts a browser on the bus (#705, `docs/DEPLOYMENT.md` §9) — install
+that binary with `cargo install`, not from the tarball. These units ship inside each
 release's `zensight-<ver>-linux-amd64.tar.gz` (deb/rpm packaging was retired with
 the move to Forgejo releases) — install by hand:
 

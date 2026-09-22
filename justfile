@@ -920,3 +920,33 @@ router-plugins version="1.10.0":
     (cd "$work" && CXXFLAGS="-include cstdint" cargo build --release)   # trap 3
     find "$work/target/release" -maxdepth 1 -name 'libzenoh_*.so' -exec cp -v {} ~/.zenoh/lib/ \;
     ls -l ~/.zenoh/lib
+
+# A browser on the bus (#705, first step of #704): the zenoh REMOTE-API
+# bridge, which `zenoh-ts` talks to over a WebSocket. Installs
+# `zenoh-bridge-remote-api` from crates.io on first use — the STANDALONE
+# binary, deliberately, not `zenohd` + a dynamic plugin: Rust has no stable
+# ABI, so a plugin and its router must be built from identical sources,
+# rustc and features or the pair SIGSEGVs; the bridge links the plugin
+# statically and has nothing to mismatch. The version is the workspace's
+# `zenoh` (Cargo.lock). Then runs it against `configs/router-remote-api.json5`,
+# whose header is the deployment contract: the bridge is a PEER that joins
+# an existing hub (the GUI's 7447 by default), the deployment NAMESPACE is
+# set in that file and never in the browser, and the WebSocket is the whole
+# bus with no authentication of its own.
+#
+#   just remote-api                                    # ws://localhost:10000
+#   just remote-api connect=tcp/router:7447 mode=client
+#   just remote-api connect=tcp/router:7447 mode=client version=1.10.1
+remote-api connect=hub mode="peer" version="1.10.1":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    connect="{{trim_start_match(connect, 'connect=')}}"
+    mode="{{trim_start_match(mode, 'mode=')}}"
+    version="{{trim_start_match(version, 'version=')}}"
+    if ! command -v zenoh-bridge-remote-api >/dev/null \
+       || ! zenoh-bridge-remote-api --version 2>/dev/null | grep -q "v$version"; then
+      echo "installing zenoh-bridge-remote-api $version (a few minutes, once)"
+      cargo install zenoh-bridge-remote-api --version "$version" --locked
+    fi
+    exec zenoh-bridge-remote-api -c configs/router-remote-api.json5 \
+      -m "$mode" -e "$connect" --no-multicast-scouting
