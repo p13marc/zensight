@@ -7201,13 +7201,17 @@ fn test_snmp_overview_two_pollers_one_device_name() {
         "both switches' interfaces are counted"
     );
 
-    // The map holding two entries is only half the claim, and the easy half:
-    // it follows from the key type. The half that was actually broken is that
-    // `decode_sample` **computed the origin and then dropped it**, so no
-    // caller could build the key at all. A source assertion is what pins that.
+    // The list holding two entries is only half the claim, and the easy half:
+    // it follows from the store's key. The half that was actually broken is
+    // that `decode_sample` **computed the origin and then dropped it**, so no
+    // caller could build the key at all. Since #1261 the interface table
+    // arrives through the structural path as a `Message::Document` whose
+    // origin `subscription::tests::the_snmp_interface_table_is_a_document`
+    // pins; the source assertion here pins that the arm still hands the
+    // origin on rather than dropping it.
     let src = include_str!("../src/subscription.rs");
     let tail = src
-        .split("ZensightState::SnmpInterfaces { device }")
+        .split("ZensightState::SnmpInterfaces { .. }")
         .nth(1)
         .expect("the interface-table decode arm");
     let arm = &tail[..tail.len().min(400)];
