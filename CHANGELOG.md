@@ -92,8 +92,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whitespace → `_`, case kept) — #843's two defects — so a unit with an
   uppercase letter was a chunk the grammar refused; the builder's injective
   slug replaces it, byte-identical for every legal name. Every
-  `telemetry_guard.rs` is gone; sysinfo and the four rest-var producers
-  remain on `publish(&str)`.
+  `telemetry_guard.rs` is gone. **sysinfo**, the largest tree, follows:
+  `map::Metric` carries its `Subject` (the string constructor's debug-time
+  registry check is the compiler's now; `Metric::metric()` is the tail the
+  57 mapper tests still pin), the collector's own `publish` takes a subject
+  and renders the key, the SMART and GPU readers' run-time metric names go
+  through two dispatch tables (`smart_subject`, `gpu_subject` — a name the
+  registry does not declare is dropped and logged, never published
+  unregistered), per-CPU times and schedstat bind their `cpuN` chunk, and
+  every foreign name (mount, interface, chip, device, card) reaches the
+  builder raw. `build_key_expr` is deleted. **netlink** follows on the
+  systemd shape: every `map.rs` builder, the events counters and the route
+  flap counter hand back `map::Built` pairs and the collector's one publish
+  helper takes the pair; the interface name goes to the builder raw
+  (`device_chunk`'s escape, applied once), wireguard's peer, tc's qdisc kind,
+  nft's family and table and ethtool's feature name bind their chunks, and
+  `events/{family}/{action}` binds `<action>_total`. netlink is the first
+  caller of the advanced tier's `publish_subject`, which read its producer
+  by parsing its own prefix as a key — and a prefix is not a key (RFC 03
+  §1.6), so every typed publish on that tier failed; it reads the prefix's
+  last chunk now. netring and the four rest-var producers remain on
+  `publish(&str)`.
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green
