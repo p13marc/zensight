@@ -4,6 +4,7 @@
 //! parses them (RFC 3164 and RFC 5424 formats), and publishes
 //! them to Zenoh as TelemetryPoints.
 
+mod built;
 mod commands;
 mod config;
 mod dedup;
@@ -22,7 +23,6 @@ mod receiver;
 mod search;
 mod sentinel;
 mod store;
-mod telemetry_guard;
 mod template;
 mod tls;
 
@@ -429,7 +429,6 @@ async fn main() -> Result<()> {
         let stats = ingest_stats.clone();
         let health = runner.health();
         let registry_tick = registry.clone();
-        let v1_prefix_tick = zensight_sensor_core::v1::for_producer("logs").telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let drop_alert_ratio = syslog_config.ingest.drop_alert_ratio;
         let source = source.clone();
@@ -448,18 +447,14 @@ async fn main() -> Result<()> {
                 // Publish the ingest counters + a windowed `dropped_ratio` gauge
                 // (#546) so dashboards can alert on sustained loss directly.
                 let mut points = cur.to_points(&source);
-                points.push(telemetry_guard::checked_point(
+                points.push(built::built(
                     &source,
-                    "ingest/dropped_ratio",
+                    zensight_common::registry::logs::Subject::IngestDroppedRatio,
                     zensight_common::telemetry::TelemetryValue::Gauge(loss),
                 ));
-                for point in points {
-                    let key = format!("{}/{}", v1_prefix_tick, point.metric);
-                    if let Err(e) = registry_tick
-                        .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
-                        .await
-                    {
-                        tracing::warn!(error = %e, key, "failed to publish ingest metric");
+                for (subject, point) in points {
+                    if let Err(e) = put_subject(&registry_tick, &subject, &point, format).await {
+                        tracing::warn!(error = %e, metric = %point.metric, "failed to publish ingest metric");
                     }
                 }
 
@@ -523,7 +518,6 @@ async fn main() -> Result<()> {
     });
     if let Some(agg) = aggregator.clone() {
         let registry_tick = registry.clone();
-        let v1_prefix_tick = zensight_sensor_core::v1::for_producer("logs").telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let stats_tick = journald_stats.clone();
         let budget_reporter = budget_alerts_on.then(|| alert_reporter.clone());
@@ -558,13 +552,9 @@ async fn main() -> Result<()> {
                     }
                 }
 
-                for point in points {
-                    let key = format!("{}/{}", v1_prefix_tick, point.metric);
-                    if let Err(e) = registry_tick
-                        .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
-                        .await
-                    {
-                        tracing::warn!(error = %e, key, "failed to publish derived metric");
+                for (subject, point) in points {
+                    if let Err(e) = put_subject(&registry_tick, &subject, &point, format).await {
+                        tracing::warn!(error = %e, metric = %point.metric, "failed to publish derived metric");
                     }
                 }
             }
@@ -588,7 +578,6 @@ async fn main() -> Result<()> {
     });
     if let Some(tagg) = template_agg.clone() {
         let registry_tick = registry.clone();
-        let v1_prefix_tick = zensight_sensor_core::v1::for_producer("logs").telemetry_prefix();
         let interval_secs = syslog_config.derived_interval_secs.max(1);
         let source = source.clone();
         runner.spawn(async move {
@@ -596,13 +585,9 @@ async fn main() -> Result<()> {
             let mut tick = tokio::time::interval(Duration::from_secs(interval_secs));
             loop {
                 tick.tick().await;
-                for point in tagg.emit(&source) {
-                    let key = format!("{}/{}", v1_prefix_tick, point.metric);
-                    if let Err(e) = registry_tick
-                        .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
-                        .await
-                    {
-                        tracing::warn!(error = %e, key, "failed to publish template metric");
+                for (subject, point) in tagg.emit(&source) {
+                    if let Err(e) = put_subject(&registry_tick, &subject, &point, format).await {
+                        tracing::warn!(error = %e, metric = %point.metric, "failed to publish template metric");
                     }
                 }
             }
@@ -969,7 +954,6 @@ async fn store_maintenance_loop(
     cfg: config::LogStoreConfig,
 ) {
     use std::sync::atomic::Ordering;
-    let prefix = zensight_sensor_core::v1::for_producer("logs").telemetry_prefix();
     let max_age_ms = (cfg.max_age_days as i64).saturating_mul(86_400_000);
     let mut tick = tokio::time::interval(std::time::Duration::from_secs(
         cfg.prune_interval_secs.max(1),
@@ -996,34 +980,53 @@ async fn store_maintenance_loop(
             .map(|t| (now_ms - t).max(0) / 1000)
             .unwrap_or(0);
         let points = [
-            telemetry_guard::checked_point(
+            built::built(
                 &source,
-                "store/records",
+                zensight_common::registry::logs::Subject::StoreRecords,
                 zensight_common::telemetry::TelemetryValue::Gauge(stats.records as f64),
             ),
-            telemetry_guard::checked_point(
+            built::built(
                 &source,
-                "store/oldest_age_secs",
+                zensight_common::registry::logs::Subject::StoreOldestAgeSecs,
                 zensight_common::telemetry::TelemetryValue::Gauge(oldest_age as f64),
             ),
-            telemetry_guard::checked_point(
+            built::built(
                 &source,
-                "store/write_drops_total",
+                zensight_common::registry::logs::Subject::StoreWriteDropsTotal,
                 zensight_common::telemetry::TelemetryValue::Counter(
                     counters.dropped.load(Ordering::Relaxed),
                 ),
             ),
         ];
-        for point in points {
-            let key = format!("{}/{}", prefix, point.metric);
-            if let Err(e) = registry
-                .put_point(&key, &point, zensight_common::QosClass::Telemetry, format)
-                .await
-            {
-                tracing::warn!(error = %e, key, "failed to publish store metric");
+        for (subject, point) in points {
+            if let Err(e) = put_subject(&registry, &subject, &point, format).await {
+                tracing::warn!(error = %e, metric = %point.metric, "failed to publish store metric");
             }
         }
     }
+}
+
+/// Put one telemetry point under its generated subject (#1274) through the
+/// baseline registry this sensor publishes with: the key is rendered from
+/// the subject, so a subject the registry does not declare has no spelling.
+async fn put_subject(
+    registry: &zensight_common::PublisherRegistry,
+    subject: &zensight_common::registry::logs::Subject,
+    point: &zensight_common::TelemetryPoint,
+    format: zensight_common::Format,
+) -> anyhow::Result<()> {
+    let producer = zensight_common::registry::logs::producer();
+    let key = zensight_common::subject::telemetry_key(subject, &producer)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    registry
+        .put_point(
+            key.as_str(),
+            point,
+            zensight_common::QosClass::Telemetry,
+            format,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 /// Handle a filter command.

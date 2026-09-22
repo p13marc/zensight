@@ -29,7 +29,7 @@ use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
+use zensight_common::telemetry::TelemetryValue;
 
 use crate::config::{Framing, OverflowPolicy};
 use crate::receiver::ReceivedMessage;
@@ -90,15 +90,16 @@ impl IngestStatsSnapshot {
     }
 
     /// The four `logs/ingest/*_total` counters as telemetry points.
-    pub fn to_points(self, source: &str) -> Vec<TelemetryPoint> {
-        let counter = |metric: &str, v: u64| {
-            crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Counter(v))
+    pub fn to_points(self, source: &str) -> Vec<crate::built::Built> {
+        use zensight_common::registry::logs::Subject;
+        let counter = |subject: Subject, v: u64| {
+            crate::built::built(source, subject, TelemetryValue::Counter(v))
         };
         vec![
-            counter("ingest/received_total", self.received),
-            counter("ingest/parsed_total", self.parsed),
-            counter("ingest/parse_failed_total", self.parse_failed),
-            counter("ingest/dropped_total", self.dropped),
+            counter(Subject::IngestReceivedTotal, self.received),
+            counter(Subject::IngestParsedTotal, self.parsed),
+            counter(Subject::IngestParseFailedTotal, self.parse_failed),
+            counter(Subject::IngestDroppedTotal, self.dropped),
         ]
     }
 }
@@ -453,8 +454,8 @@ mod tests {
         let pts = snap.to_points("host01");
         let find = |m: &str| {
             pts.iter()
-                .find(|p| p.metric == m)
-                .map(|p| p.value.clone())
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p.value.clone())
                 .unwrap()
         };
         assert_eq!(find("ingest/received_total"), TelemetryValue::Counter(2));
@@ -464,7 +465,7 @@ mod tests {
             TelemetryValue::Counter(1)
         );
         assert_eq!(find("ingest/dropped_total"), TelemetryValue::Counter(1));
-        assert!(pts.iter().all(|p| p.source == "host01"));
+        assert!(pts.iter().all(|(_, p)| p.source == "host01"));
     }
 
     // ---- framing: LF ---------------------------------------------------------

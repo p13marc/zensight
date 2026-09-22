@@ -85,8 +85,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subject beside each point (`map::Built`) and the collector publishes
   through it — the unit name goes to the builder raw and comes back slugged
   exactly as `sanitize_unit` slugs it, `boot/{phase}` and `events/{kind}`
-  bind their whole chunk; parallax's stats ticker takes a subject. Two more
-  guards gone; one remains (logs).
+  bind their whole chunk; parallax's stats ticker takes a subject. **logs**
+  closes the guards: its builders hand back `built::Built` pairs and the
+  four publish loops render the key from the subject through the baseline
+  registry. Its `by_unit/{unit}` chunk was a hand-rolled map (`/` and
+  whitespace → `_`, case kept) — #843's two defects — so a unit with an
+  uppercase letter was a chunk the grammar refused; the builder's injective
+  slug replaces it, byte-identical for every legal name. Every
+  `telemetry_guard.rs` is gone; sysinfo and the four rest-var producers
+  remain on `publish(&str)`.
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green
