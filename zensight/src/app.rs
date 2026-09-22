@@ -343,12 +343,6 @@ pub struct ZenSight {
     /// The fleet's served view definitions by producer, from `views`
     /// (#1259). A served definition wins over the bundled one.
     served_views: std::collections::HashMap<String, zensight_common::views::ViewSet>,
-    /// State documents from the structural intake (#1256), per
-    /// `(origin, producer)` and by subject; bounded per key.
-    documents: std::collections::HashMap<
-        (String, String),
-        std::collections::BTreeMap<String, crate::intake::DocumentState>,
-    >,
     /// Events-class records from the structural intake (#1256), a ring.
     events: std::collections::VecDeque<crate::intake::EventState>,
     /// Whether this process has ever been connected (#1116), so the freshness
@@ -631,7 +625,6 @@ impl ZenSight {
             fleet_swept: false,
             schemas: std::collections::HashMap::new(),
             served_views: std::collections::HashMap::new(),
-            documents: std::collections::HashMap::new(),
             events: std::collections::VecDeque::new(),
             has_connected: false,
             persisted: persistent.clone(),
@@ -1647,36 +1640,6 @@ impl ZenSight {
                     && device.device_id.source == source
                 {
                     device.parallax_detail.apply_stream_status(&status);
-                }
-            }
-            Message::SnmpInterfaceTable {
-                origin,
-                device,
-                table,
-            } => {
-                // Fleet-wide map for the overview's rate-based rankings
-                // (#533); LWW per **device**, and a device is the triple
-                // (#1118) — two pollers polling one `switch01` are two
-                // switches, and on a name key they took turns overwriting
-                // each other.
-                let id = DeviceId {
-                    producer: "snmp".into(),
-                    origin,
-                    source: device,
-                };
-                self.dashboard
-                    .snmp_interfaces
-                    .insert(id.clone(), table.clone());
-                // The currently-open SNMP device view consumes it too (#530).
-                if let Some(selected) = self.selected_device.as_mut()
-                    && selected.device_id == id
-                {
-                    let DeviceDetailState {
-                        snmp_detail,
-                        metrics,
-                        ..
-                    } = selected;
-                    snmp_detail.apply_interfaces(table, metrics);
                 }
             }
             Message::SnmpEventReceived { origin, record } => {
@@ -7679,7 +7642,7 @@ impl ZenSight {
     /// schemas (#1256): every held document's verdict, every device's
     /// undeclared set, and the selected device's projection of both.
     fn rejudge_intake(&mut self) {
-        for ((_, producer), docs) in self.documents.iter_mut() {
+        for ((_, producer), docs) in self.dashboard.documents.iter_mut() {
             for doc in docs.values_mut() {
                 let (type_name, verdict, declared) = crate::intake::judge(
                     &self.slices,
@@ -7711,15 +7674,19 @@ impl ZenSight {
     ) {
         let (type_name, verdict, declared) =
             crate::intake::judge(&self.slices, &self.schemas, &producer, &subject, &value);
-        let doc = crate::intake::DocumentState {
-            subject: subject.clone(),
+        let doc = crate::intake::DocumentState::new(
+            subject.clone(),
             type_name,
             value,
             verdict,
             declared,
-            received_ms: now_ms(),
-        };
-        let held = self.documents.entry((origin, producer)).or_default();
+            now_ms(),
+        );
+        let held = self
+            .dashboard
+            .documents
+            .entry((origin, producer))
+            .or_default();
         held.insert(subject, doc);
         // Bounded per `(origin, producer)`: the oldest received goes first.
         while held.len() > DOCUMENTS_PER_PRODUCER {
@@ -7737,6 +7704,20 @@ impl ZenSight {
         self.sync_selected_intake();
     }
 
+    /// Drop the documents a retired device published (#1261): the subjects
+    /// under its source, or every subject when it was the only device this
+    /// producer had on this origin — the same rule `documents_for` reads by.
+    fn forget_documents(&mut self, id: &DeviceId) {
+        let sole = self.sole_device_of(id);
+        let key = (id.origin.clone(), id.producer.clone());
+        if let Some(docs) = self.dashboard.documents.get_mut(&key) {
+            docs.retain(|subject, _| !(sole || subject_is_under(subject, &id.source)));
+            if docs.is_empty() {
+                self.dashboard.documents.remove(&key);
+            }
+        }
+    }
+
     /// The documents held for a device: the same `(origin, producer)`, and
     /// the subject under the device's source — or every subject, when the
     /// device is the only one this producer has on this origin (a host
@@ -7746,7 +7727,8 @@ impl ZenSight {
         id: &DeviceId,
     ) -> std::collections::BTreeMap<String, crate::intake::DocumentState> {
         let sole = self.sole_device_of(id);
-        self.documents
+        self.dashboard
+            .documents
             .get(&(id.origin.clone(), id.producer.clone()))
             .map(|docs| {
                 docs.iter()
@@ -7818,6 +7800,9 @@ impl ZenSight {
             selected.slice_known = slice_known;
             selected.family = family;
             selected.definition = definition;
+            // A view that projects a document into borrowed rows (snmp's
+            // interface table) rebuilds them now (#1261).
+            crate::view::specialized::on_documents(selected);
         }
     }
 
@@ -9256,7 +9241,7 @@ impl ZenSight {
                 // counted in the overview's device tally and ranked in its
                 // hotlists — now that the map is keyed on the triple, the
                 // eviction can reach it.
-                self.dashboard.snmp_interfaces.remove(id);
+                self.forget_documents(id);
             }
             tracing::info!(
                 evicted = gone.len(),

@@ -61,6 +61,15 @@ pub fn refresh_when_moves(
     }
 }
 
+/// A device's held documents changed (#1261): a view that projects one of
+/// them into rows it borrows for the table's lifetime rebuilds that
+/// projection here — snmp's interface table from `<device>/interfaces`.
+pub fn on_documents(state: &mut DeviceDetailState) {
+    if state.device_id.producer == "snmp" {
+        snmp::project_documents(state);
+    }
+}
+
 /// How a finished write reads in a toast (#1261): the producer's own
 /// phrasing when its view has one (systemd's job results, snmp's outlet
 /// outcome), else the generic reading of the reply's `accepted`, `error`,

@@ -2838,6 +2838,7 @@ mod tests {
                 verdict: Verdict::NotValidated(NotValidated::NoSchema),
                 declared: Declared::Yes,
                 received_ms: 0,
+                typed: Default::default(),
             },
         );
         state.documents.insert(
@@ -2849,6 +2850,7 @@ mod tests {
                 verdict: Verdict::NotValidated(NotValidated::NoSchema),
                 declared: Declared::No,
                 received_ms: 0,
+                typed: Default::default(),
             },
         );
         let mut ui = simulator(generic_device_view(&state));

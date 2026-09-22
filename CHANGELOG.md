@@ -335,6 +335,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `NetringDetailState::anomalies`, `refresh_netring_anomalies`,
   `prefetch_{netring,netlink,systemd}_tab`, `maybe_refresh_systemd_units`,
   and the last `Protocol` matches on the device-detail path.
+- **snmp's interface table is a state document like any other** (#1261).
+  The intake's document store moves to `DashboardState::documents`
+  (fleet-wide), `DocumentState::decoded::<T>()` decodes a document once and
+  lends it out, the overview ranks the fleet's interfaces from the store
+  (`overview::snmp::interface_documents`), and the device view rebuilds its
+  joined rows when its documents change (`specialized::on_documents`). A
+  retired device's documents are forgotten with it. Gone: the typed
+  `SnmpInterfaceTable` message and its decode arm,
+  `DashboardState::snmp_interfaces`. `SnmpOverviewData::interfaces` is the
+  `(origin, table)` list. `Message` is 370 variants.
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in

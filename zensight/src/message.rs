@@ -688,22 +688,6 @@ pub enum Message {
         source: String,
         status: zensight_common::stream::StreamStatus,
     },
-    /// The joined SNMP interface doc from `state/snmp/<device>/interfaces`
-    /// (#529/#530) — LWW; replaces the previous doc for that device.
-    ///
-    /// `origin` is the **publishing poller's** v1 origin, read from the key
-    /// (#1118). It used to be dropped here, and the handler keyed the
-    /// fleet-wide map on the bare device name — so two SNMP pollers in two
-    /// racks both polling a `switch01` collided LWW, mixing their interfaces
-    /// in the top-talkers and oper-down hotlists and flapping between them.
-    /// That is the class #474 fixed for `DeviceId`: the origin says who is
-    /// talking, the source says who they are talking about, and neither alone
-    /// names a device.
-    SnmpInterfaceTable {
-        origin: String,
-        device: String,
-        table: zensight_common::InterfaceTable,
-    },
     /// A durable SNMP trap/inform record off the events plane (#536).
     ///
     /// `origin` for the same reason as [`Message::SnmpInterfaceTable`]
