@@ -8,6 +8,8 @@
 //! `procfs` types into these plain owned structs and calls these mappers; the
 //! collector turns the resulting [`Metric`]s into wire `TelemetryPoint`s.
 
+use zensight_common::registry::sysinfo::Subject;
+use zensight_common::subject::TelemetrySubject;
 use zensight_common::telemetry::TelemetryValue;
 
 /// One mapped metric, prior to becoming a wire `TelemetryPoint`. Keeping the
@@ -16,52 +18,46 @@ use zensight_common::telemetry::TelemetryValue;
 /// wire `HashMap` at publish time.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Metric {
-    pub metric: String,
+    /// The registry-declared subject this metric publishes under (#1274):
+    /// the key is rendered from it, and [`Metric::metric`] is its tail.
+    pub subject: Subject,
     pub value: TelemetryValue,
     pub labels: Vec<(&'static str, String)>,
 }
 
 impl Metric {
-    /// The one constructor. Every metric name this sensor emits is born here, and
-    /// here it is checked against the subject registry (RFC 08 §5, issue #468).
-    ///
-    /// In debug builds — which is every unit test — an unregistered name panics.
-    /// That is what makes the ~57 mapper tests below a *conformance suite*: adding
-    /// a metric without registering it in `zensight-common/registry/sysinfo.toml`
-    /// fails tests that already exist, rather than shipping a subject the registry
-    /// has never heard of and `introspect` cannot describe.
-    ///
-    /// sysinfo is the one producer whose collector publishes straight through
-    /// `PublisherRegistry::put` rather than a typed key builder, so without this it
-    /// would be the *only* host producer with no test-time conformance — and it has
-    /// the largest tree of the six.
-    fn new(metric: impl Into<String>, value: TelemetryValue) -> Self {
-        let metric = metric.into();
-        debug_assert!(
-            zensight_common::registry::is_registered_telemetry("sysinfo", &metric),
-            "unregistered sysinfo telemetry subject {metric:?} — add it to \
-             zensight-common/registry/sysinfo.toml (RFC 08 §5, issue #468)"
-        );
+    /// The one constructor. Every metric this sensor emits is born here, as a
+    /// generated `Subject` (#1274): a subject the registry does not declare
+    /// has no constructor, which is the compile-time form of the check the
+    /// old string-keyed constructor ran on every mapper test (RFC 08 §5,
+    /// issue #468). The ~57 mapper tests below still read each metric's tail,
+    /// so a registry path that moves fails a test that already exists.
+    fn new(subject: Subject, value: TelemetryValue) -> Self {
         Self {
-            metric,
+            subject,
             value,
             labels: Vec::new(),
         }
     }
 
+    /// The subject's tail — what `TelemetryPoint.metric` carries.
+    pub fn metric(&self) -> String {
+        self.subject.tail()
+    }
+
     /// A gauge metric with no labels.
-    pub fn gauge(metric: impl Into<String>, value: f64) -> Self {
-        Self::new(metric, TelemetryValue::Gauge(value))
+    pub fn gauge(subject: Subject, value: f64) -> Self {
+        Self::new(subject, TelemetryValue::Gauge(value))
     }
 
     /// A counter metric with no labels.
-    pub fn counter(metric: impl Into<String>, value: u64) -> Self {
-        Self::new(metric, TelemetryValue::Counter(value))
+    pub fn counter(subject: Subject, value: u64) -> Self {
+        Self::new(subject, TelemetryValue::Counter(value))
     }
 
     /// A text metric with no labels.
-    pub fn text(metric: impl Into<String>, value: impl Into<String>) -> Self {
-        Self::new(metric, TelemetryValue::Text(value.into()))
+    pub fn text(subject: Subject, value: impl Into<String>) -> Self {
+        Self::new(subject, TelemetryValue::Text(value.into()))
     }
 
     /// Attach a label (builder style).
@@ -98,6 +94,53 @@ pub fn sanitize_key(s: &str) -> String {
         .to_string()
 }
 
+/// The SMART attribute `name` publishes under, for `device` (#1274): the
+/// registry declares each attribute as its own family, so a name it does not
+/// declare is a bug in the table above, not a new key.
+fn smart_subject(device: &str, name: &str) -> Subject {
+    match name {
+        "critical_warning" => Subject::smart_critical_warning(device),
+        "available_spare" => Subject::smart_available_spare(device),
+        "available_spare_threshold" => Subject::smart_available_spare_threshold(device),
+        "percentage_used" => Subject::smart_percentage_used(device),
+        "pending_sectors" => Subject::smart_pending_sectors(device),
+        "media_errors_total" => Subject::smart_media_errors_total(device),
+        "power_on_hours" => Subject::smart_power_on_hours(device),
+        "unsafe_shutdowns_total" => Subject::smart_unsafe_shutdowns_total(device),
+        "data_units_read_total" => Subject::smart_data_units_read_total(device),
+        "data_units_written_total" => Subject::smart_data_units_written_total(device),
+        "reallocated_sectors_total" => Subject::smart_reallocated_sectors_total(device),
+        "crc_errors_total" => Subject::smart_crc_errors_total(device),
+        other => unreachable!("SMART attribute {other:?} has no registered family"),
+    }
+}
+
+/// The GPU family a collector-side metric name publishes under, for `card`
+/// (#1274): the DRM and NVML readers name their metrics by leaf; the
+/// per-process VRAM rows carry their pid in the name. `None` for a name the
+/// registry does not declare — which the collector logs and drops rather
+/// than publishing an unregistered key.
+pub fn gpu_subject(card: &str, name: &str) -> Option<Subject> {
+    Some(match name {
+        "utilisation_pct" => Subject::gpu_utilisation_pct(card),
+        "vram_used_bytes" => Subject::gpu_vram_used_bytes(card),
+        "vram_total_bytes" => Subject::gpu_vram_total_bytes(card),
+        "temp_celsius" => Subject::gpu_temp_celsius(card),
+        "power_watts" => Subject::gpu_power_watts(card),
+        "fan_rpm" => Subject::gpu_fan_rpm(card),
+        "clock_mhz" => Subject::gpu_clock_mhz(card),
+        "memory_utilisation_pct" => Subject::gpu_memory_utilisation_pct(card),
+        "ecc_volatile_uncorrected" => Subject::gpu_ecc_volatile_uncorrected(card),
+        "ecc_aggregate_uncorrected" => Subject::gpu_ecc_aggregate_uncorrected(card),
+        other => {
+            let pid = other
+                .strip_prefix("process/")?
+                .strip_suffix("/vram_bytes")?;
+            Subject::gpu_process_vram_bytes(card, pid)
+        }
+    })
+}
+
 // ===========================================================================
 // A. Pressure Stall Information (PSI)
 // ===========================================================================
@@ -132,15 +175,18 @@ pub fn map_pressure(psi: &PsiSample) -> Vec<Metric> {
     let mut emit = |res: &'static str, scope: &'static str, p: &PressureSample| {
         for (suffix, avg) in [("avg10", p.avg10), ("avg60", p.avg60), ("avg300", p.avg300)] {
             out.push(
-                Metric::gauge(format!("pressure/{res}/{scope}_{suffix}"), avg)
+                Metric::gauge(Subject::pressure(res, format!("{scope}_{suffix}")), avg)
                     .label("resource", res)
                     .label("scope", scope),
             );
         }
         out.push(
-            Metric::counter(format!("pressure/{res}/{scope}_total_us"), p.total_us)
-                .label("resource", res)
-                .label("scope", scope),
+            Metric::counter(
+                Subject::pressure(res, format!("{scope}_total_us")),
+                p.total_us,
+            )
+            .label("resource", res)
+            .label("scope", scope),
         );
     };
 
@@ -219,25 +265,25 @@ pub fn parse_vmstat(content: &str) -> VmStat {
 pub fn map_vmstat(vm: &VmStat) -> Vec<Metric> {
     let mut out = Vec::new();
     if let Some(v) = vm.oom_kill {
-        out.push(Metric::counter("memory/oom_kills_total", v));
+        out.push(Metric::counter(Subject::MemoryOomKillsTotal, v));
     }
     if let Some(v) = vm.pgmajfault {
-        out.push(Metric::counter("memory/page_faults_major_total", v));
+        out.push(Metric::counter(Subject::MemoryPageFaultsMajorTotal, v));
     }
     if let Some(v) = vm.pgfault {
-        out.push(Metric::counter("memory/page_faults_total", v));
+        out.push(Metric::counter(Subject::MemoryPageFaultsTotal, v));
     }
     if let Some(v) = vm.pswpin {
-        out.push(Metric::counter("memory/paging_in_total", v));
+        out.push(Metric::counter(Subject::MemoryPagingInTotal, v));
     }
     if let Some(v) = vm.pswpout {
-        out.push(Metric::counter("memory/paging_out_total", v));
+        out.push(Metric::counter(Subject::MemoryPagingOutTotal, v));
     }
     if let Some(v) = vm.pgpgin {
-        out.push(Metric::counter("memory/pgpgin_total", v));
+        out.push(Metric::counter(Subject::MemoryPgpginTotal, v));
     }
     if let Some(v) = vm.pgpgout {
-        out.push(Metric::counter("memory/pgpgout_total", v));
+        out.push(Metric::counter(Subject::MemoryPgpgoutTotal, v));
     }
     out
 }
@@ -259,14 +305,14 @@ pub struct KernelDerivatives {
 /// the instantaneous run-queue / blocked counts.
 pub fn map_kernel_derivatives(k: &KernelDerivatives) -> Vec<Metric> {
     let mut out = vec![
-        Metric::counter("system/context_switches_total", k.context_switches),
-        Metric::counter("system/forks_total", k.forks),
+        Metric::counter(Subject::SystemContextSwitchesTotal, k.context_switches),
+        Metric::counter(Subject::SystemForksTotal, k.forks),
     ];
     if let Some(r) = k.procs_running {
-        out.push(Metric::gauge("system/procs_running", r as f64));
+        out.push(Metric::gauge(Subject::SystemProcsRunning, r as f64));
     }
     if let Some(b) = k.procs_blocked {
-        out.push(Metric::gauge("system/procs_blocked", b as f64));
+        out.push(Metric::gauge(Subject::SystemProcsBlocked, b as f64));
     }
     out
 }
@@ -305,9 +351,9 @@ pub fn map_fd(fd: &FdStat) -> Vec<Metric> {
         0.0
     };
     vec![
-        Metric::gauge("system/file_descriptors_used", fd.used as f64),
-        Metric::gauge("system/file_descriptors_max", fd.max as f64),
-        Metric::gauge("system/file_descriptors_used_percent", pct),
+        Metric::gauge(Subject::SystemFileDescriptorsUsed, fd.used as f64),
+        Metric::gauge(Subject::SystemFileDescriptorsMax, fd.max as f64),
+        Metric::gauge(Subject::SystemFileDescriptorsUsedPercent, pct),
     ]
 }
 
@@ -326,7 +372,7 @@ pub struct InodeStat {
 pub fn map_inodes(stats: &[InodeStat]) -> Vec<Metric> {
     let mut out = Vec::new();
     for s in stats {
-        let key = sanitize_key(&s.mount);
+        let mount = s.mount.as_str();
         let pct = if s.total > 0 {
             (s.used as f64 / s.total as f64) * 100.0
         } else {
@@ -337,19 +383,19 @@ pub fn map_inodes(stats: &[InodeStat]) -> Vec<Metric> {
                 .label("fs_type", s.fs_type.clone())
         };
         out.push(label(Metric::gauge(
-            format!("disk/{key}/inodes_total"),
+            Subject::disk_inodes_total(mount),
             s.total as f64,
         )));
         out.push(label(Metric::gauge(
-            format!("disk/{key}/inodes_used"),
+            Subject::disk_inodes_used(mount),
             s.used as f64,
         )));
         out.push(label(Metric::gauge(
-            format!("disk/{key}/inodes_free"),
+            Subject::disk_inodes_free(mount),
             s.free as f64,
         )));
         out.push(label(Metric::gauge(
-            format!("disk/{key}/inode_used_percent"),
+            Subject::disk_inode_used_percent(mount),
             pct,
         )));
     }
@@ -418,22 +464,19 @@ pub fn parse_net_dev(content: &str) -> Vec<NetDevStat> {
 pub fn map_net_dev(stats: &[NetDevStat]) -> Vec<Metric> {
     let mut out = Vec::new();
     for s in stats {
-        let key = sanitize_key(&s.iface);
+        let iface = s.iface.as_str();
         let label = |m: Metric| m.label("interface", s.iface.clone());
-        for (suffix, val) in [
-            ("rx_dropped", s.rx_dropped),
-            ("rx_fifo", s.rx_fifo),
-            ("rx_frame", s.rx_frame),
-            ("multicast", s.multicast),
-            ("tx_dropped", s.tx_dropped),
-            ("tx_fifo", s.tx_fifo),
-            ("tx_colls", s.tx_colls),
-            ("tx_carrier", s.tx_carrier),
+        for (subject, val) in [
+            (Subject::network_rx_dropped(iface), s.rx_dropped),
+            (Subject::network_rx_fifo(iface), s.rx_fifo),
+            (Subject::network_rx_frame(iface), s.rx_frame),
+            (Subject::network_multicast(iface), s.multicast),
+            (Subject::network_tx_dropped(iface), s.tx_dropped),
+            (Subject::network_tx_fifo(iface), s.tx_fifo),
+            (Subject::network_tx_colls(iface), s.tx_colls),
+            (Subject::network_tx_carrier(iface), s.tx_carrier),
         ] {
-            out.push(label(Metric::counter(
-                format!("network/{key}/{suffix}"),
-                val,
-            )));
+            out.push(label(Metric::counter(subject, val)));
         }
     }
     out
@@ -541,42 +584,48 @@ pub fn map_cgroup(c: &CgroupSample) -> Vec<Metric> {
     let label = |m: Metric| m.label("cgroup", c.path.clone());
 
     if let Some(v) = c.cpu_nr_throttled {
-        out.push(label(Metric::counter("cgroup/cpu/nr_throttled", v)));
+        out.push(label(Metric::counter(Subject::CgroupCpuNrThrottled, v)));
     }
     if let Some(v) = c.cpu_throttled_usec {
-        out.push(label(Metric::counter("cgroup/cpu/throttled_usec", v)));
+        out.push(label(Metric::counter(Subject::CgroupCpuThrottledUsec, v)));
     }
     if let Some(v) = c.memory_current {
-        out.push(label(Metric::gauge("cgroup/memory/current", v as f64)));
+        out.push(label(Metric::gauge(Subject::CgroupMemoryCurrent, v as f64)));
     }
     if let Some(v) = c.memory_max {
-        out.push(label(Metric::gauge("cgroup/memory/max", v as f64)));
+        out.push(label(Metric::gauge(Subject::CgroupMemoryMax, v as f64)));
     }
     // A used-percent against the limit is the actionable container signal.
     if let (Some(cur), Some(max)) = (c.memory_current, c.memory_max)
         && max > 0
     {
         out.push(label(Metric::gauge(
-            "cgroup/memory/used_percent",
+            Subject::CgroupMemoryUsedPercent,
             (cur as f64 / max as f64) * 100.0,
         )));
     }
     if let Some(v) = c.memory_oom_kills {
-        out.push(label(Metric::counter("cgroup/memory/oom_kills_total", v)));
+        out.push(label(Metric::counter(
+            Subject::CgroupMemoryOomKillsTotal,
+            v,
+        )));
     }
     if let Some(v) = c.memory_oom {
-        out.push(label(Metric::counter("cgroup/memory/oom_total", v)));
+        out.push(label(Metric::counter(Subject::CgroupMemoryOomTotal, v)));
     }
 
     let mut emit_psi = |res: &'static str, scope: &'static str, p: &PressureSample| {
         out.push(label(
-            Metric::gauge(format!("cgroup/{res}/pressure/{scope}_avg10"), p.avg10)
-                .label("resource", res)
-                .label("scope", scope),
+            Metric::gauge(
+                Subject::cgroup_pressure(res, format!("{scope}_avg10")),
+                p.avg10,
+            )
+            .label("resource", res)
+            .label("scope", scope),
         ));
         out.push(label(
             Metric::counter(
-                format!("cgroup/{res}/pressure/{scope}_total_us"),
+                Subject::cgroup_pressure(res, format!("{scope}_total_us")),
                 p.total_us,
             )
             .label("resource", res)
@@ -677,41 +726,34 @@ pub fn map_power(s: &PowerSample) -> Vec<Metric> {
     let mut out = Vec::new();
     for (zone, name, watts) in &s.rapl_watts {
         out.push(
-            Metric::gauge(format!("power/rapl/{}/watts", sanitize_key(zone)), *watts)
+            Metric::gauge(Subject::power_rapl_watts(zone), *watts)
                 .label("zone", zone.clone())
                 .label("name", name.clone()),
         );
     }
     for f in &s.fans {
         out.push(
-            Metric::gauge(
-                format!(
-                    "sensors/{}/{}/rpm",
-                    sanitize_key(&f.chip),
-                    sanitize_key(&f.label)
-                ),
-                f.rpm,
-            )
-            .label("chip", f.chip.clone())
-            .label("label", f.label.clone()),
+            Metric::gauge(Subject::sensors_rpm(&f.chip, &f.label), f.rpm)
+                .label("chip", f.chip.clone())
+                .label("label", f.label.clone()),
         );
     }
     for b in &s.batteries {
-        let key = sanitize_key(&b.name);
         if let Some(cap) = b.capacity {
             out.push(
-                Metric::gauge(format!("battery/{key}/capacity"), cap).label("name", b.name.clone()),
+                Metric::gauge(Subject::battery_capacity(&b.name), cap)
+                    .label("name", b.name.clone()),
             );
         }
         if let Some(status) = &b.status {
             out.push(
-                Metric::text(format!("battery/{key}/status"), status.clone())
+                Metric::text(Subject::battery_status(&b.name), status.clone())
                     .label("name", b.name.clone()),
             );
         }
     }
     if let Some(e) = s.entropy_avail {
-        out.push(Metric::gauge("system/entropy_avail", e as f64));
+        out.push(Metric::gauge(Subject::SystemEntropyAvail, e as f64));
     }
     out
 }
@@ -835,7 +877,7 @@ pub fn map_smart(samples: &[SmartSample]) -> Vec<Metric> {
     }
     let mut out = Vec::new();
     for s in samples {
-        let dev = sanitize_key(&s.device);
+        let dev = s.device.as_str();
         let gauges: [(&str, Option<f64>); 5] = [
             ("critical_warning", s.critical_warning.map(f64::from)),
             ("available_spare", s.available_spare.map(f64::from)),
@@ -848,7 +890,7 @@ pub fn map_smart(samples: &[SmartSample]) -> Vec<Metric> {
         ];
         for (name, v) in gauges {
             if let Some(v) = v {
-                out.push(labeled(s, Metric::gauge(format!("smart/{dev}/{name}"), v)));
+                out.push(labeled(s, Metric::gauge(smart_subject(dev, name), v)));
             }
         }
         let counters: [(&str, Option<u64>); 6] = [
@@ -861,16 +903,13 @@ pub fn map_smart(samples: &[SmartSample]) -> Vec<Metric> {
         ];
         for (name, v) in counters {
             if let Some(v) = v {
-                out.push(labeled(
-                    s,
-                    Metric::counter(format!("smart/{dev}/{name}"), v),
-                ));
+                out.push(labeled(s, Metric::counter(smart_subject(dev, name), v)));
             }
         }
         if let Some(v) = s.crc_errors {
             out.push(labeled(
                 s,
-                Metric::counter(format!("smart/{dev}/crc_errors_total"), v),
+                Metric::counter(Subject::smart_crc_errors_total(dev), v),
             ));
         }
     }
@@ -1093,13 +1132,13 @@ pub fn parse_netstat(snmp: &str, netstat: &str) -> NetstatSample {
 pub fn map_netstat(s: &NetstatSample) -> Vec<Metric> {
     let mut out = Vec::new();
     if let Some(v) = s.tcp_retrans_segs {
-        out.push(Metric::counter("network/tcp/retrans_segs_total", v));
+        out.push(Metric::counter(Subject::NetworkTcpRetransSegsTotal, v));
     }
     if let Some(v) = s.listen_overflows {
-        out.push(Metric::counter("network/tcp/listen_overflows_total", v));
+        out.push(Metric::counter(Subject::NetworkTcpListenOverflowsTotal, v));
     }
     if let Some(v) = s.listen_drops {
-        out.push(Metric::counter("network/tcp/listen_drops_total", v));
+        out.push(Metric::counter(Subject::NetworkTcpListenDropsTotal, v));
     }
     out
 }
@@ -1149,16 +1188,16 @@ pub fn parse_sockstat(content: &str) -> SockstatSample {
 pub fn map_sockstat(s: &SockstatSample) -> Vec<Metric> {
     let mut out = Vec::new();
     if let Some(v) = s.sockets_used {
-        out.push(Metric::gauge("network/sockets/used", v as f64));
+        out.push(Metric::gauge(Subject::NetworkSocketsUsed, v as f64));
     }
     if let Some(v) = s.tcp_inuse {
-        out.push(Metric::gauge("network/sockets/tcp_inuse", v as f64));
+        out.push(Metric::gauge(Subject::NetworkSocketsTcpInuse, v as f64));
     }
     if let Some(v) = s.tcp_mem_pages {
-        out.push(Metric::gauge("network/sockets/tcp_mem_pages", v as f64));
+        out.push(Metric::gauge(Subject::NetworkSocketsTcpMemPages, v as f64));
     }
     if let Some(v) = s.udp_inuse {
-        out.push(Metric::gauge("network/sockets/udp_inuse", v as f64));
+        out.push(Metric::gauge(Subject::NetworkSocketsUdpInuse, v as f64));
     }
     out
 }
@@ -1198,9 +1237,9 @@ pub fn parse_softnet(content: &str) -> Option<SoftnetSample> {
 /// Map softnet totals under `network/softnet/...` as cumulative counters.
 pub fn map_softnet(s: &SoftnetSample) -> Vec<Metric> {
     vec![
-        Metric::counter("network/softnet/processed_total", s.processed),
-        Metric::counter("network/softnet/dropped_total", s.dropped),
-        Metric::counter("network/softnet/squeezed_total", s.squeezed),
+        Metric::counter(Subject::NetworkSoftnetProcessedTotal, s.processed),
+        Metric::counter(Subject::NetworkSoftnetDroppedTotal, s.dropped),
+        Metric::counter(Subject::NetworkSoftnetSqueezedTotal, s.squeezed),
     ]
 }
 
@@ -1257,13 +1296,17 @@ pub fn parse_schedstat(content: &str) -> Option<SchedstatSample> {
 /// label. Cumulative ns counters — the consumer derives the ns/s rate.
 pub fn map_schedstat(s: &SchedstatSample) -> Vec<Metric> {
     let mut out = vec![Metric::counter(
-        "cpu/schedstat/run_delay_ns_total",
+        Subject::CpuSchedstatRunDelayNsTotal,
         s.total_run_delay_ns,
     )];
     for (cpu, ns) in &s.per_cpu {
         out.push(
-            Metric::counter(format!("cpu{cpu}/schedstat/run_delay_ns_total"), *ns)
-                .label("core", cpu.to_string()),
+            // `{cpu}` binds the whole chunk, `cpu<N>`.
+            Metric::counter(
+                Subject::per_cpu_schedstat_run_delay(format!("cpu{cpu}")),
+                *ns,
+            )
+            .label("core", cpu.to_string()),
         );
     }
     out
@@ -1288,12 +1331,15 @@ pub fn parse_conntrack(count: &str, max: Option<&str>) -> Option<ConntrackSample
 /// Map conntrack under `network/conntrack/{count,max,utilization_percent}`.
 /// `max`/`utilization_percent` are emitted only when the max file was readable.
 pub fn map_conntrack(s: &ConntrackSample) -> Vec<Metric> {
-    let mut out = vec![Metric::gauge("network/conntrack/count", s.count as f64)];
+    let mut out = vec![Metric::gauge(
+        Subject::NetworkConntrackCount,
+        s.count as f64,
+    )];
     if let Some(max) = s.max {
-        out.push(Metric::gauge("network/conntrack/max", max as f64));
+        out.push(Metric::gauge(Subject::NetworkConntrackMax, max as f64));
         if max > 0 {
             out.push(Metric::gauge(
-                "network/conntrack/utilization_percent",
+                Subject::NetworkConntrackUtilizationPercent,
                 (s.count as f64 / max as f64) * 100.0,
             ));
         }
@@ -1316,14 +1362,13 @@ pub struct EdacSample {
 pub fn map_edac(samples: &[EdacSample]) -> Vec<Metric> {
     let mut out = Vec::new();
     for s in samples {
-        let key = sanitize_key(&s.controller);
         let label = |m: Metric| m.label("controller", s.controller.clone());
         out.push(label(Metric::counter(
-            format!("memory/edac/{key}/correctable_total"),
+            Subject::memory_edac_correctable_total(&s.controller),
             s.ce,
         )));
         out.push(label(Metric::counter(
-            format!("memory/edac/{key}/uncorrectable_total"),
+            Subject::memory_edac_uncorrectable_total(&s.controller),
             s.ue,
         )));
     }
@@ -1410,29 +1455,29 @@ pub fn parse_mdstat(content: &str) -> Vec<MdArray> {
 pub fn map_mdstat(arrays: &[MdArray]) -> Vec<Metric> {
     let mut out = Vec::new();
     for a in arrays {
-        let key = sanitize_key(&a.name);
+        let array = a.name.as_str();
         let label = |m: Metric| m.label("array", a.name.clone());
         out.push(label(Metric::text(
-            format!("disk/md/{key}/state"),
+            Subject::disk_md_state(array),
             if a.active { "active" } else { "inactive" },
         )));
         out.push(label(Metric::gauge(
-            format!("disk/md/{key}/degraded"),
+            Subject::disk_md_degraded(array),
             if a.degraded { 1.0 } else { 0.0 },
         )));
         out.push(label(Metric::gauge(
-            format!("disk/md/{key}/failed_disks"),
+            Subject::disk_md_failed_disks(array),
             a.failed_disks as f64,
         )));
         if let Some(t) = a.total_disks {
             out.push(label(Metric::gauge(
-                format!("disk/md/{key}/total_disks"),
+                Subject::disk_md_total_disks(array),
                 t as f64,
             )));
         }
         if let Some(ac) = a.active_disks {
             out.push(label(Metric::gauge(
-                format!("disk/md/{key}/active_disks"),
+                Subject::disk_md_active_disks(array),
                 ac as f64,
             )));
         }
@@ -1602,17 +1647,20 @@ mod tests {
         assert_eq!(m.len(), 8);
         let cpu_total = m
             .iter()
-            .find(|x| x.metric == "pressure/cpu/some_total_us")
+            .find(|x| x.metric() == "pressure/cpu/some_total_us")
             .unwrap();
         assert_eq!(cpu_total.value, TelemetryValue::Counter(12345));
         let cpu_avg10 = m
             .iter()
-            .find(|x| x.metric == "pressure/cpu/some_avg10")
+            .find(|x| x.metric() == "pressure/cpu/some_avg10")
             .unwrap();
         assert_eq!(cpu_avg10.value, TelemetryValue::Gauge(1.5));
-        assert!(m.iter().any(|x| x.metric == "pressure/memory/full_avg300"));
+        assert!(
+            m.iter()
+                .any(|x| x.metric() == "pressure/memory/full_avg300")
+        );
         // Absent resources are not emitted.
-        assert!(!m.iter().any(|x| x.metric.starts_with("pressure/io/")));
+        assert!(!m.iter().any(|x| x.metric().starts_with("pressure/io/")));
     }
 
     #[test]
@@ -1644,9 +1692,9 @@ mod tests {
         assert_eq!(vm.pswpin, None);
         let m = map_vmstat(&vm);
         // Only present keys are mapped.
-        assert!(m.iter().any(|x| x.metric == "memory/page_faults_total"));
-        assert!(!m.iter().any(|x| x.metric == "memory/oom_kills_total"));
-        assert!(!m.iter().any(|x| x.metric == "memory/paging_in_total"));
+        assert!(m.iter().any(|x| x.metric() == "memory/page_faults_total"));
+        assert!(!m.iter().any(|x| x.metric() == "memory/oom_kills_total"));
+        assert!(!m.iter().any(|x| x.metric() == "memory/paging_in_total"));
     }
 
     #[test]
@@ -1661,7 +1709,7 @@ mod tests {
         let m = map_vmstat(&vm);
         let oom = m
             .iter()
-            .find(|x| x.metric == "memory/oom_kills_total")
+            .find(|x| x.metric() == "memory/oom_kills_total")
             .unwrap();
         assert_eq!(oom.value, TelemetryValue::Counter(3));
     }
@@ -1677,14 +1725,14 @@ mod tests {
         let m = map_kernel_derivatives(&k);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "system/context_switches_total")
+                .find(|x| x.metric() == "system/context_switches_total")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(9000)
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "system/procs_running")
+                .find(|x| x.metric() == "system/procs_running")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(2.0)
@@ -1700,7 +1748,7 @@ mod tests {
             procs_blocked: None,
         };
         let m = map_kernel_derivatives(&k);
-        assert!(!m.iter().any(|x| x.metric == "system/procs_running"));
+        assert!(!m.iter().any(|x| x.metric() == "system/procs_running"));
         assert_eq!(m.len(), 2);
     }
 
@@ -1726,7 +1774,7 @@ mod tests {
         let m = map_fd(&FdStat { used: 50, max: 200 });
         let pct = m
             .iter()
-            .find(|x| x.metric == "system/file_descriptors_used_percent")
+            .find(|x| x.metric() == "system/file_descriptors_used_percent")
             .unwrap();
         assert_eq!(pct.value, TelemetryValue::Gauge(25.0));
     }
@@ -1736,7 +1784,7 @@ mod tests {
         let m = map_fd(&FdStat { used: 5, max: 0 });
         let pct = m
             .iter()
-            .find(|x| x.metric == "system/file_descriptors_used_percent")
+            .find(|x| x.metric() == "system/file_descriptors_used_percent")
             .unwrap();
         assert_eq!(pct.value, TelemetryValue::Gauge(0.0));
     }
@@ -1751,10 +1799,13 @@ mod tests {
             used: 250,
         }];
         let m = map_inodes(&stats);
-        assert!(m.iter().any(|x| x.metric == "disk/x-_x2fhome/inodes_total"));
+        assert!(
+            m.iter()
+                .any(|x| x.metric() == "disk/x-_x2fhome/inodes_total")
+        );
         let pct = m
             .iter()
-            .find(|x| x.metric == "disk/x-_x2fhome/inode_used_percent")
+            .find(|x| x.metric() == "disk/x-_x2fhome/inode_used_percent")
             .unwrap();
         assert_eq!(pct.value, TelemetryValue::Gauge(25.0));
         // labels preserve the original mount path.
@@ -1798,7 +1849,7 @@ mod tests {
         let m = map_net_dev(&stats);
         let rx = m
             .iter()
-            .find(|x| x.metric == "network/eth0/rx_dropped")
+            .find(|x| x.metric() == "network/eth0/rx_dropped")
             .unwrap();
         assert_eq!(rx.value, TelemetryValue::Counter(2));
         assert!(rx.labels.contains(&("interface", "eth0".to_string())));
@@ -1856,14 +1907,14 @@ mod tests {
         let m = map_cgroup(&c);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "cgroup/cpu/nr_throttled")
+                .find(|x| x.metric() == "cgroup/cpu/nr_throttled")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(5)
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "cgroup/memory/oom_kills_total")
+                .find(|x| x.metric() == "cgroup/memory/oom_kills_total")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(2)
@@ -1871,14 +1922,14 @@ mod tests {
         // used_percent = 50/200 = 25%.
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "cgroup/memory/used_percent")
+                .find(|x| x.metric() == "cgroup/memory/used_percent")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(25.0)
         );
         assert!(
             m.iter()
-                .any(|x| x.metric == "cgroup/memory/pressure/full_total_us")
+                .any(|x| x.metric() == "cgroup/memory/pressure/full_total_us")
         );
         // cgroup label is attached.
         assert!(m.iter().all(|x| {
@@ -1898,8 +1949,8 @@ mod tests {
             ..Default::default()
         };
         let m = map_cgroup(&c);
-        assert!(!m.iter().any(|x| x.metric == "cgroup/memory/used_percent"));
-        assert!(m.iter().any(|x| x.metric == "cgroup/memory/current"));
+        assert!(!m.iter().any(|x| x.metric() == "cgroup/memory/used_percent"));
+        assert!(m.iter().any(|x| x.metric() == "cgroup/memory/current"));
     }
 
     // --- G. thermal / power ----------------------------------------------
@@ -1952,7 +2003,7 @@ mod tests {
         let m = map_power(&s);
         let rapl = m
             .iter()
-            .find(|x| x.metric == "power/rapl/x-intel-rapl_x3a0/watts")
+            .find(|x| x.metric() == "power/rapl/x-intel-rapl_x3a0/watts")
             .expect("the zone reaches the key sanitized (colon is grammar-illegal)");
         assert_eq!(rapl.value, TelemetryValue::Gauge(12.5));
         // The friendly name rides as a label — it is what the GUI displays.
@@ -1965,28 +2016,28 @@ mod tests {
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "sensors/nct6798/fan1/rpm")
+                .find(|x| x.metric() == "sensors/nct6798/fan1/rpm")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(1200.0)
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "battery/x-_x42_x41_x540/capacity")
+                .find(|x| x.metric() == "battery/x-_x42_x41_x540/capacity")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(87.0)
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "battery/x-_x42_x41_x540/status")
+                .find(|x| x.metric() == "battery/x-_x42_x41_x540/status")
                 .unwrap()
                 .value,
             TelemetryValue::Text("Discharging".to_string())
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "system/entropy_avail")
+                .find(|x| x.metric() == "system/entropy_avail")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(3500.0)
@@ -2114,18 +2165,18 @@ mod tests {
         let m = map_netstat(&s);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "network/tcp/retrans_segs_total")
+                .find(|x| x.metric() == "network/tcp/retrans_segs_total")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(9905)
         );
         assert!(
             m.iter()
-                .any(|x| x.metric == "network/tcp/listen_overflows_total")
+                .any(|x| x.metric() == "network/tcp/listen_overflows_total")
         );
         assert!(
             m.iter()
-                .any(|x| x.metric == "network/tcp/listen_drops_total")
+                .any(|x| x.metric() == "network/tcp/listen_drops_total")
         );
     }
 
@@ -2153,17 +2204,17 @@ mod tests {
         let m = map_sockstat(&s);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "network/sockets/tcp_inuse")
+                .find(|x| x.metric() == "network/sockets/tcp_inuse")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(13.0)
         );
         assert!(
             m.iter()
-                .any(|x| x.metric == "network/sockets/tcp_mem_pages")
+                .any(|x| x.metric() == "network/sockets/tcp_mem_pages")
         );
-        assert!(m.iter().any(|x| x.metric == "network/sockets/udp_inuse"));
-        assert!(m.iter().any(|x| x.metric == "network/sockets/used"));
+        assert!(m.iter().any(|x| x.metric() == "network/sockets/udp_inuse"));
+        assert!(m.iter().any(|x| x.metric() == "network/sockets/used"));
     }
 
     #[test]
@@ -2179,18 +2230,18 @@ mod tests {
         let m = map_softnet(&s);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "network/softnet/squeezed_total")
+                .find(|x| x.metric() == "network/softnet/squeezed_total")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(3)
         );
         assert!(
             m.iter()
-                .any(|x| x.metric == "network/softnet/processed_total")
+                .any(|x| x.metric() == "network/softnet/processed_total")
         );
         assert!(
             m.iter()
-                .any(|x| x.metric == "network/softnet/dropped_total")
+                .any(|x| x.metric() == "network/softnet/dropped_total")
         );
     }
 
@@ -2219,14 +2270,14 @@ mod tests {
         let m = map_schedstat(&s);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "cpu/schedstat/run_delay_ns_total")
+                .find(|x| x.metric() == "cpu/schedstat/run_delay_ns_total")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(687605150808 + 560152514053)
         );
         let c0 = m
             .iter()
-            .find(|x| x.metric == "cpu0/schedstat/run_delay_ns_total")
+            .find(|x| x.metric() == "cpu0/schedstat/run_delay_ns_total")
             .unwrap();
         assert_eq!(c0.value, TelemetryValue::Counter(687605150808));
         assert!(c0.labels.contains(&("core", "0".to_string())));
@@ -2245,14 +2296,14 @@ mod tests {
         let m = map_conntrack(&s);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "network/conntrack/count")
+                .find(|x| x.metric() == "network/conntrack/count")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(48.0)
         );
         let util = m
             .iter()
-            .find(|x| x.metric == "network/conntrack/utilization_percent")
+            .find(|x| x.metric() == "network/conntrack/utilization_percent")
             .unwrap();
         if let TelemetryValue::Gauge(p) = util.value {
             assert!((p - (48.0 / 262144.0 * 100.0)).abs() < 1e-9);
@@ -2267,11 +2318,11 @@ mod tests {
         let s = parse_conntrack("48", None).unwrap();
         assert_eq!(s.max, None);
         let m = map_conntrack(&s);
-        assert!(m.iter().any(|x| x.metric == "network/conntrack/count"));
-        assert!(!m.iter().any(|x| x.metric == "network/conntrack/max"));
+        assert!(m.iter().any(|x| x.metric() == "network/conntrack/count"));
+        assert!(!m.iter().any(|x| x.metric() == "network/conntrack/max"));
         assert!(
             !m.iter()
-                .any(|x| x.metric == "network/conntrack/utilization_percent")
+                .any(|x| x.metric() == "network/conntrack/utilization_percent")
         );
         // Bad count => None entirely.
         assert!(parse_conntrack("garbage", Some("1")).is_none());
@@ -2294,14 +2345,14 @@ mod tests {
         let m = map_edac(&samples);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "memory/edac/mc0/correctable_total")
+                .find(|x| x.metric() == "memory/edac/mc0/correctable_total")
                 .unwrap()
                 .value,
             TelemetryValue::Counter(12)
         );
         let ue = m
             .iter()
-            .find(|x| x.metric == "memory/edac/mc1/uncorrectable_total")
+            .find(|x| x.metric() == "memory/edac/mc1/uncorrectable_total")
             .unwrap();
         assert_eq!(ue.value, TelemetryValue::Counter(3));
         assert!(ue.labels.contains(&("controller", "mc1".to_string())));
@@ -2344,22 +2395,22 @@ mod tests {
         let m = map_mdstat(&arrays);
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "disk/md/md0/degraded")
+                .find(|x| x.metric() == "disk/md/md0/degraded")
                 .unwrap()
                 .value,
             TelemetryValue::Gauge(1.0)
         );
         assert_eq!(
             m.iter()
-                .find(|x| x.metric == "disk/md/md0/state")
+                .find(|x| x.metric() == "disk/md/md0/state")
                 .unwrap()
                 .value,
             TelemetryValue::Text("active".to_string())
         );
-        assert!(m.iter().any(|x| x.metric == "disk/md/md0/failed_disks"));
+        assert!(m.iter().any(|x| x.metric() == "disk/md/md0/failed_disks"));
         assert!(
             m.iter()
-                .find(|x| x.metric == "disk/md/md0/total_disks")
+                .find(|x| x.metric() == "disk/md/md0/total_disks")
                 .unwrap()
                 .labels
                 .contains(&("array", "md0".to_string()))
@@ -2380,8 +2431,8 @@ mod tests {
         assert!(!a.degraded);
         let m = map_mdstat(&arrays);
         // No total/active gauges when the ratio is absent.
-        assert!(!m.iter().any(|x| x.metric == "disk/md/md0/total_disks"));
-        assert!(m.iter().any(|x| x.metric == "disk/md/md0/state"));
+        assert!(!m.iter().any(|x| x.metric() == "disk/md/md0/total_disks"));
+        assert!(m.iter().any(|x| x.metric() == "disk/md/md0/state"));
     }
 
     #[test]
@@ -2402,23 +2453,30 @@ mod tests {
 
     // ---- eBPF latency histogram math (#99) --------------------------------
 
-    /// The registry guard must actually bite. A conformance suite that cannot fail
-    /// is the same mistake as the `{metric...}` catch-all it replaced: vacuously
-    /// true. This is the test that proves the other 96 mean something.
+    /// The registry guard the string constructor ran on every mapper test is
+    /// the compiler's now (#1274): a subject the registry does not declare
+    /// has no constructor. What is left to pin is the tail each family
+    /// renders — byte-identical to what this sensor published by hand — and
+    /// the two dispatch tables, whose names come from the readers at run time.
     #[test]
-    #[should_panic(expected = "unregistered sysinfo telemetry subject")]
-    fn an_unregistered_metric_panics_in_debug() {
-        let _ = Metric::gauge("totally/made/up/subject", 1.0);
-    }
-
-    /// ...and a real one does not.
-    #[test]
-    fn a_registered_metric_constructs() {
-        assert_eq!(Metric::gauge("memory/used", 1.0).metric, "memory/used");
+    fn a_registered_metric_renders_its_tail() {
         assert_eq!(
-            Metric::gauge("disk/home/used", 1.0).metric,
-            "disk/home/used"
+            Metric::gauge(Subject::MemoryUsed, 1.0).metric(),
+            "memory/used"
         );
+        assert_eq!(
+            Metric::gauge(Subject::disk_used("/home"), 1.0).metric(),
+            format!("disk/{}/used", sanitize_key("/home"))
+        );
+        assert_eq!(
+            smart_subject("nvme0", "power_on_hours").tail(),
+            "smart/nvme0/power_on_hours"
+        );
+        assert_eq!(
+            gpu_subject("card0", "process/1234/vram_bytes").map(|s| s.tail()),
+            Some("gpu/card0/process/1234/vram_bytes".to_string())
+        );
+        assert_eq!(gpu_subject("card0", "not/a/family"), None);
     }
 
     #[test]
@@ -2586,18 +2644,19 @@ mod tests {
         let metrics = map_smart(&[nvme, ata]);
         // Registered names (the Metric constructor debug-panics otherwise —
         // this test IS the registry guard for the family).
-        let names: Vec<&str> = metrics.iter().map(|m| m.metric.as_str()).collect();
-        assert!(names.contains(&"smart/nvme0/percentage_used"));
-        assert!(names.contains(&"smart/nvme0/media_errors_total"));
-        assert!(names.contains(&"smart/sda/reallocated_sectors_total"));
-        assert!(names.contains(&"smart/sda/pending_sectors"));
-        assert!(names.contains(&"smart/sda/crc_errors_total"));
+        let names: Vec<String> = metrics.iter().map(|m| m.metric()).collect();
+        let has = |n: &str| names.iter().any(|m| m == n);
+        assert!(has("smart/nvme0/percentage_used"));
+        assert!(has("smart/nvme0/media_errors_total"));
+        assert!(has("smart/sda/reallocated_sectors_total"));
+        assert!(has("smart/sda/pending_sectors"));
+        assert!(has("smart/sda/crc_errors_total"));
         // Absent fields emit nothing: the ATA sample has no NVMe wear field.
-        assert!(!names.contains(&"smart/sda/percentage_used"));
+        assert!(!has("smart/sda/percentage_used"));
         // The model rides as a payload label, never in the key.
         let realloc = metrics
             .iter()
-            .find(|m| m.metric == "smart/sda/reallocated_sectors_total")
+            .find(|m| m.metric() == "smart/sda/reallocated_sectors_total")
             .unwrap();
         assert_eq!(
             realloc

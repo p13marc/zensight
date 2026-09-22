@@ -1,7 +1,6 @@
 //! System metrics collection using sysinfo.
 
 use crate::config::SysinfoConfig;
-use crate::map::sanitize_key;
 
 /// How often the SMART ioctls actually run (#823); ticks in between republish
 /// the cached readings. Drive wear moves in hours, not seconds.
@@ -12,7 +11,9 @@ use std::sync::Arc;
 use sysinfo::{Disks, Networks, System};
 use tracing::{debug, warn};
 use zenoh::Session;
+use zensight_common::registry::sysinfo::Subject;
 use zensight_common::serialization::Format;
+use zensight_common::subject::TelemetrySubject;
 use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 #[cfg(target_os = "linux")]
@@ -24,7 +25,8 @@ pub struct SystemCollector {
     disks: Disks,
     networks: Networks,
     source: String,
-    telemetry_prefix: String,
+    /// The producer this collector publishes as (#1274).
+    producer: zenkey::grammar::Producer,
     config: SysinfoConfig,
     /// Declared-publisher registry for the telemetry path (declare-on-first-use +
     /// cache per key, drop QoS) — never a one-shot `session.put`.
@@ -85,9 +87,7 @@ impl SystemCollector {
             system: System::new_all(),
             disks: Disks::new_with_refreshed_list(),
             networks: Networks::new_with_refreshed_list(),
-            telemetry_prefix: zensight_sensor_core::v1::for_producer("sysinfo")
-                .telemetry_prefix()
-                .into(),
+            producer: zensight_common::registry::sysinfo::producer(),
             source,
             config,
             registry: Arc::new(zensight_common::PublisherRegistry::new(session)),
@@ -215,8 +215,11 @@ impl SystemCollector {
                 ("clock_mhz", m.clock_mhz),
             ] {
                 let Some(v) = value else { continue };
+                let Some(subject) = crate::map::gpu_subject(&info.card, metric) else {
+                    continue;
+                };
                 self.publish(
-                    &format!("gpu/{slug}/{metric}"),
+                    &subject,
                     TelemetryValue::Gauge(v),
                     timestamp,
                     labels.clone(),
@@ -229,8 +232,14 @@ impl SystemCollector {
             // went through `merge` above, so nothing arrives twice.
             if let Some(nv) = nv {
                 for (metric, v) in crate::gpu::nvml::extra_metrics(nv) {
+                    // A name the registry does not declare is dropped and
+                    // said, never published unregistered.
+                    let Some(subject) = crate::map::gpu_subject(&info.card, &metric) else {
+                        tracing::debug!(card = %info.card, metric, "sysinfo: gpu metric has no registered family");
+                        continue;
+                    };
                     self.publish(
-                        &format!("gpu/{slug}/{metric}"),
+                        &subject,
                         TelemetryValue::Gauge(v),
                         timestamp,
                         labels.clone(),
@@ -601,14 +610,14 @@ impl SystemCollector {
         let state = crate::saturation::health_state(score, cfg);
 
         self.publish(
-            "system/saturation_score",
+            &Subject::SystemSaturationScore,
             TelemetryValue::Gauge(score),
             timestamp,
             HashMap::new(),
         )
         .await;
         self.publish(
-            "system/health_state",
+            &Subject::SystemHealthState,
             TelemetryValue::Text(state.to_string()),
             timestamp,
             HashMap::new(),
@@ -628,7 +637,7 @@ impl SystemCollector {
                 .into_iter()
                 .map(|(k, v)| (k.to_string(), v))
                 .collect();
-            self.publish(&m.metric, m.value, timestamp, labels).await;
+            self.publish(&m.subject, m.value, timestamp, labels).await;
         }
         count
     }
@@ -844,7 +853,7 @@ impl SystemCollector {
         // Uptime
         let uptime = System::uptime();
         self.publish(
-            "system/uptime",
+            &Subject::SystemUptime,
             TelemetryValue::Gauge(uptime as f64),
             timestamp,
             HashMap::new(),
@@ -858,7 +867,7 @@ impl SystemCollector {
         let mut labels = HashMap::new();
         labels.insert("period".to_string(), "1m".to_string());
         self.publish(
-            "system/load",
+            &Subject::SystemLoad,
             TelemetryValue::Gauge(load_avg.one),
             timestamp,
             labels,
@@ -869,7 +878,7 @@ impl SystemCollector {
         let mut labels = HashMap::new();
         labels.insert("period".to_string(), "5m".to_string());
         self.publish(
-            "system/load",
+            &Subject::SystemLoad,
             TelemetryValue::Gauge(load_avg.five),
             timestamp,
             labels,
@@ -880,7 +889,7 @@ impl SystemCollector {
         let mut labels = HashMap::new();
         labels.insert("period".to_string(), "15m".to_string());
         self.publish(
-            "system/load",
+            &Subject::SystemLoad,
             TelemetryValue::Gauge(load_avg.fifteen),
             timestamp,
             labels,
@@ -891,7 +900,7 @@ impl SystemCollector {
         // Boot time
         let boot_time = System::boot_time();
         self.publish(
-            "system/boot_time",
+            &Subject::SystemBootTime,
             TelemetryValue::Gauge(boot_time as f64),
             timestamp,
             HashMap::new(),
@@ -910,7 +919,7 @@ impl SystemCollector {
         // Global CPU usage
         let global_usage = self.system.global_cpu_usage();
         self.publish(
-            "cpu/usage",
+            &Subject::CpuUsage,
             TelemetryValue::Gauge(global_usage as f64),
             timestamp,
             HashMap::new(),
@@ -925,7 +934,7 @@ impl SystemCollector {
             labels.insert("name".to_string(), cpu.name().to_string());
 
             self.publish(
-                &format!("cpu/{}/usage", i),
+                &Subject::cpu_core_usage(i.to_string()),
                 TelemetryValue::Gauge(cpu.cpu_usage() as f64),
                 timestamp,
                 labels.clone(),
@@ -938,7 +947,7 @@ impl SystemCollector {
             if freq > 0 {
                 labels.insert("unit".to_string(), "MHz".to_string());
                 self.publish(
-                    &format!("cpu/{}/frequency", i),
+                    &Subject::cpu_core_frequency(i.to_string()),
                     TelemetryValue::Gauge(freq as f64),
                     timestamp,
                     labels,
@@ -961,7 +970,7 @@ impl SystemCollector {
         let mut labels = HashMap::new();
         labels.insert("unit".to_string(), "bytes".to_string());
         self.publish(
-            "memory/total",
+            &Subject::MemoryTotal,
             TelemetryValue::Gauge(total as f64),
             timestamp,
             labels.clone(),
@@ -972,7 +981,7 @@ impl SystemCollector {
         // Used memory
         let used = self.system.used_memory();
         self.publish(
-            "memory/used",
+            &Subject::MemoryUsed,
             TelemetryValue::Gauge(used as f64),
             timestamp,
             labels.clone(),
@@ -983,7 +992,7 @@ impl SystemCollector {
         // Available memory
         let available = self.system.available_memory();
         self.publish(
-            "memory/available",
+            &Subject::MemoryAvailable,
             TelemetryValue::Gauge(available as f64),
             timestamp,
             labels.clone(),
@@ -996,7 +1005,7 @@ impl SystemCollector {
         // change vs. the previous `used/total` figure).
         let usage_pct = crate::map::mem_usage_percent(total, available);
         self.publish(
-            "memory/usage_percent",
+            &Subject::MemoryUsagePercent,
             TelemetryValue::Gauge(usage_pct),
             timestamp,
             HashMap::new(),
@@ -1010,15 +1019,15 @@ impl SystemCollector {
         if let Some(mc) = crate::linux::collect_mem_composition() {
             let mut clabels = HashMap::new();
             clabels.insert("unit".to_string(), "bytes".to_string());
-            for (metric, value) in [
-                ("memory/cached", mc.cached),
-                ("memory/buffers", mc.buffers),
-                ("memory/slab", mc.slab),
-                ("memory/dirty", mc.dirty),
-                ("memory/writeback", mc.writeback),
+            for (subject, value) in [
+                (Subject::MemoryCached, mc.cached),
+                (Subject::MemoryBuffers, mc.buffers),
+                (Subject::MemorySlab, mc.slab),
+                (Subject::MemoryDirty, mc.dirty),
+                (Subject::MemoryWriteback, mc.writeback),
             ] {
                 self.publish(
-                    metric,
+                    &subject,
                     TelemetryValue::Gauge(value as f64),
                     timestamp,
                     clabels.clone(),
@@ -1034,7 +1043,7 @@ impl SystemCollector {
 
         if swap_total > 0 {
             self.publish(
-                "memory/swap_total",
+                &Subject::MemorySwapTotal,
                 TelemetryValue::Gauge(swap_total as f64),
                 timestamp,
                 labels.clone(),
@@ -1043,7 +1052,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                "memory/swap_used",
+                &Subject::MemorySwapUsed,
                 TelemetryValue::Gauge(swap_used as f64),
                 timestamp,
                 labels,
@@ -1053,7 +1062,7 @@ impl SystemCollector {
 
             let swap_pct = (swap_used as f64 / swap_total as f64) * 100.0;
             self.publish(
-                "memory/swap_percent",
+                &Subject::MemorySwapPercent,
                 TelemetryValue::Gauge(swap_pct),
                 timestamp,
                 HashMap::new(),
@@ -1078,9 +1087,6 @@ impl SystemCollector {
                 continue;
             }
 
-            // Sanitize mount point for key expression (replace / with _)
-            let mount_key = sanitize_key(&mount_point);
-
             let mut labels = HashMap::new();
             labels.insert("mount".to_string(), mount_point.clone());
             labels.insert("fs_type".to_string(), fs_type);
@@ -1095,7 +1101,7 @@ impl SystemCollector {
             let used = total.saturating_sub(available);
 
             self.publish(
-                &format!("disk/{}/total", mount_key),
+                &Subject::disk_total(&mount_point),
                 TelemetryValue::Gauge(total as f64),
                 timestamp,
                 labels.clone(),
@@ -1104,7 +1110,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("disk/{}/used", mount_key),
+                &Subject::disk_used(&mount_point),
                 TelemetryValue::Gauge(used as f64),
                 timestamp,
                 labels.clone(),
@@ -1113,7 +1119,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("disk/{}/available", mount_key),
+                &Subject::disk_available(&mount_point),
                 TelemetryValue::Gauge(available as f64),
                 timestamp,
                 labels.clone(),
@@ -1129,7 +1135,7 @@ impl SystemCollector {
             };
             labels.remove("unit");
             self.publish(
-                &format!("disk/{}/usage_percent", mount_key),
+                &Subject::disk_usage_percent(&mount_point),
                 TelemetryValue::Gauge(usage_pct),
                 timestamp,
                 labels,
@@ -1151,8 +1157,6 @@ impl SystemCollector {
                 continue;
             }
 
-            let iface_key = sanitize_key(name);
-
             let mut labels = HashMap::new();
             labels.insert("interface".to_string(), name.clone());
 
@@ -1162,7 +1166,7 @@ impl SystemCollector {
 
             labels.insert("unit".to_string(), "bytes".to_string());
             self.publish(
-                &format!("network/{}/rx_bytes", iface_key),
+                &Subject::network_rx_bytes(name),
                 TelemetryValue::Counter(rx_bytes),
                 timestamp,
                 labels.clone(),
@@ -1171,7 +1175,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("network/{}/tx_bytes", iface_key),
+                &Subject::network_tx_bytes(name),
                 TelemetryValue::Counter(tx_bytes),
                 timestamp,
                 labels.clone(),
@@ -1182,7 +1186,7 @@ impl SystemCollector {
             // Packets received/transmitted
             labels.insert("unit".to_string(), "packets".to_string());
             self.publish(
-                &format!("network/{}/rx_packets", iface_key),
+                &Subject::network_rx_packets(name),
                 TelemetryValue::Counter(data.total_packets_received()),
                 timestamp,
                 labels.clone(),
@@ -1191,7 +1195,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("network/{}/tx_packets", iface_key),
+                &Subject::network_tx_packets(name),
                 TelemetryValue::Counter(data.total_packets_transmitted()),
                 timestamp,
                 labels.clone(),
@@ -1202,7 +1206,7 @@ impl SystemCollector {
             // Errors
             labels.remove("unit");
             self.publish(
-                &format!("network/{}/rx_errors", iface_key),
+                &Subject::network_rx_errors(name),
                 TelemetryValue::Counter(data.total_errors_on_received()),
                 timestamp,
                 labels.clone(),
@@ -1211,7 +1215,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("network/{}/tx_errors", iface_key),
+                &Subject::network_tx_errors(name),
                 TelemetryValue::Counter(data.total_errors_on_transmitted()),
                 timestamp,
                 labels.clone(),
@@ -1235,7 +1239,7 @@ impl SystemCollector {
 
                     labels.insert("unit".to_string(), "bytes/s".to_string());
                     self.publish(
-                        &format!("network/{}/rx_rate", iface_key),
+                        &Subject::network_rx_rate(name),
                         TelemetryValue::Gauge(rx_rate),
                         timestamp,
                         labels.clone(),
@@ -1244,7 +1248,7 @@ impl SystemCollector {
                     count += 1;
 
                     self.publish(
-                        &format!("network/{}/tx_rate", iface_key),
+                        &Subject::network_tx_rate(name),
                         TelemetryValue::Gauge(tx_rate),
                         timestamp,
                         labels,
@@ -1273,7 +1277,7 @@ impl SystemCollector {
             .filter(|p| matches!(p.status(), sysinfo::ProcessStatus::Zombie))
             .count() as u64;
         self.publish(
-            "system/processes_total",
+            &Subject::SystemProcessesTotal,
             TelemetryValue::Gauge(total as f64),
             timestamp,
             HashMap::new(),
@@ -1281,7 +1285,7 @@ impl SystemCollector {
         .await;
         count += 1;
         self.publish(
-            "system/processes_zombie",
+            &Subject::SystemProcessesZombie,
             TelemetryValue::Gauge(zombie as f64),
             timestamp,
             HashMap::new(),
@@ -1317,10 +1321,14 @@ impl SystemCollector {
 
         for (cpu_name, times) in cpu_times {
             let is_total = cpu_name == "cpu";
-            let prefix = if is_total {
-                "cpu/times".to_string()
-            } else {
-                format!("{}/times", cpu_name)
+            // `cpu/times/<c>` for the host, `<cpuN>/times/<c>` per core —
+            // `{cpu}` binds the whole `cpuN` chunk.
+            let component = |c: &str| {
+                if is_total {
+                    Subject::cpu_times(c)
+                } else {
+                    Subject::per_cpu_times(&cpu_name, c)
+                }
             };
 
             let mut labels = HashMap::new();
@@ -1336,7 +1344,7 @@ impl SystemCollector {
 
             // Publish each CPU time component
             self.publish(
-                &format!("{}/user", prefix),
+                &component("user"),
                 TelemetryValue::Gauge(times.user),
                 timestamp,
                 labels.clone(),
@@ -1345,7 +1353,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("{}/nice", prefix),
+                &component("nice"),
                 TelemetryValue::Gauge(times.nice),
                 timestamp,
                 labels.clone(),
@@ -1354,7 +1362,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("{}/system", prefix),
+                &component("system"),
                 TelemetryValue::Gauge(times.system),
                 timestamp,
                 labels.clone(),
@@ -1363,7 +1371,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("{}/idle", prefix),
+                &component("idle"),
                 TelemetryValue::Gauge(times.idle),
                 timestamp,
                 labels.clone(),
@@ -1372,7 +1380,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("{}/iowait", prefix),
+                &component("iowait"),
                 TelemetryValue::Gauge(times.iowait),
                 timestamp,
                 labels.clone(),
@@ -1381,7 +1389,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("{}/irq", prefix),
+                &component("irq"),
                 TelemetryValue::Gauge(times.irq),
                 timestamp,
                 labels.clone(),
@@ -1390,7 +1398,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("{}/softirq", prefix),
+                &component("softirq"),
                 TelemetryValue::Gauge(times.softirq),
                 timestamp,
                 labels.clone(),
@@ -1399,7 +1407,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("{}/steal", prefix),
+                &component("steal"),
                 TelemetryValue::Gauge(times.steal),
                 timestamp,
                 labels,
@@ -1431,7 +1439,7 @@ impl SystemCollector {
             // Cumulative counters
             labels.insert("unit".to_string(), "bytes".to_string());
             self.publish(
-                &format!("disk/{}/io/read_bytes", device),
+                &Subject::disk_io_read_bytes(&device),
                 TelemetryValue::Counter(stats.read_bytes),
                 timestamp,
                 labels.clone(),
@@ -1440,7 +1448,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("disk/{}/io/write_bytes", device),
+                &Subject::disk_io_write_bytes(&device),
                 TelemetryValue::Counter(stats.write_bytes),
                 timestamp,
                 labels.clone(),
@@ -1450,7 +1458,7 @@ impl SystemCollector {
 
             labels.insert("unit".to_string(), "ops".to_string());
             self.publish(
-                &format!("disk/{}/io/read_ops", device),
+                &Subject::disk_io_read_ops(&device),
                 TelemetryValue::Counter(stats.read_ios),
                 timestamp,
                 labels.clone(),
@@ -1459,7 +1467,7 @@ impl SystemCollector {
             count += 1;
 
             self.publish(
-                &format!("disk/{}/io/write_ops", device),
+                &Subject::disk_io_write_ops(&device),
                 TelemetryValue::Counter(stats.write_ios),
                 timestamp,
                 labels.clone(),
@@ -1469,7 +1477,7 @@ impl SystemCollector {
 
             labels.insert("unit".to_string(), "ms".to_string());
             self.publish(
-                &format!("disk/{}/io/time_ms", device),
+                &Subject::disk_io_time_ms(&device),
                 TelemetryValue::Counter(stats.io_time_ms),
                 timestamp,
                 labels.clone(),
@@ -1482,7 +1490,7 @@ impl SystemCollector {
                 max_util = Some(max_util.map_or(sat.util_percent, |m| m.max(sat.util_percent)));
                 labels.insert("unit".to_string(), "percent".to_string());
                 self.publish(
-                    &format!("disk/{}/io/util_percent", device),
+                    &Subject::disk_io_util_percent(&device),
                     TelemetryValue::Gauge(sat.util_percent),
                     timestamp,
                     labels.clone(),
@@ -1492,7 +1500,7 @@ impl SystemCollector {
 
                 labels.insert("unit".to_string(), "requests".to_string());
                 self.publish(
-                    &format!("disk/{}/io/queue_depth", device),
+                    &Subject::disk_io_queue_depth(&device),
                     TelemetryValue::Gauge(sat.queue_depth),
                     timestamp,
                     labels.clone(),
@@ -1505,7 +1513,7 @@ impl SystemCollector {
             if let Some(rates) = rates {
                 labels.insert("unit".to_string(), "bytes/s".to_string());
                 self.publish(
-                    &format!("disk/{}/io/read_rate", device),
+                    &Subject::disk_io_read_rate(&device),
                     TelemetryValue::Gauge(rates.read_bytes as f64),
                     timestamp,
                     labels.clone(),
@@ -1514,7 +1522,7 @@ impl SystemCollector {
                 count += 1;
 
                 self.publish(
-                    &format!("disk/{}/io/write_rate", device),
+                    &Subject::disk_io_write_rate(&device),
                     TelemetryValue::Gauge(rates.write_bytes as f64),
                     timestamp,
                     labels.clone(),
@@ -1524,7 +1532,7 @@ impl SystemCollector {
 
                 labels.insert("unit".to_string(), "iops".to_string());
                 self.publish(
-                    &format!("disk/{}/io/read_iops", device),
+                    &Subject::disk_io_read_iops(&device),
                     TelemetryValue::Gauge(rates.read_ios as f64),
                     timestamp,
                     labels.clone(),
@@ -1533,7 +1541,7 @@ impl SystemCollector {
                 count += 1;
 
                 self.publish(
-                    &format!("disk/{}/io/write_iops", device),
+                    &Subject::disk_io_write_iops(&device),
                     TelemetryValue::Gauge(rates.write_ios as f64),
                     timestamp,
                     labels,
@@ -1560,16 +1568,13 @@ impl SystemCollector {
         let temps = LinuxMetrics::collect_temperatures(&self.config.sensors.exclude_chips);
 
         for temp in temps {
-            let chip_key = sanitize_key(&temp.chip);
-            let label_key = sanitize_key(&temp.label);
-
             let mut labels = HashMap::new();
             labels.insert("chip".to_string(), temp.chip.clone());
             labels.insert("label".to_string(), temp.label.clone());
             labels.insert("unit".to_string(), "celsius".to_string());
 
             self.publish(
-                &format!("sensors/{}/{}/temp", chip_key, label_key),
+                &Subject::sensors_temp(&temp.chip, &temp.label),
                 TelemetryValue::Gauge(temp.temp_celsius),
                 timestamp,
                 labels.clone(),
@@ -1579,7 +1584,7 @@ impl SystemCollector {
 
             if let Some(critical) = temp.critical {
                 self.publish(
-                    &format!("sensors/{}/{}/critical", chip_key, label_key),
+                    &Subject::sensors_critical(&temp.chip, &temp.label),
                     TelemetryValue::Gauge(critical),
                     timestamp,
                     labels.clone(),
@@ -1590,7 +1595,7 @@ impl SystemCollector {
 
             if let Some(max) = temp.max {
                 self.publish(
-                    &format!("sensors/{}/{}/max", chip_key, label_key),
+                    &Subject::sensors_max(&temp.chip, &temp.label),
                     TelemetryValue::Gauge(max),
                     timestamp,
                     labels,
@@ -1629,7 +1634,7 @@ impl SystemCollector {
             labels.insert("state".to_string(), state_name.to_string());
 
             self.publish(
-                &format!("tcp/{}", state_name),
+                &Subject::tcp(state_name),
                 TelemetryValue::Gauge(value as f64),
                 timestamp,
                 labels,
@@ -1641,7 +1646,7 @@ impl SystemCollector {
         // Also publish total connections
         let total: u64 = state_values.iter().map(|(_, v)| v).sum();
         self.publish(
-            "tcp/total",
+            &Subject::tcp("total"),
             TelemetryValue::Gauge(total as f64),
             timestamp,
             HashMap::new(),
@@ -1652,21 +1657,31 @@ impl SystemCollector {
         count
     }
 
-    /// Publish a telemetry point to Zenoh.
+    /// Publish a telemetry point to Zenoh under its generated subject (#1274):
+    /// the key is rendered from the subject, and the point's metric is the
+    /// subject's tail — a subject the registry does not declare has no
+    /// spelling. The timestamp is the collector's, one per pass.
     async fn publish(
         &self,
-        metric: &str,
+        subject: &Subject,
         value: TelemetryValue,
         timestamp: i64,
         labels: HashMap<String, String>,
     ) {
         self.health.record_metrics_published(1);
-        let key = format!("{}/{}", self.telemetry_prefix, metric);
+        let key = match zensight_common::subject::telemetry_key(subject, &self.producer) {
+            Ok(key) => key,
+            Err(e) => {
+                warn!("sysinfo: {e}");
+                return;
+            }
+        };
+        let key = key.as_str();
 
         let point = TelemetryPoint {
             timestamp,
             source: self.source.clone(),
-            metric: metric.to_string(),
+            metric: subject.tail(),
             value,
             labels,
             unit: None,
@@ -1680,7 +1695,7 @@ impl SystemCollector {
         if let Err(e) = self
             .registry
             .put_point(
-                &key,
+                key,
                 &point,
                 zensight_common::QosClass::Telemetry,
                 self.format,
@@ -1690,13 +1705,6 @@ impl SystemCollector {
             warn!("Failed to publish '{}': {}", key, e);
         }
     }
-}
-
-/// Build a key expression for a sysinfo metric.
-pub fn build_key_expr(prefix: &str, _source: &str, metric: &str) -> String {
-    // v1 (epic #453): the origin chunk in the prefix replaces the mutable
-    // hostname; subjects start at the metric.
-    format!("{}/{}", prefix, metric)
 }
 
 /// Seconds since the previous collection pass began — the divisor every derived
@@ -1773,17 +1781,6 @@ mod tests {
             r.per_sec, 2_400_000.0,
             "dividing by the nominal 5 s would have read 2.4x the truth"
         );
-    }
-
-    #[test]
-    fn test_build_key_expr() {
-        // v1 (epic #453): the origin in the prefix replaces the hostname
-        // chunk — subjects start at the metric.
-        let prefix = zensight_sensor_core::v1::for_producer("sysinfo").telemetry_prefix();
-        let key = build_key_expr(&prefix, "server01", "cpu/usage");
-        assert!(key.starts_with("v1/h-"), "{key}");
-        assert!(key.ends_with("/telemetry/sysinfo/cpu/usage"), "{key}");
-        assert!(!key.contains("server01"), "{key}");
     }
 
     #[test]

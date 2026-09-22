@@ -26,10 +26,10 @@ fn assert_all_registered(what: &str, metrics: &[Metric]) {
     );
     for m in metrics {
         assert!(
-            is_registered_telemetry("sysinfo", &m.metric),
+            is_registered_telemetry("sysinfo", &m.metric()),
             "{what}: metric {:?} is not a registered sysinfo subject — \
              add it to zensight-common/registry/sysinfo.toml (RFC 08 §5)",
-            m.metric
+            m.metric()
         );
     }
 }
@@ -223,7 +223,7 @@ fn schedstat_metrics_are_registered() {
     assert!(
         metrics
             .iter()
-            .any(|m| m.metric == "cpu0/schedstat/run_delay_ns_total"),
+            .any(|m| m.metric() == "cpu0/schedstat/run_delay_ns_total"),
         "the per-CPU (variable-head) family must be exercised, not just the aggregate"
     );
 }
@@ -516,7 +516,7 @@ fn every_registered_family_has_an_emitter() {
         .map(|(name, _)| format!("gpu/card0/{name}")),
     );
 
-    let mut push = |ms: Vec<Metric>| emitted.extend(ms.into_iter().map(|m| m.metric));
+    let mut push = |ms: Vec<Metric>| emitted.extend(ms.into_iter().map(|m| m.metric()));
 
     push(map_pressure(&PsiSample {
         cpu_some: Some(pressure()),
