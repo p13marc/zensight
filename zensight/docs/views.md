@@ -357,8 +357,22 @@ by elapsed time, the same heuristic the old arms used. The outcome lands as
 outcome keep their phrasing; anything else reads the reply's `accepted`,
 `error`, `reason`, `result`), and re-calls what it moved
 (`specialized::after_write` — systemd's units and the open unit). What is
-left of the two action machines is nothing: `SystemdDetailState` holds the
-job counter, `SnmpDetailState` the interface doc and its events.
+left of the two action machines is nothing.
+
+**Projections and prefetch** are generic too (#1261). A device's firing
+alerts — its source and its producer, from the alert set — are
+`DeviceDetailState::alerts`, projected by the app whenever the alert set
+changes; netring's Security tab and anomaly strip read the `Anomaly` ones.
+What a tab asks for when it opens is the view's own list
+(`specialized::tab_calls(producer, tab)`, each asked once), and a streamed
+counter a tab watches — systemd's Units tab re-pulls `units` when
+`events/job_removed_total` moves, because some unit changed on the host
+whether ZenSight caused it or not — is `specialized::refresh_when_moves`
+over `DeviceDetailState::counters_seen`, seeded on first sight. On open, the
+producer's prefetch list is keyed by name. `SystemdDetailState` is gone;
+what remains per producer on the device state is netring's flow↔process
+join slot, parallax's tiles and controllers, and snmp's interface document
+and events — projections of the wire that no call answers.
 
 ## Routing: `CurrentView`
 

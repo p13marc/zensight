@@ -323,6 +323,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outlet_last}`, `call_systemd_action`, `call_snmp_outlet_action`,
   `apply_systemd_action_result`, `selected_origin_for`. `Message` is 371
   variants.
+- **Device alerts, tab prefetch and counter-driven refresh are generic**
+  (#1261). A device's firing alerts are `DeviceDetailState::alerts` (its
+  source and producer, projected from the alert set — netring's anomaly strip
+  and Security tab read the `Anomaly` ones); what a tab asks for when it
+  opens is `specialized::tab_calls(producer, tab)`; the counter a tab watches
+  is `specialized::refresh_when_moves` over `DeviceDetailState::counters_seen`
+  (systemd's Units tab re-pulls `units` when `events/job_removed_total`
+  moves, as before); the on-open prefetch list is keyed by producer name.
+  Gone: `SystemdDetailState` and the `systemd_detail` field,
+  `NetringDetailState::anomalies`, `refresh_netring_anomalies`,
+  `prefetch_{netring,netlink,systemd}_tab`, `maybe_refresh_systemd_units`,
+  and the last `Protocol` matches on the device-detail path.
 - **bmc, pve, probe and container render from their `views.toml`; their Rust
   views are gone** (#1260, phase 3 of #1253). `specialized/{bmc,probe}.rs`
   and `overview/{pve,probe,containers}.rs` are deleted; the documents in

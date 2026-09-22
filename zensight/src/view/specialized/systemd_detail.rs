@@ -6,9 +6,9 @@
 //! `zensight-common::query_detail`; the event record matches the sensor's
 //! `events::EventRecord` JSON.
 //!
-//! What stays a state of its own ([`SystemdDetailState`]) is the job
-//! counter the auto-refresh watches; the action machine is the generic
-//! `DeviceDetailState::writes` (#1261).
+//! Nothing stays a state of its own: the action machine is the generic
+//! `DeviceDetailState::writes`, and the job counter the Units tab watches
+//! is `DeviceDetailState::counters_seen` (#1261).
 
 use std::sync::Arc;
 
@@ -145,17 +145,6 @@ impl<'a> UnitFilters<'a> {
             .is_none_or(|suffix| unit.name.ends_with(suffix));
         state_ok && type_ok
     }
-}
-
-/// What is not an answer to a call nor a write: the job counter the
-/// auto-refresh watches.
-#[derive(Debug, Clone, Default)]
-pub struct SystemdDetailState {
-    /// Last seen `events/job_removed_total`. A change means some unit's state
-    /// moved on the host — including from outside ZenSight — so the open table
-    /// is stale and should re-pull. `None` until first sight, so arriving at a
-    /// host does not itself trigger a refresh.
-    pub job_events_seen: Option<f64>,
 }
 
 /// What the Units tab may offer for `unit`, from the host's advertised gate

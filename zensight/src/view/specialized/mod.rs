@@ -26,6 +26,41 @@ pub mod systemd_detail;
 
 use iced::{Element, Length};
 
+/// The procedures a tab calls when it opens (#1261), by producer — each
+/// view owns its list; the app asks for each once.
+pub fn tab_calls(producer: &str, tab: SpecializedTab) -> Vec<(String, String)> {
+    match producer {
+        "netring" => netring::tab_procedures(tab)
+            .iter()
+            .map(|t| (t.procedure().to_string(), t.params()))
+            .collect(),
+        "netlink" => netlink::tab_procedures(tab)
+            .iter()
+            .map(|t| (t.procedure().to_string(), String::new()))
+            .collect(),
+        "systemd" => systemd::tab_procedures(tab)
+            .iter()
+            .map(|p| (p.to_string(), String::new()))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// A streamed counter a tab watches (#283, #1261): when it moves, the
+/// procedure is re-called — systemd's Units tab re-pulls `units` when
+/// `events/job_removed_total` moves, because some unit's state changed on the
+/// host whether ZenSight caused it or someone ran `systemctl` over SSH.
+/// `(metric, procedure, params)`.
+pub fn refresh_when_moves(
+    producer: &str,
+    tab: SpecializedTab,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match (producer, tab) {
+        ("systemd", SpecializedTab::Units) => Some(("events/job_removed_total", "units", "")),
+        _ => None,
+    }
+}
+
 /// How a finished write reads in a toast (#1261): the producer's own
 /// phrasing when its view has one (systemd's job results, snmp's outlet
 /// outcome), else the generic reading of the reply's `accepted`, `error`,
@@ -247,4 +282,35 @@ pub fn syslog_view<'a>(
     host_logs: &[SyslogMessage],
 ) -> Element<'a, Message> {
     syslog::syslog_event_view(state, filter_state, host_logs)
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use super::*;
+
+    /// Each view owns what its tabs ask for; a producer with no bespoke view
+    /// asks for nothing on a tab switch and watches no counter.
+    #[test]
+    fn tab_calls_and_watched_counters_are_the_views_own() {
+        assert_eq!(
+            tab_calls("systemd", SpecializedTab::Units),
+            vec![
+                ("units".to_string(), String::new()),
+                ("action/capability".to_string(), String::new())
+            ]
+        );
+        let netring: Vec<String> = tab_calls("netring", SpecializedTab::TalkersMatrix)
+            .into_iter()
+            .map(|(p, params)| format!("{p}?{params}"))
+            .collect();
+        assert_eq!(netring, ["talkers?top=50", "matrix?top=50"]);
+        assert_eq!(tab_calls("netlink", SpecializedTab::Qos).len(), 1);
+        assert!(tab_calls("fake-sensor", SpecializedTab::Units).is_empty());
+        assert_eq!(
+            refresh_when_moves("systemd", SpecializedTab::Units),
+            Some(("events/job_removed_total", "units", ""))
+        );
+        assert_eq!(refresh_when_moves("systemd", SpecializedTab::Timers), None);
+        assert_eq!(refresh_when_moves("netring", SpecializedTab::Units), None);
+    }
 }

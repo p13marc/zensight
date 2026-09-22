@@ -107,7 +107,6 @@ pub struct DeviceDetailState {
     pub pending_filter_time: i64,
     /// On-demand netring flow detail, fetched lazily from `@rpc/netring/flows`.
     pub netring_detail: crate::view::specialized::netring_detail::NetringDetailState,
-    pub systemd_detail: crate::view::specialized::systemd_detail::SystemdDetailState,
     /// Parallax stream catalogue + live preview tiles, fetched/opened on
     /// demand from the sensor's stream-control channels (#408).
     pub parallax_detail: crate::view::specialized::parallax_detail::ParallaxDetailState,
@@ -128,6 +127,13 @@ pub struct DeviceDetailState {
     /// the last outcome per procedure — what a row's confirm/cancel and
     /// "busy" read, whichever producer the row belongs to.
     pub writes: crate::call::Writes,
+    /// The firing alerts scoped to this device (#253, #1261): its source
+    /// and its producer, projected by the app from the alert set so a view
+    /// renders them without threading `AlertsState` through.
+    pub alerts: Vec<zensight_common::Alert>,
+    /// Counters a tab watches, last value seen (#283, #1261): when one moves
+    /// the view's procedure is re-called. Seeded on first sight.
+    pub counters_seen: std::collections::BTreeMap<String, f64>,
     /// How the user arrived, when it was a pivot (#313): the process
     /// explorer's pid filter with its stale-generation guard. `None` is the
     /// plain view.
@@ -200,12 +206,13 @@ impl DeviceDetailState {
             merge_target: String::new(),
             pending_filter_time: 0,
             netring_detail: Default::default(),
-            systemd_detail: Default::default(),
             parallax_detail: Default::default(),
             calls: Default::default(),
             tables: Default::default(),
             filters: Default::default(),
             writes: Default::default(),
+            alerts: Vec::new(),
+            counters_seen: Default::default(),
             pivot: None,
             snmp_detail: Default::default(),
             chart_expanded: false,
