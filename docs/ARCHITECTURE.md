@@ -300,7 +300,7 @@ match the subscriber:
 | **State plane** `zensight/v1/*/state/**` | declared plain publisher `put` / `delete` | plain subscriber on `zensight/v1/*/state/**` (+ `zensight/v1/@catalog/state/entity/*`) |
 
 - **Telemetry** flows through the base `Publisher`, which routes
-  `publish`/`publish_to_key`/`publish_batch` through an
+  `publish_subject`/`publish_batch_subjects`/`publish_to_key` through an
   `AdvancedPublisherRegistry` (one advanced publisher per key, created on first
   use, shared across `Publisher` clones). This matches the GUI's
   `AdvancedSubscriber` so delivery and late-joiner **history/recovery** work for

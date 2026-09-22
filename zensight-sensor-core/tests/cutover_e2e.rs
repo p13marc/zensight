@@ -162,13 +162,14 @@ async fn legacy_bus_is_silent_and_v1_carries_everything() {
         "the deployment base leaked into an application key: {built}"
     );
 
-    let point = zensight_common::TelemetryPoint::new(
+    let subject = zensight_common::registry::netlink::Subject::iface_rx_bytes("eth0");
+    let point = zensight_common::TelemetryPoint::for_subject(
         "cutover-host",
-        "iface/eth0/rx_bytes",
+        &subject,
         zensight_common::TelemetryValue::Counter(1),
     );
     publisher
-        .publish("iface/eth0/rx_bytes", &point)
+        .publish_subject(&subject, &point)
         .await
         .expect("publish telemetry");
 

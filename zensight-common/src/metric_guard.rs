@@ -3,9 +3,12 @@
 //! The registry's central promise is *"a subject that is not registered does
 //! not exist"* — which is worth nothing unless somebody checks. Sensors build
 //! telemetry keys by appending the metric name to `telemetry/<producer>` as a
-//! raw string, so the two publish paths — [`crate::PublisherRegistry::put`]
-//! (baseline tier) and `AdvancedPublisherRegistry::build_key` (advanced tier)
-//! — are the only places where the registry and the wire can be compared.
+//! raw string, so the put — [`crate::PublisherRegistry::put`] on the baseline
+//! tier, `publish_to_key` on the advanced one — is the only place where the
+//! registry and the wire can be compared. Since #1274 a telemetry key is
+//! rendered from the generated subject and never spelled, so this guard
+//! catches a state document or a control-plane key gone wrong, not a
+//! misspelled metric.
 //!
 //! Debug builds panic: a test that publishes an unregistered metric fails,
 //! which is exactly the lint #468 says does not exist today. Release builds
