@@ -115,6 +115,13 @@ pub struct ParallaxConfig {
     /// like every other remote sensor's `evidence` block.
     #[serde(default)]
     pub evidence: crate::evidence::EvidenceConfig,
+
+    /// The stills and clips this sensor serves over the artifact channel
+    /// (#414). Both off by default; the producers own their limits, as
+    /// netring's capture does — the top-level `artifacts` block stays the
+    /// framework's report and snapshot.
+    #[serde(default)]
+    pub artifacts: crate::artifact::ParallaxArtifactsConfig,
 }
 
 impl Default for ParallaxConfig {
@@ -130,6 +137,7 @@ impl Default for ParallaxConfig {
             stats_interval_secs: default_stats_interval(),
             discovery: None,
             evidence: crate::evidence::EvidenceConfig::default(),
+            artifacts: crate::artifact::ParallaxArtifactsConfig::default(),
         }
     }
 }
@@ -463,6 +471,9 @@ impl ParallaxSensorConfig {
 
         p.evidence
             .validate()
+            .map_err(|e| ConfigError::Validation(e.to_string()))?;
+        p.artifacts
+            .validate(&p.video)
             .map_err(|e| ConfigError::Validation(e.to_string()))?;
 
         // Configured stream names must be unique (V4L2 enumeration derives its

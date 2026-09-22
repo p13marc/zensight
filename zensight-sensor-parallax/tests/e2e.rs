@@ -1998,3 +1998,127 @@ async fn configured_rtsp_targets_publish_device_evidence() {
     viewer.close().await.unwrap();
     sensor.close().await.unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Stills and clips over the artifact channel (#414)
+// ---------------------------------------------------------------------------
+
+/// A still and a clip of the test stream are requestable over the artifact
+/// channel and reach `Ready` with a blob delivery whose filename says what
+/// it is. The channel is the framework's; this pins that the two producers
+/// are wired to it exactly as `main.rs` wires them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn still_and_clip_are_requestable_over_the_artifact_channel() {
+    use zensight_common::artifact::{
+        ArtifactKind, ArtifactRequest, ArtifactState, ArtifactStatus, Delivery,
+    };
+    use zensight_common::v1::V1ContextExt;
+
+    let (sensor, viewer) = isolated_pair().await;
+    let config: ParallaxConfig = json5::from_str(
+        r#"{
+            enumerate_v4l2: false,
+            test_sources: [{ name: "test0", pattern: "smpte", width: 320, height: 240, fps: 10 }],
+            video: { tiers: [{ name: "low", max_height: 120, fps: 10, bitrate_kbps: 300 }],
+                     default_tier: "low" },
+            artifacts: { still: { enabled: true, cooldown_secs: 0 },
+                         clip: { enabled: true, cooldown_secs: 0 } },
+        }"#,
+    )
+    .unwrap();
+    let catalog = Arc::new(Catalog::build(&config));
+    let ((handle, _stats), _reports) =
+        spawn_sensor_full(sensor.clone(), "sensor-a", config.clone()).await;
+    let channel = zensight_sensor_core::ArtifactChannel::new(
+        sensor.clone(),
+        "parallax",
+        "sensor-a",
+        vec![
+            Arc::new(zensight_sensor_parallax::artifact::StillProducer::new(
+                &config.artifacts.still,
+                catalog.clone(),
+                handle.clone(),
+                "sensor-a",
+            )) as Arc<dyn zensight_sensor_core::ArtifactProducer>,
+            Arc::new(zensight_sensor_parallax::artifact::ClipProducer::new(
+                &config.artifacts.clip,
+                &config.video,
+                catalog,
+                handle,
+                "sensor-a",
+            )),
+        ],
+    )
+    .expect("both kinds enabled");
+    tokio::spawn(channel.run());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let request_key: String = v1ctx().const_rpc_key(&["artifact", "request"]).into();
+    let status_key: String = v1ctx().const_rpc_key(&["artifact", "status"]).into();
+
+    for (kind, suffix) in [
+        (
+            ArtifactKind::Still {
+                stream: "test0".into(),
+            },
+            ".jpg",
+        ),
+        (
+            ArtifactKind::Clip {
+                stream: "test0".into(),
+                duration_secs: 1,
+                tier: None,
+            },
+            ".mp4",
+        ),
+    ] {
+        let slug = kind.slug();
+        let id = ulid::Ulid::generate();
+        let replies = viewer
+            .get(&request_key)
+            .target(zenoh::query::QueryTarget::All)
+            .payload(
+                serde_json::to_vec(&ArtifactRequest {
+                    id,
+                    kind,
+                    opts: Default::default(),
+                })
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+        let reply = replies.recv_async().await.expect("request reply");
+        assert!(reply.result().is_ok(), "{slug} request refused: {reply:?}");
+
+        let filename = tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let Ok(replies) = viewer.get(&status_key).await
+                    && let Ok(reply) = replies.recv_async().await
+                    && let Ok(sample) = reply.result()
+                    && let Ok(status) =
+                        serde_json::from_slice::<ArtifactStatus>(&sample.payload().to_bytes())
+                    && let Some(ks) = status.kinds.iter().find(|k| k.kind == slug)
+                {
+                    match &ks.current {
+                        Some(ArtifactState::Ready {
+                            id: got,
+                            delivery: Delivery::Blob { manifest, .. },
+                            ..
+                        }) if *got == id => return manifest.filename.clone().unwrap_or_default(),
+                        Some(ArtifactState::Failed { reason, .. }) => {
+                            panic!("{slug} failed: {reason}")
+                        }
+                        _ => {}
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{slug} never became Ready"));
+        assert!(filename.ends_with(suffix), "{slug}: {filename}");
+    }
+
+    viewer.close().await.unwrap();
+    sensor.close().await.unwrap();
+}

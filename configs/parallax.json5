@@ -153,6 +153,28 @@
       ],
     },
 
+    // Stills and clips over the artifact channel (#414): the reliable
+    // complement of the lossy live plane. Each opens its own one-shot
+    // pipeline; a V4L2 device that a viewer holds refuses the request. Both
+    // kinds are OFF by default; the producers own their limits, like
+    // netring's capture — the top-level `artifacts` block above is the
+    // framework's report and snapshot.
+    // artifacts: {
+    //   still: {
+    //     enabled: true,
+    //     quality: 85,             // JPEG quality 1–100
+    //     max_height: null,        // aspect-preserving cap; null = source size
+    //     max_bytes: 8388608,      // 8 MiB: a larger frame fails, never served
+    //     cooldown_secs: 5, ttl_secs: 600, chunk_size: 524288,
+    //   },
+    //   clip: {
+    //     enabled: true,
+    //     max_duration_secs: 60,   // a longer request is clamped, and says so
+    //     max_bytes: 67108864,     // 64 MiB: the recording stops early, and says so
+    //     cooldown_secs: 30, ttl_secs: 600, chunk_size: 524288,
+    //   },
+    // },
+
     // Tear an open profile down after this many seconds with no viewers and
     // no explicit opens (crash backstop for GUIs that die without CloseStream).
     idle_timeout_secs: 30,

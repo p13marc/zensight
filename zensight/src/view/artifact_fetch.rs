@@ -1350,8 +1350,59 @@ pub fn artifact_section<'a>(
                 }
                 col = col.push(btn);
             }
-            // Empty snapshot advert / unknown kinds are hidden here.
-            KindAdvert::Snapshot { .. } | KindAdvert::Unknown => {}
+            // A still of any advertised stream (#414): one button per stream.
+            KindAdvert::Still { streams } if !streams.is_empty() => {
+                any = true;
+                let header = text("Stills").size(font::CAPTION);
+                let mut btns = Row::new().spacing(space::SM).align_y(Alignment::Center);
+                for s in streams {
+                    let mut b = button(text(format!("Still: {s}")).size(font::CAPTION));
+                    if !other_busy {
+                        b = b.on_press(Message::StartArtifact {
+                            producer: this_prefix.to_string(),
+                            kind: ArtifactKind::Still { stream: s.clone() },
+                            target_source: target_source.map(str::to_string),
+                        });
+                    }
+                    btns = btns.push(b);
+                }
+                col = col.push(column![header, btns].spacing(space::XS));
+            }
+            // A short clip of any advertised stream (#414) on the default
+            // tier: ten seconds, or the sensor's max when that is lower. A
+            // duration/tier form is a follow-up; any `@rpc` client can send
+            // the full request today.
+            KindAdvert::Clip {
+                streams,
+                max_duration_secs,
+                ..
+            } if !streams.is_empty() => {
+                any = true;
+                let secs = 10.min(*max_duration_secs).max(1);
+                let header = text("Clips").size(font::CAPTION);
+                let mut btns = Row::new().spacing(space::SM).align_y(Alignment::Center);
+                for s in streams {
+                    let mut b = button(text(format!("Clip {secs}s: {s}")).size(font::CAPTION));
+                    if !other_busy {
+                        b = b.on_press(Message::StartArtifact {
+                            producer: this_prefix.to_string(),
+                            kind: ArtifactKind::Clip {
+                                stream: s.clone(),
+                                duration_secs: secs,
+                                tier: None,
+                            },
+                            target_source: target_source.map(str::to_string),
+                        });
+                    }
+                    btns = btns.push(b);
+                }
+                col = col.push(column![header, btns].spacing(space::XS));
+            }
+            // Empty snapshot/still/clip adverts / unknown kinds are hidden here.
+            KindAdvert::Snapshot { .. }
+            | KindAdvert::Still { .. }
+            | KindAdvert::Clip { .. }
+            | KindAdvert::Unknown => {}
         }
     }
     if !any {

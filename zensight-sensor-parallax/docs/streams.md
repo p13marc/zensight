@@ -382,6 +382,26 @@ binding artifact is a set of canonical CBOR vectors checked into both repos;
 ours live in `zensight-common/tests/fixtures/framemeta/` and are pinned by
 `zensight-common/tests/framemeta_corpus.rs`.
 
+## Stills and clips (#414)
+
+The on-demand complement of the live plane: a **still** (one JPEG frame) and a
+**clip** (a bounded H.264 recording in an MP4), requested and delivered over
+the artifact channel like a debug report. Each opens its **own one-shot
+pipeline** — `build_preview` for a still, `build_video` on the requested tier
+for a clip — and tears it down when the artifact is done. There is no tee: the
+reasoning above (a preview keeps its cadence whether or not an encoder runs)
+holds for a recording too, and parallax 0.9 has no fan-out element. The
+consequences are the ones the live tiers already have: free on a test source,
+and on a **V4L2 device the request is refused while a viewer holds it** —
+waiting would hold the kind's busy slot with nothing to show.
+
+The clip is muxed by hand from the pulled access units (`Mp4Mux`, not
+`Mp4FileSink`, which is only drivable as an executor element): the muxer opens
+on the first entry point — an IDR with its parameter sets — so a clip always
+starts decodable, the Annex-B units are converted to AVCC per frame, and the
+loop stops at the duration, the byte cap or a cancel, exactly like netring's
+capture. A clamped or truncated clip says so in its status note.
+
 ## Teardown
 
 `close_stream` (with the tile's `codec` + `tier`) decrements that profile's

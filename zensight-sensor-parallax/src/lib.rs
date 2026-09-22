@@ -16,6 +16,7 @@
 
 pub mod alerts;
 pub mod annexb;
+pub mod artifact;
 pub mod catalog;
 pub mod command;
 pub mod config;

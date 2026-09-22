@@ -108,6 +108,26 @@ pub enum ArtifactKind {
         #[serde(default)]
         format: LogBundleFormat,
     },
+    /// One JPEG frame of a live stream (#414). Tier-1 (a single `.jpg`).
+    /// Produced by the parallax sensor from a one-shot pipeline, whether or
+    /// not the stream is open. The stream is a field, not `target_source`:
+    /// the channel reads `opts.target_source` as a host filter.
+    Still {
+        /// The catalogue stream name.
+        stream: String,
+    },
+    /// A short recorded clip of a live stream (#414): H.264 in an MP4.
+    /// Tier-1 (a single `.mp4`). The sensor clamps the duration to its
+    /// configured max.
+    Clip {
+        /// The catalogue stream name.
+        stream: String,
+        /// How long to record, seconds.
+        duration_secs: u32,
+        /// The video tier to record (`None` = the sensor's default tier).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
+    },
     /// Any kind this sensor build doesn't understand (forward-compat). A sensor
     /// rejects it with [`ArtifactState::Failed`].
     #[serde(other)]
@@ -124,6 +144,8 @@ impl ArtifactKind {
             ArtifactKind::Snapshot { .. } => "snapshot",
             ArtifactKind::Capture { .. } => "capture",
             ArtifactKind::LogBundle { .. } => "logbundle",
+            ArtifactKind::Still { .. } => "still",
+            ArtifactKind::Clip { .. } => "clip",
             ArtifactKind::Unsupported => "unsupported",
         }
     }
@@ -319,6 +341,21 @@ pub enum KindAdvert {
         /// Largest allowed line count in one bundle (0 = sensor default).
         max_lines: u64,
     },
+    /// A still frame can be requested of any of these streams (#414).
+    Still {
+        /// The catalogue streams a still can be taken from.
+        streams: Vec<String>,
+    },
+    /// A clip can be requested of any of these streams, within this duration,
+    /// on one of these tiers (#414).
+    Clip {
+        /// The catalogue streams a clip can be recorded from.
+        streams: Vec<String>,
+        /// Largest allowed clip duration, seconds.
+        max_duration_secs: u32,
+        /// The tier names the sensor's ladder offers.
+        tiers: Vec<String>,
+    },
     /// A kind this GUI build doesn't understand (forward-compat) — hidden.
     #[serde(other)]
     Unknown,
@@ -405,6 +442,45 @@ mod tests {
             assert_eq!(back, req);
             assert_eq!(back.kind.slug(), slug);
         }
+    }
+
+    /// The parallax kinds (#414) round-trip with the stream as a field of the
+    /// kind, and an absent tier stays absent on the wire.
+    #[test]
+    fn still_and_clip_roundtrip() {
+        for kind in [
+            ArtifactKind::Still {
+                stream: "cam0".into(),
+            },
+            ArtifactKind::Clip {
+                stream: "cam0".into(),
+                duration_secs: 10,
+                tier: None,
+            },
+            ArtifactKind::Clip {
+                stream: "cam0".into(),
+                duration_secs: 10,
+                tier: Some("high".into()),
+            },
+        ] {
+            let slug = kind.slug();
+            let req = ArtifactRequest {
+                id: Ulid::from_parts(5, 6),
+                kind,
+                opts: ArtifactOptions::default(),
+            };
+            let bytes = serde_json::to_vec(&req).unwrap();
+            let back: ArtifactRequest = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(back, req);
+            assert_eq!(back.kind.slug(), slug);
+        }
+        let json = serde_json::to_string(&ArtifactKind::Clip {
+            stream: "cam0".into(),
+            duration_secs: 3,
+            tier: None,
+        })
+        .unwrap();
+        assert!(!json.contains("tier"), "{json}");
     }
 
     #[test]

@@ -498,23 +498,15 @@ impl SessionManager {
     /// shared `video.encoder` defaults.
     fn tier_params(&self, idx: u8) -> pipeline::VideoParams {
         let video = &self.config.video;
-        let (bitrate_kbps, fps, max_height, tuning) = self
-            .tier_config(idx)
-            .map(|t| {
-                (
-                    t.spec.bitrate_kbps,
-                    t.spec.fps,
-                    t.spec.max_height,
-                    video.tuning_for(t),
-                )
-            })
-            .unwrap_or((2000, 30, None, video.encoder));
-        pipeline::VideoParams {
-            bitrate_kbps,
-            gop_frames: tuning.gop_frames.unwrap_or(video.gop_frames),
-            fps,
-            max_height,
-            tuning,
+        match self.tier_config(idx) {
+            Some(t) => pipeline::tier_video_params(video, t),
+            None => pipeline::VideoParams {
+                bitrate_kbps: 2000,
+                gop_frames: video.encoder.gop_frames.unwrap_or(video.gop_frames),
+                fps: 30,
+                max_height: None,
+                tuning: video.encoder,
+            },
         }
     }
 
