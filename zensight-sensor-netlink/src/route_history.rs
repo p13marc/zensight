@@ -151,12 +151,14 @@ impl RouteHistory {
 
     /// The streamed flap counter as a telemetry point
     /// (`routes/default_v4_flaps_total`).
-    pub fn flap_points(&self, host: &str) -> Vec<TelemetryPoint> {
-        vec![TelemetryPoint::new(
+    pub fn flap_points(&self, host: &str) -> Vec<crate::map::Built> {
+        let subject = zensight_common::registry::netlink::Subject::RoutesDefaultV4FlapsTotal;
+        let point = TelemetryPoint::for_subject(
             host,
-            "routes/default_v4_flaps_total".to_string(),
+            &subject,
             TelemetryValue::Counter(self.inner.flaps_v4.load(Ordering::Relaxed)),
-        )]
+        );
+        vec![(subject, point)]
     }
 
     /// Snapshot of the transition ring (oldest first), for `@rpc/netlink/route_changes`.
@@ -176,7 +178,7 @@ mod tests {
         assert!(h.recent().is_empty());
         // flap counter still zero
         let pts = h.flap_points("host");
-        assert_eq!(pts[0].value, TelemetryValue::Counter(0));
+        assert_eq!(pts[0].1.value, TelemetryValue::Counter(0));
     }
 
     #[test]
@@ -188,7 +190,7 @@ mod tests {
         assert_eq!(rec.gateway.as_deref(), Some("10.0.0.254"));
         assert_eq!(rec.prev_gateway.as_deref(), Some("10.0.0.1"));
         assert_eq!(h.recent().len(), 1);
-        assert_eq!(h.flap_points("h")[0].value, TelemetryValue::Counter(1));
+        assert_eq!(h.flap_points("h")[0].1.value, TelemetryValue::Counter(1));
     }
 
     #[test]
@@ -202,7 +204,7 @@ mod tests {
         let a = h.observe_at(true, Some("10.0.0.2"), 3).expect("re-add");
         assert_eq!(a.action, "added");
         assert_eq!(a.prev_gateway, None);
-        assert_eq!(h.flap_points("h")[0].value, TelemetryValue::Counter(2));
+        assert_eq!(h.flap_points("h")[0].1.value, TelemetryValue::Counter(2));
     }
 
     #[test]
@@ -226,6 +228,6 @@ mod tests {
         assert_eq!(recent[0].gateway.as_deref(), Some("c"));
         assert_eq!(recent[1].gateway.as_deref(), Some("d"));
         // counter still reflects all three transitions
-        assert_eq!(h.flap_points("h")[0].value, TelemetryValue::Counter(3));
+        assert_eq!(h.flap_points("h")[0].1.value, TelemetryValue::Counter(3));
     }
 }

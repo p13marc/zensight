@@ -288,13 +288,10 @@ impl AdvancedPublisherRegistry {
     /// The producer this registry publishes as, read back from its prefix
     /// (`v1/<origin>/telemetry/<producer>`) — instance suffix included.
     fn producer(&self) -> Result<zenkey::grammar::Producer> {
-        zenkey::grammar::parse(&self.telemetry_prefix)
-            .ok()
-            .and_then(|parsed| parsed.producer().cloned())
-            .ok_or_else(|| SensorError::Publish {
-                key: self.telemetry_prefix.clone(),
-                message: "the telemetry prefix names no producer".to_string(),
-            })
+        producer_of_prefix(&self.telemetry_prefix).map_err(|message| SensorError::Publish {
+            key: self.telemetry_prefix.clone(),
+            message,
+        })
     }
 
     /// Install a point observer (#930). Idempotent-by-first-call.
@@ -498,5 +495,40 @@ mod tests {
         assert_eq!(config.cache_size, 50);
         assert!(!config.miss_detection);
         assert!(!config.publisher_detection);
+    }
+}
+
+/// The producer chunk of a telemetry prefix (`v1/<origin>/telemetry/<producer>`),
+/// parsed as a producer — instance suffix included (#1274).
+///
+/// The last chunk, not `grammar::parse`: a prefix is not a key (RFC 03 §1.6
+/// wants at least one subject chunk), and parsing it as one refuses every
+/// prefix — which is what made the first typed publish on this tier publish
+/// nothing at all.
+fn producer_of_prefix(prefix: &str) -> std::result::Result<zenkey::grammar::Producer, String> {
+    let chunk = prefix
+        .rsplit('/')
+        .next()
+        .filter(|c| !c.is_empty())
+        .ok_or_else(|| format!("telemetry prefix {prefix:?} has no producer chunk"))?;
+    zenkey::grammar::Producer::parse_chunk(chunk).map_err(|e| format!("{prefix:?}: {e}"))
+}
+
+#[cfg(test)]
+mod producer_of_prefix_tests {
+    use super::producer_of_prefix;
+
+    /// The prefix a `V1Context` renders parses back to its producer, instance
+    /// suffix included — and a bare prefix is not mistaken for a key.
+    #[test]
+    fn the_prefix_names_its_producer() {
+        let p = producer_of_prefix("v1/h-3fa9c2d41b7e/telemetry/netlink").unwrap();
+        assert_eq!(p.name(), "netlink");
+        assert_eq!(p.instance(), None);
+        let p = producer_of_prefix("v1/h-3fa9c2d41b7e/telemetry/netlink-2").unwrap();
+        assert_eq!(p.name(), "netlink");
+        assert_eq!(p.instance(), Some(2));
+        assert!(producer_of_prefix("v1/h-3fa9c2d41b7e/telemetry/").is_err());
+        assert!(producer_of_prefix("").is_err());
     }
 }

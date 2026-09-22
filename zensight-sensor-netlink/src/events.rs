@@ -444,16 +444,18 @@ impl EventState {
 
     /// Current counter values as telemetry points
     /// (`events/<family>/<action>_total`).
-    pub fn counter_points(&self, host: &str) -> Vec<TelemetryPoint> {
+    pub fn counter_points(&self, host: &str) -> Vec<crate::map::Built> {
         let mut out = Vec::with_capacity(EventFamily::ALL.len() * EventAction::ALL.len());
         for family in EventFamily::ALL {
             for action in EventAction::ALL {
                 let v = self.inner.counters[family.index()][action.index()].load(Ordering::Relaxed);
-                out.push(TelemetryPoint::new(
-                    host,
-                    format!("events/{}/{}_total", family.label(), action.label()),
-                    TelemetryValue::Counter(v),
-                ));
+                // `{action}` binds the whole chunk, `<action>_total`.
+                let subject = zensight_common::registry::netlink::Subject::events(
+                    family.label(),
+                    format!("{}_total", action.label()),
+                );
+                let point = TelemetryPoint::for_subject(host, &subject, TelemetryValue::Counter(v));
+                out.push((subject, point));
             }
         }
         out
@@ -522,8 +524,8 @@ mod tests {
         let pts = st.counter_points("h");
         let find = |m: &str| {
             pts.iter()
-                .find(|p| p.metric == m)
-                .map(|p| p.value.clone())
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p.value.clone())
                 .unwrap()
         };
         assert_eq!(find("events/link/added_total"), TelemetryValue::Counter(2));
@@ -567,8 +569,8 @@ mod tests {
         let pts = st.counter_points("h");
         let find = |m: &str| {
             pts.iter()
-                .find(|p| p.metric == m)
-                .map(|p| p.value.clone())
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p.value.clone())
                 .unwrap()
         };
         assert_eq!(find("events/ipsec/added_total"), TelemetryValue::Counter(1));
@@ -653,7 +655,14 @@ mod tests {
             Some(EventAction::Removed)
         );
         let pts = st.counter_points("h");
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap().value.clone();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .unwrap()
+                .1
+                .value
+                .clone()
+        };
         assert_eq!(find("events/rule/added_total"), TelemetryValue::Counter(1));
         assert_eq!(
             find("events/rule/removed_total"),

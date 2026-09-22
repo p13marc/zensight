@@ -1026,13 +1026,13 @@ impl Collector {
         Ok(())
     }
 
-    async fn publish(&self, point: &zensight_common::TelemetryPoint) {
+    /// Publish one built point under its subject (#1274): the key is
+    /// rendered from the subject through a cached AdvancedPublisher.
+    async fn publish(&self, (subject, point): &crate::map::Built) {
         self.health.record_metrics_published(1);
         // Tap the latest numeric value for the sentinel's metric-threshold checks.
         self.metric_cache.update(&point.metric, &point.value).await;
-        // Key = <prefix>/<source>/<metric>, published via a cached AdvancedPublisher.
-        let suffix = point.metric.clone();
-        if let Err(e) = self.registry.publish(&suffix, point).await {
+        if let Err(e) = self.registry.publish_subject(subject, point).await {
             tracing::warn!(error = %e, "publish failed");
         }
     }

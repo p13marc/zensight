@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use zensight_common::registry::netlink::Subject;
 use zensight_common::{TelemetryPoint, TelemetryValue};
 
 /// A snapshot of one network interface.
@@ -67,14 +68,14 @@ pub fn wireguard_points(
     iface: &str,
     peers: &[WgPeerView],
     stale_after_s: u64,
-) -> Vec<TelemetryPoint> {
+) -> Vec<Built> {
     let mut out = vec![point(
         host,
-        format!("wireguard/{iface}/peers"),
+        Subject::wireguard_peers(iface),
         TelemetryValue::Gauge(peers.len() as f64),
     )];
     for p in peers {
-        let pfx = format!("wireguard/{iface}/{}", p.id);
+        let peer = p.id.as_str();
         let mut labels = std::collections::HashMap::new();
         if let Some(ep) = &p.endpoint {
             labels.insert("endpoint".to_string(), ep.clone());
@@ -83,17 +84,15 @@ pub fn wireguard_points(
         if let Some(aips) = &p.allowed_ips {
             labels.insert("allowed_ips".to_string(), aips.clone());
         }
-        out.push(
-            point(
-                host,
-                format!("{pfx}/rx_bytes"),
-                TelemetryValue::Counter(p.rx_bytes),
-            )
-            .with_labels(labels.clone()),
+        let (subject, rx) = point(
+            host,
+            Subject::wireguard_rx_bytes(iface, peer),
+            TelemetryValue::Counter(p.rx_bytes),
         );
+        out.push((subject, rx.with_labels(labels.clone())));
         out.push(point(
             host,
-            format!("{pfx}/tx_bytes"),
+            Subject::wireguard_tx_bytes(iface, peer),
             TelemetryValue::Counter(p.tx_bytes),
         ));
         // Handshake age (large sentinel when never handshaked) + up/down.
@@ -105,14 +104,14 @@ pub fn wireguard_points(
         if let Some(a) = p.handshake_age_s {
             out.push(point(
                 host,
-                format!("{pfx}/last_handshake_age_s"),
+                Subject::wireguard_last_handshake_age_s(iface, peer),
                 TelemetryValue::Gauge(a as f64),
             ));
         }
         let _ = age;
         out.push(point(
             host,
-            format!("{pfx}/up"),
+            Subject::wireguard_up(iface, peer),
             TelemetryValue::Boolean(up),
         ));
     }
@@ -217,19 +216,26 @@ pub struct SocketCounts {
 /// below are therefore also the registry-conformance suite, and adding a metric
 /// without registering it in `zensight-common/registry/netlink.toml` fails
 /// them.
-fn point(host: &str, metric: impl Into<String>, value: TelemetryValue) -> TelemetryPoint {
-    let metric = metric.into();
-    debug_assert!(
-        zensight_common::registry::is_registered_telemetry("netlink", &metric),
-        "unregistered netlink telemetry subject {metric:?} — add it to \
-         zensight-common/registry/netlink.toml (RFC 08 §5, issue #468)"
-    );
-    TelemetryPoint::new(host, metric, value)
+/// One built point beside the subject it publishes under (#1274): the
+/// collector hands both to `AdvancedPublisherRegistry::publish_subject`,
+/// and the metric on the point is the subject's tail by construction — a
+/// subject the registry does not declare has no constructor, which is the
+/// compile-time form of the check this helper used to `debug_assert!`.
+pub type Built = (Subject, TelemetryPoint);
+
+fn point(host: &str, subject: Subject, value: TelemetryValue) -> Built {
+    let point = TelemetryPoint::for_subject(host, &subject, value);
+    (subject, point)
+}
+
+/// Attach a label to a built point.
+fn label(b: Built, key: &str, value: impl Into<String>) -> Built {
+    (b.0, b.1.with_label(key, value))
 }
 
 /// Build telemetry points for one interface. Metric paths are
 /// `iface/<name>/<stat>`.
-pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<TelemetryPoint> {
+pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<Built> {
     // Slugged (#1153). The name comes from the kernel, and this used to
     // interpolate it raw: an ordinary Linux name (`eth0`, `enp3s0`,
     // `eth0.100`, `br-lan`) is already a legal chunk and is unchanged, but
@@ -237,69 +243,85 @@ pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<TelemetryPoint> {
     // byte would have built a key that is not a legal chunk at all, and the
     // only check in this file is a `debug_assert!` on registry membership,
     // which is compiled out in release and does not look at the chunk anyway.
-    let pfx = format!("iface/{}", zensight_sensor_core::key::device_chunk(&s.name));
+    // The builder slugs the kernel's name itself (#1274) — the same
+    // `device_chunk` escape as before, applied once.
+    let iface = s.name.as_str();
     let ifindex = s.ifindex.to_string();
-    let counter = |metric: String, v: u64| {
-        point(host, metric, TelemetryValue::Counter(v)).with_label("ifindex", ifindex.clone())
+    let counter = |subject: Subject, v: u64| {
+        label(
+            point(host, subject, TelemetryValue::Counter(v)),
+            "ifindex",
+            ifindex.clone(),
+        )
     };
 
     let mut out = vec![
-        counter(format!("{pfx}/rx_bytes"), s.rx_bytes),
-        counter(format!("{pfx}/tx_bytes"), s.tx_bytes),
-        counter(format!("{pfx}/rx_packets"), s.rx_packets),
-        counter(format!("{pfx}/tx_packets"), s.tx_packets),
-        counter(format!("{pfx}/rx_errors"), s.rx_errors),
-        counter(format!("{pfx}/tx_errors"), s.tx_errors),
-        counter(format!("{pfx}/rx_dropped"), s.rx_dropped),
-        counter(format!("{pfx}/tx_dropped"), s.tx_dropped),
-        counter(format!("{pfx}/multicast"), s.multicast),
-        counter(format!("{pfx}/collisions"), s.collisions),
-        point(
-            host,
-            format!("{pfx}/oper_state"),
-            TelemetryValue::Text(
-                s.oper_state
-                    .clone()
-                    .unwrap_or_else(|| if s.up { "up".into() } else { "down".into() }),
+        counter(Subject::iface_rx_bytes(iface), s.rx_bytes),
+        counter(Subject::iface_tx_bytes(iface), s.tx_bytes),
+        counter(Subject::iface_rx_packets(iface), s.rx_packets),
+        counter(Subject::iface_tx_packets(iface), s.tx_packets),
+        counter(Subject::iface_rx_errors(iface), s.rx_errors),
+        counter(Subject::iface_tx_errors(iface), s.tx_errors),
+        counter(Subject::iface_rx_dropped(iface), s.rx_dropped),
+        counter(Subject::iface_tx_dropped(iface), s.tx_dropped),
+        counter(Subject::iface_multicast(iface), s.multicast),
+        counter(Subject::iface_collisions(iface), s.collisions),
+        label(
+            point(
+                host,
+                Subject::iface_oper_state(iface),
+                TelemetryValue::Text(
+                    s.oper_state
+                        .clone()
+                        .unwrap_or_else(|| if s.up { "up".into() } else { "down".into() }),
+                ),
             ),
-        )
-        .with_label("ifindex", ifindex.clone()),
-        point(host, format!("{pfx}/up"), TelemetryValue::Boolean(s.up))
-            .with_label("ifindex", ifindex.clone()),
+            "ifindex",
+            ifindex.clone(),
+        ),
+        label(
+            point(
+                host,
+                Subject::iface_up(iface),
+                TelemetryValue::Boolean(s.up),
+            ),
+            "ifindex",
+            ifindex.clone(),
+        ),
     ];
 
     if let Some(carrier) = s.carrier {
-        out.push(
+        out.push(label(
             point(
                 host,
-                format!("{pfx}/carrier"),
+                Subject::iface_carrier(iface),
                 TelemetryValue::Boolean(carrier),
-            )
-            .with_label("ifindex", ifindex.clone()),
-        );
+            ),
+            "ifindex",
+            ifindex.clone(),
+        ));
     }
     if let Some(mtu) = s.mtu {
-        out.push(
+        out.push(label(
             point(
                 host,
-                format!("{pfx}/mtu"),
+                Subject::iface_mtu(iface),
                 TelemetryValue::Gauge(mtu as f64),
-            )
-            .with_label("ifindex", ifindex.clone()),
-        );
+            ),
+            "ifindex",
+            ifindex.clone(),
+        ));
     }
     if let Some(mac) = &s.mac {
         let mut labels = HashMap::new();
         labels.insert("ifindex".to_string(), ifindex.clone());
         labels.insert("mac".to_string(), mac.clone());
-        out.push(
-            point(
-                host,
-                format!("{pfx}/info"),
-                TelemetryValue::Text(mac.clone()),
-            )
-            .with_labels(labels),
+        let (subject, info) = point(
+            host,
+            Subject::iface_info(iface),
+            TelemetryValue::Text(mac.clone()),
         );
+        out.push((subject, info.with_labels(labels)));
     }
     out
 }
@@ -307,72 +329,72 @@ pub fn iface_points(host: &str, s: &IfaceSample) -> Vec<TelemetryPoint> {
 /// Build telemetry points for the TCP socket aggregates. Metric paths are
 /// `sockets/tcp/<stat>`, plus `sockets/tcp/by_cong/<algo>` and
 /// `sockets/tcp/mem/{snd,rcv}_buf_total` when mem/congestion info is available.
-pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
+pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<Built> {
     let mut out = vec![
         point(
             host,
-            "sockets/tcp/established",
+            Subject::SocketsTcpEstablished,
             TelemetryValue::Gauge(c.established as f64),
         ),
         point(
             host,
-            "sockets/tcp/listen",
+            Subject::SocketsTcpListen,
             TelemetryValue::Gauge(c.listen as f64),
         ),
         point(
             host,
-            "sockets/tcp/time_wait",
+            Subject::SocketsTcpTimeWait,
             TelemetryValue::Gauge(c.time_wait as f64),
         ),
         point(
             host,
-            "sockets/tcp/syn_sent",
+            Subject::SocketsTcpSynSent,
             TelemetryValue::Gauge(c.syn_sent as f64),
         ),
         point(
             host,
-            "sockets/tcp/close_wait",
+            Subject::SocketsTcpCloseWait,
             TelemetryValue::Gauge(c.close_wait as f64),
         ),
         point(
             host,
-            "sockets/tcp/retransmits_total",
+            Subject::SocketsTcpRetransmitsTotal,
             TelemetryValue::Counter(c.retransmits_total),
         ),
         point(
             host,
-            "sockets/tcp/max_rtt_us",
+            Subject::SocketsTcpMaxRttUs,
             TelemetryValue::Gauge(c.max_rtt_us as f64),
         ),
         point(
             host,
-            "sockets/tcp/rtt_p50_us",
+            Subject::SocketsTcpRttP50Us,
             TelemetryValue::Gauge(c.rtt_p50_us as f64),
         ),
         point(
             host,
-            "sockets/tcp/rtt_p95_us",
+            Subject::SocketsTcpRttP95Us,
             TelemetryValue::Gauge(c.rtt_p95_us as f64),
         ),
         // Delivery-health counters (#108) — always emitted (monotonic-ish sums).
         point(
             host,
-            "sockets/tcp/bytes_retrans_total",
+            Subject::SocketsTcpBytesRetransTotal,
             TelemetryValue::Counter(c.bytes_retrans_total),
         ),
         point(
             host,
-            "sockets/tcp/total_retrans_total",
+            Subject::SocketsTcpTotalRetransTotal,
             TelemetryValue::Counter(c.total_retrans_total),
         ),
         point(
             host,
-            "sockets/tcp/reordered_total",
+            Subject::SocketsTcpReorderedTotal,
             TelemetryValue::Counter(c.reordered_total),
         ),
         point(
             host,
-            "sockets/tcp/lost_total",
+            Subject::SocketsTcpLostTotal,
             TelemetryValue::Gauge(c.lost_total as f64),
         ),
     ];
@@ -382,36 +404,36 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
     if c.delivery_rate_p50 > 0 || c.delivery_rate_p95 > 0 {
         out.push(point(
             host,
-            "sockets/tcp/delivery_rate_p50",
+            Subject::SocketsTcpDeliveryRateP50,
             TelemetryValue::Gauge(c.delivery_rate_p50 as f64),
         ));
         out.push(point(
             host,
-            "sockets/tcp/delivery_rate_p95",
+            Subject::SocketsTcpDeliveryRateP95,
             TelemetryValue::Gauge(c.delivery_rate_p95 as f64),
         ));
     }
     if c.pacing_rate_p50 > 0 || c.pacing_rate_p95 > 0 {
         out.push(point(
             host,
-            "sockets/tcp/pacing_rate_p50",
+            Subject::SocketsTcpPacingRateP50,
             TelemetryValue::Gauge(c.pacing_rate_p50 as f64),
         ));
         out.push(point(
             host,
-            "sockets/tcp/pacing_rate_p95",
+            Subject::SocketsTcpPacingRateP95,
             TelemetryValue::Gauge(c.pacing_rate_p95 as f64),
         ));
     }
     if c.rcv_rtt_p50_us > 0 || c.rcv_rtt_p95_us > 0 {
         out.push(point(
             host,
-            "sockets/tcp/rcv_rtt_p50_us",
+            Subject::SocketsTcpRcvRttP50Us,
             TelemetryValue::Gauge(c.rcv_rtt_p50_us as f64),
         ));
         out.push(point(
             host,
-            "sockets/tcp/rcv_rtt_p95_us",
+            Subject::SocketsTcpRcvRttP95Us,
             TelemetryValue::Gauge(c.rcv_rtt_p95_us as f64),
         ));
     }
@@ -419,12 +441,12 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
     if c.snd_buf_total > 0 || c.rcv_buf_total > 0 {
         out.push(point(
             host,
-            "sockets/tcp/mem/snd_buf_total",
+            Subject::SocketsTcpMemSndBufTotal,
             TelemetryValue::Gauge(c.snd_buf_total as f64),
         ));
         out.push(point(
             host,
-            "sockets/tcp/mem/rcv_buf_total",
+            Subject::SocketsTcpMemRcvBufTotal,
             TelemetryValue::Gauge(c.rcv_buf_total as f64),
         ));
     }
@@ -432,7 +454,7 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
     for (algo, n) in &c.by_cong {
         out.push(point(
             host,
-            format!("sockets/tcp/by_cong/{algo}"),
+            Subject::sockets_tcp_by_cong(algo),
             TelemetryValue::Gauge(*n as f64),
         ));
     }
@@ -440,55 +462,60 @@ pub fn socket_points(host: &str, c: &SocketCounts) -> Vec<TelemetryPoint> {
 }
 
 /// Build telemetry points for the routing-table summary.
-pub fn route_points(host: &str, r: &RouteSummary) -> Vec<TelemetryPoint> {
+pub fn route_points(host: &str, r: &RouteSummary) -> Vec<Built> {
     let mut out = vec![
         point(
             host,
-            "routes/ipv4_count",
+            Subject::RoutesIpv4Count,
             TelemetryValue::Gauge(r.ipv4_count as f64),
         ),
         point(
             host,
-            "routes/ipv6_count",
+            Subject::RoutesIpv6Count,
             TelemetryValue::Gauge(r.ipv6_count as f64),
         ),
-        point(host, "routes/total", TelemetryValue::Gauge(r.total as f64)),
         point(
             host,
-            "routes/default_v4_present",
+            Subject::RoutesTotal,
+            TelemetryValue::Gauge(r.total as f64),
+        ),
+        point(
+            host,
+            Subject::RoutesDefaultV4Present,
             TelemetryValue::Boolean(r.default_v4_present),
         ),
         point(
             host,
-            "routes/default_v6_present",
+            Subject::RoutesDefaultV6Present,
             TelemetryValue::Boolean(r.default_v6_present),
         ),
     ];
     if let Some(gw) = &r.default_v4_gw {
-        out.push(
+        out.push(label(
             point(
                 host,
-                "routes/default_v4_gw",
+                Subject::RoutesDefaultV4Gw,
                 TelemetryValue::Text(gw.clone()),
-            )
-            .with_label("gateway", gw.clone()),
-        );
+            ),
+            "gateway",
+            gw.clone(),
+        ));
     }
     out
 }
 
 /// Build telemetry points for the neighbor (ARP/NDP) summary. Metric paths are
 /// `neighbors/by_state/<state>` plus `neighbors/total`.
-pub fn neighbor_points(host: &str, n: &NeighborSummary) -> Vec<TelemetryPoint> {
-    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+pub fn neighbor_points(host: &str, n: &NeighborSummary) -> Vec<Built> {
+    let g = |subject: Subject, v: u64| point(host, subject, TelemetryValue::Gauge(v as f64));
     vec![
-        g("neighbors/by_state/reachable", n.reachable),
-        g("neighbors/by_state/stale", n.stale),
-        g("neighbors/by_state/failed", n.failed),
-        g("neighbors/by_state/incomplete", n.incomplete),
-        g("neighbors/by_state/permanent", n.permanent),
-        g("neighbors/by_state/other", n.other),
-        g("neighbors/total", n.total),
+        g(Subject::neighbors_by_state("reachable"), n.reachable),
+        g(Subject::neighbors_by_state("stale"), n.stale),
+        g(Subject::neighbors_by_state("failed"), n.failed),
+        g(Subject::neighbors_by_state("incomplete"), n.incomplete),
+        g(Subject::neighbors_by_state("permanent"), n.permanent),
+        g(Subject::neighbors_by_state("other"), n.other),
+        g(Subject::NeighborsTotal, n.total),
     ]
 }
 
@@ -496,17 +523,17 @@ pub fn neighbor_points(host: &str, n: &NeighborSummary) -> Vec<TelemetryPoint> {
 /// `diagnostics/issues/<severity>`, `diagnostics/issues/total`,
 /// `diagnostics/bottleneck_score`, and (when a bottleneck exists)
 /// `diagnostics/bottleneck` (Text = type, with location/recommendation labels).
-pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<TelemetryPoint> {
-    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<Built> {
+    let g = |subject: Subject, v: u64| point(host, subject, TelemetryValue::Gauge(v as f64));
     let mut out = vec![
-        g("diagnostics/issues/info", d.issues_info),
-        g("diagnostics/issues/warning", d.issues_warning),
-        g("diagnostics/issues/error", d.issues_error),
-        g("diagnostics/issues/critical", d.issues_critical),
-        g("diagnostics/issues/total", d.issues_total()),
+        g(Subject::diagnostics_issues("info"), d.issues_info),
+        g(Subject::diagnostics_issues("warning"), d.issues_warning),
+        g(Subject::diagnostics_issues("error"), d.issues_error),
+        g(Subject::diagnostics_issues("critical"), d.issues_critical),
+        g(Subject::diagnostics_issues("total"), d.issues_total()),
         point(
             host,
-            "diagnostics/bottleneck_score",
+            Subject::DiagnosticsBottleneckScore,
             TelemetryValue::Gauge(d.bottleneck_score),
         ),
     ];
@@ -522,14 +549,12 @@ pub fn diagnostics_points(host: &str, d: &DiagnosticsSummary) -> Vec<TelemetryPo
             "drop_rate".to_string(),
             format!("{}", d.bottleneck_drop_rate),
         );
-        out.push(
-            point(
-                host,
-                "diagnostics/bottleneck",
-                TelemetryValue::Text(kind.clone()),
-            )
-            .with_labels(labels),
+        let (subject, bottleneck) = point(
+            host,
+            Subject::DiagnosticsBottleneck,
+            TelemetryValue::Text(kind.clone()),
         );
+        out.push((subject, bottleneck.with_labels(labels)));
     }
     out
 }
@@ -610,17 +635,17 @@ fn endpoint_ip_part(endpoint: &str) -> &str {
 /// Build telemetry points for the conntrack summary. Metric paths are
 /// `conntrack/entries`, `conntrack/by_proto/<proto>`, `conntrack/max`,
 /// `conntrack/utilization`.
-pub fn conntrack_points(host: &str, c: &ConntrackSummary) -> Vec<TelemetryPoint> {
-    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+pub fn conntrack_points(host: &str, c: &ConntrackSummary) -> Vec<Built> {
+    let g = |subject: Subject, v: u64| point(host, subject, TelemetryValue::Gauge(v as f64));
     let mut out = vec![
-        g("conntrack/entries", c.total),
-        g("conntrack/by_proto/tcp", c.tcp),
-        g("conntrack/by_proto/udp", c.udp),
-        g("conntrack/by_proto/icmp", c.icmp),
-        g("conntrack/by_proto/other", c.other),
+        g(Subject::ConntrackEntries, c.total),
+        g(Subject::conntrack_by_proto("tcp"), c.tcp),
+        g(Subject::conntrack_by_proto("udp"), c.udp),
+        g(Subject::conntrack_by_proto("icmp"), c.icmp),
+        g(Subject::conntrack_by_proto("other"), c.other),
     ];
     if let Some(max) = c.max {
-        out.push(g("conntrack/max", max));
+        out.push(g(Subject::ConntrackMax, max));
         // Utilization in [0,1]; the classic outage predictor when near 1.
         let util = if max > 0 {
             c.total as f64 / max as f64
@@ -629,7 +654,7 @@ pub fn conntrack_points(host: &str, c: &ConntrackSummary) -> Vec<TelemetryPoint>
         };
         out.push(point(
             host,
-            "conntrack/utilization",
+            Subject::ConntrackUtilization,
             TelemetryValue::Gauge(util),
         ));
     }
@@ -699,96 +724,100 @@ pub struct EthtoolSample {
 
 /// Build telemetry points for one interface's ethtool view. Metric paths are
 /// `ethtool/<iface>/...`. Absent fields are omitted (graceful degradation).
-pub fn ethtool_points(host: &str, s: &EthtoolSample) -> Vec<TelemetryPoint> {
-    let pfx = format!("ethtool/{}", s.iface);
+pub fn ethtool_points(host: &str, s: &EthtoolSample) -> Vec<Built> {
+    let iface = s.iface.as_str();
     let mut out = Vec::new();
     if let Some(carrier) = s.carrier {
         out.push(point(
             host,
-            format!("{pfx}/carrier"),
+            Subject::ethtool_carrier(iface),
             TelemetryValue::Boolean(carrier),
         ));
     }
     if let Some(speed) = s.speed_mbps {
         out.push(point(
             host,
-            format!("{pfx}/speed_mbps"),
+            Subject::ethtool_speed_mbps(iface),
             TelemetryValue::Gauge(speed as f64),
         ));
     }
     if let Some(duplex) = s.duplex {
         out.push(point(
             host,
-            format!("{pfx}/duplex"),
+            Subject::ethtool_duplex(iface),
             TelemetryValue::Text(duplex.label().to_string()),
         ));
         // A numeric/boolean companion so a generic metric-threshold expectation
         // can flag half-duplex without parsing text.
         out.push(point(
             host,
-            format!("{pfx}/full_duplex"),
+            Subject::ethtool_full_duplex(iface),
             TelemetryValue::Boolean(duplex == DuplexKind::Full),
         ));
     }
     if let Some(autoneg) = s.autoneg {
         out.push(point(
             host,
-            format!("{pfx}/autoneg"),
+            Subject::ethtool_autoneg(iface),
             TelemetryValue::Boolean(autoneg),
         ));
     }
-    let gauge = |out: &mut Vec<TelemetryPoint>, name: &str, v: Option<u32>| {
+    let gauge = |out: &mut Vec<Built>, subject: Subject, v: Option<u32>| {
         if let Some(v) = v {
-            out.push(point(
-                host,
-                format!("{pfx}/{name}"),
-                TelemetryValue::Gauge(v as f64),
-            ));
+            out.push(point(host, subject, TelemetryValue::Gauge(v as f64)));
         }
     };
-    gauge(&mut out, "rings/rx", s.rx_ring);
-    gauge(&mut out, "rings/tx", s.tx_ring);
-    gauge(&mut out, "rings/rx_max", s.rx_ring_max);
-    gauge(&mut out, "rings/tx_max", s.tx_ring_max);
+    gauge(&mut out, Subject::ethtool_rings_rx(iface), s.rx_ring);
+    gauge(&mut out, Subject::ethtool_rings_tx(iface), s.tx_ring);
+    gauge(
+        &mut out,
+        Subject::ethtool_rings_rx_max(iface),
+        s.rx_ring_max,
+    );
+    gauge(
+        &mut out,
+        Subject::ethtool_rings_tx_max(iface),
+        s.tx_ring_max,
+    );
     if let Some(v) = s.pause_rx {
         out.push(point(
             host,
-            format!("{pfx}/pause/rx"),
+            Subject::ethtool_pause_rx(iface),
             TelemetryValue::Boolean(v),
         ));
     }
     if let Some(v) = s.pause_tx {
         out.push(point(
             host,
-            format!("{pfx}/pause/tx"),
+            Subject::ethtool_pause_tx(iface),
             TelemetryValue::Boolean(v),
         ));
     }
     if let Some(v) = s.pause_autoneg {
         out.push(point(
             host,
-            format!("{pfx}/pause/autoneg"),
+            Subject::ethtool_pause_autoneg(iface),
             TelemetryValue::Boolean(v),
         ));
     }
     if let Some(v) = s.pause_rx_frames {
         out.push(point(
             host,
-            format!("{pfx}/pause/rx_frames"),
+            Subject::ethtool_pause_rx_frames(iface),
             TelemetryValue::Counter(v),
         ));
     }
     if let Some(v) = s.pause_tx_frames {
         out.push(point(
             host,
-            format!("{pfx}/pause/tx_frames"),
+            Subject::ethtool_pause_tx_frames(iface),
             TelemetryValue::Counter(v),
         ));
     }
     for (name, active) in &s.features {
         out.push(point(
             host,
-            format!("{pfx}/features/{name}"),
+            Subject::ethtool_features(iface, name),
             TelemetryValue::Boolean(*active),
         ));
     }
@@ -796,14 +825,14 @@ pub fn ethtool_points(host: &str, s: &EthtoolSample) -> Vec<TelemetryPoint> {
     if let Some(modes) = &s.fec_modes {
         out.push(point(
             host,
-            format!("{pfx}/fec/modes"),
+            Subject::ethtool_fec_modes(iface),
             TelemetryValue::Text(modes.clone()),
         ));
     }
     if let Some(v) = s.fec_auto {
         out.push(point(
             host,
-            format!("{pfx}/fec/auto"),
+            Subject::ethtool_fec_auto(iface),
             TelemetryValue::Boolean(v),
         ));
     }
@@ -811,14 +840,14 @@ pub fn ethtool_points(host: &str, s: &EthtoolSample) -> Vec<TelemetryPoint> {
     if let Some(v) = s.eee_enabled {
         out.push(point(
             host,
-            format!("{pfx}/eee/enabled"),
+            Subject::ethtool_eee_enabled(iface),
             TelemetryValue::Boolean(v),
         ));
     }
     if let Some(v) = s.eee_active {
         out.push(point(
             host,
-            format!("{pfx}/eee/active"),
+            Subject::ethtool_eee_active(iface),
             TelemetryValue::Boolean(v),
         ));
     }
@@ -852,13 +881,13 @@ pub struct AddressSummary {
 
 /// Build telemetry points for the address inventory summary. Metric paths are
 /// `addresses/{ipv4_count,ipv6_count,global_count,total}`.
-pub fn address_points(host: &str, a: &AddressSummary) -> Vec<TelemetryPoint> {
-    let g = |metric: &str, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+pub fn address_points(host: &str, a: &AddressSummary) -> Vec<Built> {
+    let g = |subject: Subject, v: u64| point(host, subject, TelemetryValue::Gauge(v as f64));
     vec![
-        g("addresses/ipv4_count", a.ipv4_count),
-        g("addresses/ipv6_count", a.ipv6_count),
-        g("addresses/global_count", a.global_count),
-        g("addresses/total", a.total),
+        g(Subject::AddressesIpv4Count, a.ipv4_count),
+        g(Subject::AddressesIpv6Count, a.ipv6_count),
+        g(Subject::AddressesGlobalCount, a.global_count),
+        g(Subject::AddressesTotal, a.total),
     ]
 }
 
@@ -976,59 +1005,62 @@ pub fn tc_health_score(s: &TcQdiscSample) -> f64 {
 /// kernel stats); backlog is an instantaneous gauge. Additionally emits the derived
 /// `tc/<iface>/<kind>/health_score` (Gauge 0..=1, 1 = healthy, see
 /// [`tc_health_score`]) and `tc/<iface>/aqm_class` (Text, see [`aqm_class`]).
-pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<TelemetryPoint> {
-    let pfx = format!("tc/{}/{}", s.iface, s.kind);
-    let label = |p: TelemetryPoint| p.with_label("handle", s.handle.clone());
+pub fn tc_points(host: &str, s: &TcQdiscSample) -> Vec<Built> {
+    let (iface, kind) = (s.iface.as_str(), s.kind.as_str());
+    let handled = |b: Built| label(b, "handle", s.handle.clone());
     vec![
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/drops"),
+            Subject::tc_drops(iface, kind),
             TelemetryValue::Counter(s.drops),
         )),
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/overlimits"),
+            Subject::tc_overlimits(iface, kind),
             TelemetryValue::Counter(s.overlimits),
         )),
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/requeues"),
+            Subject::tc_requeues(iface, kind),
             TelemetryValue::Counter(s.requeues),
         )),
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/bytes"),
+            Subject::tc_bytes(iface, kind),
             TelemetryValue::Counter(s.bytes),
         )),
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/packets"),
+            Subject::tc_packets(iface, kind),
             TelemetryValue::Counter(s.packets),
         )),
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/backlog_bytes"),
+            Subject::tc_backlog_bytes(iface, kind),
             TelemetryValue::Gauge(s.backlog_bytes as f64),
         )),
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/backlog_pkts"),
+            Subject::tc_backlog_pkts(iface, kind),
             TelemetryValue::Gauge(s.backlog_pkts as f64),
         )),
         // Derived bufferbloat health score (#110): 0..=1, 1 = healthy.
-        label(point(
+        handled(point(
             host,
-            format!("{pfx}/health_score"),
+            Subject::tc_health_score(iface, kind),
             TelemetryValue::Gauge(tc_health_score(s)),
         )),
         // AQM classification of the qdisc kind (#110). Path omits `<kind>` (per the
         // issue); the `kind` label disambiguates multiple qdiscs on one iface.
-        label(point(
-            host,
-            format!("tc/{}/aqm_class", s.iface),
-            TelemetryValue::Text(aqm_class(&s.kind).to_string()),
-        ))
-        .with_label("kind", s.kind.clone()),
+        label(
+            handled(point(
+                host,
+                Subject::tc_aqm_class(iface),
+                TelemetryValue::Text(aqm_class(&s.kind).to_string()),
+            )),
+            "kind",
+            s.kind.clone(),
+        ),
     ]
 }
 
@@ -1079,17 +1111,17 @@ pub struct XfrmSummary {
 /// Build telemetry points for the XFRM/IPsec summary (#13). Metric paths are
 /// `xfrm/sa/total`, `xfrm/sa/by_mode/<mode>`, `xfrm/sa/by_proto/<proto>`,
 /// `xfrm/policy/total`.
-pub fn xfrm_points(host: &str, x: &XfrmSummary) -> Vec<TelemetryPoint> {
-    let g = |metric: String, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
+pub fn xfrm_points(host: &str, x: &XfrmSummary) -> Vec<Built> {
+    let g = |subject: Subject, v: u64| point(host, subject, TelemetryValue::Gauge(v as f64));
     let mut out = vec![
-        g("xfrm/sa/total".into(), x.sa_total),
-        g("xfrm/policy/total".into(), x.policy_total),
+        g(Subject::XfrmSaTotal, x.sa_total),
+        g(Subject::XfrmPolicyTotal, x.policy_total),
     ];
     for (mode, n) in &x.sa_by_mode {
-        out.push(g(format!("xfrm/sa/by_mode/{mode}"), *n));
+        out.push(g(Subject::xfrm_sa_by_mode(mode), *n));
     }
     for (proto, n) in &x.sa_by_proto {
-        out.push(g(format!("xfrm/sa/by_proto/{proto}"), *n));
+        out.push(g(Subject::xfrm_sa_by_proto(proto), *n));
     }
     out
 }
@@ -1149,22 +1181,22 @@ pub struct NftSummary {
 /// rules}`); the decoded firewall traffic is monotonic counters
 /// (`nft/{packets,bytes}_total`, per-table `.../{packets,bytes}`) so exporters and
 /// charts derive a hit-rate.
-pub fn nft_points(host: &str, s: &NftSummary) -> Vec<TelemetryPoint> {
-    let g = |metric: String, v: u64| point(host, metric, TelemetryValue::Gauge(v as f64));
-    let c = |metric: String, v: u64| point(host, metric, TelemetryValue::Counter(v));
+pub fn nft_points(host: &str, s: &NftSummary) -> Vec<Built> {
+    let g = |subject: Subject, v: u64| point(host, subject, TelemetryValue::Gauge(v as f64));
+    let c = |subject: Subject, v: u64| point(host, subject, TelemetryValue::Counter(v));
     let mut out = vec![
-        g("nft/tables_total".into(), s.tables_total),
-        g("nft/chains_total".into(), s.chains_total),
-        g("nft/rules_total".into(), s.rules_total),
-        c("nft/packets_total".into(), s.packets_total),
-        c("nft/bytes_total".into(), s.bytes_total),
+        g(Subject::NftTablesTotal, s.tables_total),
+        g(Subject::NftChainsTotal, s.chains_total),
+        g(Subject::NftRulesTotal, s.rules_total),
+        c(Subject::NftPacketsTotal, s.packets_total),
+        c(Subject::NftBytesTotal, s.bytes_total),
     ];
     for t in &s.tables {
-        let pfx = format!("nft/{}/{}", t.family, t.table);
-        out.push(g(format!("{pfx}/chains"), t.chains));
-        out.push(g(format!("{pfx}/rules"), t.rules));
-        out.push(c(format!("{pfx}/packets"), t.packets));
-        out.push(c(format!("{pfx}/bytes"), t.bytes));
+        let (family, table) = (t.family.as_str(), t.table.as_str());
+        out.push(g(Subject::nft_chains(family, table), t.chains));
+        out.push(g(Subject::nft_rules(family, table), t.rules));
+        out.push(c(Subject::nft_packets(family, table), t.packets));
+        out.push(c(Subject::nft_bytes(family, table), t.bytes));
     }
     out
 }
@@ -1253,17 +1285,17 @@ pub fn connlat_percentiles(hist: &[u64]) -> (u64, u64) {
 /// Connect-latency gauges, routed through the normal publish path so the
 /// sentinel's metric-threshold expectations can watch them. Both are omitted
 /// when zero (matching the rtt/delivery-rate "omit-on-zero" policy).
-pub fn connlat_points(host: &str, p50_us: u64, p95_us: u64) -> Vec<TelemetryPoint> {
+pub fn connlat_points(host: &str, p50_us: u64, p95_us: u64) -> Vec<Built> {
     let mut out = Vec::new();
     if p50_us > 0 || p95_us > 0 {
         out.push(point(
             host,
-            "sockets/tcp/connlat_us_p50",
+            Subject::SocketsTcpConnlatUsP50,
             TelemetryValue::Gauge(p50_us as f64),
         ));
         out.push(point(
             host,
-            "sockets/tcp/connlat_us_p95",
+            Subject::SocketsTcpConnlatUsP95,
             TelemetryValue::Gauge(p95_us as f64),
         ));
     }
@@ -1374,7 +1406,12 @@ mod tests {
             default_v4_gw: Some("10.0.0.1".into()),
         };
         let pts = route_points("h", &r);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(find("routes/ipv4_count").value, TelemetryValue::Gauge(5.0));
         assert_eq!(
             find("routes/default_v4_present").value,
@@ -1407,7 +1444,12 @@ mod tests {
             },
         ];
         let pts = wireguard_points("h", "wg0", &peers, 180);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(
             find("wireguard/wg0/peers").value,
             TelemetryValue::Gauge(2.0)
@@ -1427,7 +1469,7 @@ mod tests {
         // The never-handshaked peer has no age point.
         assert!(
             pts.iter()
-                .all(|p| p.metric != "wireguard/wg0/zz99/last_handshake_age_s")
+                .all(|(_, p)| p.metric != "wireguard/wg0/zz99/last_handshake_age_s")
         );
         // wg-quick AllowedIPs enrichment (#268) rides on the peer's rx_bytes point.
         assert_eq!(
@@ -1450,7 +1492,12 @@ mod tests {
             max: Some(2000),
         };
         let pts = conntrack_points("h", &c);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(
             find("conntrack/entries").value,
             TelemetryValue::Gauge(1500.0)
@@ -1471,7 +1518,10 @@ mod tests {
             ..Default::default()
         };
         let pts2 = conntrack_points("h", &c2);
-        assert!(pts2.iter().all(|p| p.metric != "conntrack/utilization"));
+        assert!(
+            pts2.iter()
+                .all(|(_, p)| p.metric != "conntrack/utilization")
+        );
     }
 
     #[test]
@@ -1484,7 +1534,12 @@ mod tests {
             ..Default::default()
         };
         let pts = neighbor_points("h", &n);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(
             find("neighbors/by_state/reachable").value,
             TelemetryValue::Gauge(3.0)
@@ -1499,7 +1554,7 @@ mod tests {
     #[test]
     fn iface_points_cover_counters_and_state() {
         let pts = iface_points("host1", &sample());
-        let find = |m: &str| pts.iter().find(|p| p.metric == m);
+        let find = |m: &str| pts.iter().find(|(_, p)| p.metric == m).map(|(_, p)| p);
         assert_eq!(
             find("iface/eth0/rx_bytes").unwrap().value,
             TelemetryValue::Counter(1000)
@@ -1513,7 +1568,7 @@ mod tests {
             TelemetryValue::Gauge(1500.0)
         );
         // Every point is sourced + labelled with the interface index.
-        for p in &pts {
+        for (_, p) in &pts {
             assert_eq!(p.source, "host1");
             assert_eq!(p.labels.get("ifindex").map(String::as_str), Some("2"));
         }
@@ -1526,9 +1581,9 @@ mod tests {
         s.mtu = None;
         s.mac = None;
         let pts = iface_points("h", &s);
-        assert!(pts.iter().all(|p| p.metric != "iface/eth0/carrier"));
-        assert!(pts.iter().all(|p| p.metric != "iface/eth0/mtu"));
-        assert!(pts.iter().all(|p| p.metric != "iface/eth0/info"));
+        assert!(pts.iter().all(|(_, p)| p.metric != "iface/eth0/carrier"));
+        assert!(pts.iter().all(|(_, p)| p.metric != "iface/eth0/mtu"));
+        assert!(pts.iter().all(|(_, p)| p.metric != "iface/eth0/info"));
     }
 
     #[test]
@@ -1558,7 +1613,12 @@ mod tests {
             ..Default::default()
         };
         let pts = socket_points("h", &c);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(
             find("sockets/tcp/established").value,
             TelemetryValue::Gauge(5.0)
@@ -1625,14 +1685,14 @@ mod tests {
         let pts = socket_points("h", &c);
         assert!(
             pts.iter()
-                .all(|p| !p.metric.starts_with("sockets/tcp/mem/"))
+                .all(|(_, p)| !p.metric.starts_with("sockets/tcp/mem/"))
         );
         assert!(
             pts.iter()
-                .all(|p| !p.metric.starts_with("sockets/tcp/by_cong/"))
+                .all(|(_, p)| !p.metric.starts_with("sockets/tcp/by_cong/"))
         );
         // #108: delivery/pacing/rcv-rtt percentiles omitted when 0 (no clobbering).
-        assert!(pts.iter().all(|p| {
+        assert!(pts.iter().all(|(_, p)| {
             !matches!(
                 p.metric.as_str(),
                 "sockets/tcp/delivery_rate_p50"
@@ -1643,7 +1703,7 @@ mod tests {
         // But the always-on retrans/lost counters ARE present (even at 0).
         assert!(
             pts.iter()
-                .any(|p| p.metric == "sockets/tcp/bytes_retrans_total")
+                .any(|(_, p)| p.metric == "sockets/tcp/bytes_retrans_total")
         );
     }
 
@@ -1656,7 +1716,7 @@ mod tests {
             ..Default::default()
         };
         let pts = diagnostics_points("h", &clean);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m);
+        let find = |m: &str| pts.iter().find(|(_, p)| p.metric == m).map(|(_, p)| p);
         assert_eq!(
             find("diagnostics/issues/info").unwrap().value,
             TelemetryValue::Gauge(2.0)
@@ -1684,7 +1744,8 @@ mod tests {
         let pts = diagnostics_points("h", &busy);
         let b = pts
             .iter()
-            .find(|p| p.metric == "diagnostics/bottleneck")
+            .find(|(_, p)| p.metric == "diagnostics/bottleneck")
+            .map(|(_, p)| p)
             .unwrap();
         assert_eq!(b.value, TelemetryValue::Text("Qdisc Drops".into()));
         assert_eq!(
@@ -1806,7 +1867,7 @@ mod tests {
             eee_active: Some(false),
         };
         let pts = ethtool_points("h", &s);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m);
+        let find = |m: &str| pts.iter().find(|(_, p)| p.metric == m).map(|(_, p)| p);
         assert_eq!(
             find("ethtool/eth0/speed_mbps").unwrap().value,
             TelemetryValue::Gauge(1000.0)
@@ -1860,7 +1921,12 @@ mod tests {
             total: 5,
         };
         let pts = address_points("h", &a);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(
             find("addresses/ipv4_count").value,
             TelemetryValue::Gauge(3.0)
@@ -1887,7 +1953,12 @@ mod tests {
             backlog_pkts: 1,
         };
         let pts = tc_points("h", &s);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(
             find("tc/eth0/fq_codel/drops").value,
             TelemetryValue::Counter(7)
@@ -1905,7 +1976,7 @@ mod tests {
             TelemetryValue::Gauge(1.0)
         );
         // Every point carries the qdisc handle label.
-        for p in &pts {
+        for (_, p) in &pts {
             assert_eq!(p.labels.get("handle").map(String::as_str), Some("8001:"));
         }
         // #110: the derived health_score Gauge and aqm_class Text are emitted.
@@ -2028,7 +2099,12 @@ mod tests {
             policy_total: 4,
         };
         let pts = xfrm_points("h", &x);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(find("xfrm/sa/total").value, TelemetryValue::Gauge(2.0));
         assert_eq!(
             find("xfrm/sa/by_mode/tunnel").value,
@@ -2069,7 +2145,12 @@ mod tests {
             bytes_total: 6400,
         };
         let pts = nft_points("h", &s);
-        let find = |m: &str| pts.iter().find(|p| p.metric == m).unwrap();
+        let find = |m: &str| {
+            pts.iter()
+                .find(|(_, p)| p.metric == m)
+                .map(|(_, p)| p)
+                .unwrap()
+        };
         assert_eq!(find("nft/tables_total").value, TelemetryValue::Gauge(2.0));
         assert_eq!(find("nft/rules_total").value, TelemetryValue::Gauge(16.0));
         assert_eq!(
@@ -2118,8 +2199,8 @@ mod tests {
         assert!(connlat_points("h", 0, 0).is_empty());
         let pts = connlat_points("h", 100, 250);
         assert_eq!(pts.len(), 2);
-        assert_eq!(pts[0].metric, "sockets/tcp/connlat_us_p50");
-        assert_eq!(pts[1].metric, "sockets/tcp/connlat_us_p95");
+        assert_eq!(pts[0].1.metric, "sockets/tcp/connlat_us_p50");
+        assert_eq!(pts[1].1.metric, "sockets/tcp/connlat_us_p95");
     }
 
     #[test]
@@ -2222,21 +2303,26 @@ mod tests {
         assert_eq!(boot_ns_to_unix_ms(u64::MAX, i64::MAX), i64::MAX);
     }
 
-    /// The registry guard must actually bite. A conformance suite that cannot fail
-    /// is the same mistake as the `{metric...}` catch-all it replaced: vacuously
-    /// true. This is the test that proves the others mean something.
+    /// The registry guard `point` used to `debug_assert!` is the compiler's
+    /// now (#1274): a subject the registry does not declare has no
+    /// constructor. What is left to pin is the tail a built point carries.
     #[test]
-    #[should_panic(expected = "unregistered netlink telemetry subject")]
-    fn an_unregistered_metric_panics_in_debug() {
-        let _ = point("h", "totally/made/up/subject", TelemetryValue::Gauge(1.0));
-    }
-
-    /// ...and a real subject constructs.
-    #[test]
-    fn a_registered_metric_constructs() {
+    fn a_registered_metric_renders_its_tail() {
         assert_eq!(
-            point("h", "routes/total", TelemetryValue::Gauge(1.0)).metric,
+            point("h", Subject::RoutesTotal, TelemetryValue::Gauge(1.0))
+                .1
+                .metric,
             "routes/total"
+        );
+        assert_eq!(
+            point(
+                "h",
+                Subject::iface_up("eth0.100"),
+                TelemetryValue::Boolean(true)
+            )
+            .1
+            .metric,
+            "iface/eth0.100/up"
         );
     }
 }
