@@ -15,7 +15,7 @@ use crate::message::Message;
 use crate::view::components::card;
 use crate::view::security::SecurityState;
 use crate::view::theme;
-use crate::view::tokens::font;
+use crate::view::tokens::{font, space};
 
 /// The three status procedures the panel reads (#121, #225, #328), each at
 /// the chosen host — a fleet fan-in's first reply is one host's config,
@@ -365,7 +365,7 @@ pub fn detection_tuning_panel<'a>(
         .push(refresh)
         .align_y(Alignment::Center)
         .spacing(8);
-    let mut top = column![header].spacing(8);
+    let mut top = column![header].spacing(space::SM);
     if let Some(bar) = armed_bar(sec) {
         top = top.push(bar);
     }
@@ -533,7 +533,7 @@ fn armed_bar(sec: &SecurityState) -> Option<Element<'_, Message>> {
                     Some(Message::Disarm)
                 ),
             ]
-            .spacing(8)
+            .spacing(space::SM)
             .align_y(Alignment::Center)
             .into(),
         );

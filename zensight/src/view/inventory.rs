@@ -617,7 +617,7 @@ fn render_fingerprints<'a>(
                             .padding([2, 8])
                             .on_press(Message::Disarm),
                     ]
-                    .spacing(4)
+                    .spacing(space::XS)
                     .into(),
                     (None, Some(h)) => button(text("allowlist").size(font::MICRO))
                         .padding([2, 8])
