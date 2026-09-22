@@ -5,13 +5,13 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use zensight_common::bmc::RedfishSurface;
-use zensight_common::{QosClass, TelemetryValue};
+use zensight_common::registry::bmc::Subject;
+use zensight_common::{QosClass, TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::{AlertReporter, Publisher, SensorHealth, SweepOpts};
 
 use crate::alerts::{self, Observation};
 use crate::config::{BmcConfig, Endpoint};
 use crate::redfish::{ChassisSweep, RedfishClient};
-use crate::telemetry_guard::checked_point;
 
 /// State documents ride an advanced publisher with cache 1, so a late joiner
 /// (the GUI, a storage) seeds the current document instead of waiting a whole
@@ -192,6 +192,10 @@ impl Poller {
         // wrote `telemetry/bmc/rack-a-1/psu/0/input_watts` and took turns
         // overwriting each other, sweep by sweep.
         let chassis = crate::chassis_chunk(&endpoint.name, &sweep.chassis.id);
+        // The telemetry builders take the value, not the chunk (#1274): they
+        // slug it once, exactly as `chassis_chunk` does. State keys keep the
+        // chunk.
+        let raw = crate::chassis_value(&endpoint.name, &sweep.chassis.id);
 
         for psu in &sweep.supplies {
             let id = zensight_sensor_core::key::device_chunk(&psu.id)
@@ -199,27 +203,23 @@ impl Poller {
                 .to_string();
             let labels = [("psu", psu.id.clone())];
             self.publish_point(
-                &chassis,
-                &format!("{chassis}/psu/{id}/present"),
+                Subject::psu_present(&raw, &psu.id),
                 f64::from(u8::from(psu.present)),
                 &labels,
             )
             .await;
-            for (suffix, value) in [
-                ("input_watts", psu.input_watts),
-                ("output_watts", psu.output_watts),
-                ("capacity_watts", psu.capacity_watts),
+            for (subject, value) in [
+                (Subject::psu_input_watts(&raw, &psu.id), psu.input_watts),
+                (Subject::psu_output_watts(&raw, &psu.id), psu.output_watts),
+                (
+                    Subject::psu_capacity_watts(&raw, &psu.id),
+                    psu.capacity_watts,
+                ),
             ] {
                 // Absent stays absent: `None` publishes nothing at all, which
                 // is what makes an empty bay legible next to a metered one.
                 if let Some(v) = value {
-                    self.publish_point(
-                        &chassis,
-                        &format!("{chassis}/psu/{id}/{suffix}"),
-                        v,
-                        &labels,
-                    )
-                    .await;
+                    self.publish_point(subject, v, &labels).await;
                 }
             }
             if let Some(key) = self.state_key(&["chassis", &chassis, "psu", &id]) {
@@ -233,8 +233,7 @@ impl Poller {
                 .to_string();
             if let Some(rpm) = fan.rpm {
                 self.publish_point(
-                    &chassis,
-                    &format!("{chassis}/fan/{id}/rpm"),
+                    Subject::fan_rpm(&raw, &fan.id),
                     rpm,
                     &[("fan", fan.id.clone())],
                 )
@@ -250,19 +249,19 @@ impl Poller {
                 .as_str()
                 .to_string();
             let labels = [("sensor", sensor.id.clone())];
-            for (suffix, value) in [
-                ("celsius", sensor.celsius),
-                ("upper_critical_c", sensor.upper_critical_c),
-                ("upper_warning_c", sensor.upper_warning_c),
+            for (subject, value) in [
+                (Subject::thermal_celsius(&raw, &sensor.id), sensor.celsius),
+                (
+                    Subject::thermal_upper_critical_c(&raw, &sensor.id),
+                    sensor.upper_critical_c,
+                ),
+                (
+                    Subject::thermal_upper_warning_c(&raw, &sensor.id),
+                    sensor.upper_warning_c,
+                ),
             ] {
                 if let Some(v) = value {
-                    self.publish_point(
-                        &chassis,
-                        &format!("{chassis}/thermal/{id}/{suffix}"),
-                        v,
-                        &labels,
-                    )
-                    .await;
+                    self.publish_point(subject, v, &labels).await;
                 }
             }
             if let Some(key) = self.state_key(&["chassis", &chassis, "thermal", &id]) {
@@ -280,8 +279,7 @@ impl Poller {
                 .to_string();
             if let Some(pct) = drive.life_left_percent {
                 self.publish_point(
-                    &chassis,
-                    &format!("{chassis}/drive/{id}/life_left_percent"),
+                    Subject::drive_life_left_percent(&raw, &drive.id),
                     pct,
                     &[("drive", drive.id.clone())],
                 )
@@ -554,34 +552,33 @@ impl Poller {
     /// else to name it with, and inventing a chassis chunk for it would claim
     /// a chassis exists that we have never seen.
     async fn publish_reachable(&self, endpoint: &Endpoint, value: f64) {
-        let chunk = crate::endpoint_chunk(&endpoint.name);
-        self.publish_point(&chunk, &format!("{chunk}/reachable"), value, &[])
+        self.publish_point(Subject::reachable(&endpoint.name), value, &[])
             .await;
     }
 
     /// Publish one gauge, labelled with the `{chassis}` chunk its key carries.
     ///
-    /// The label is the chunk and not the endpoint name, so label and key name
-    /// the same thing. They disagreed (#1130), which is how one chassis's
-    /// series arrived under another's name in every consumer that groups by
-    /// the label rather than by the key.
-    async fn publish_point(
-        &self,
-        chassis_chunk: &str,
-        metric: &str,
-        value: f64,
-        labels: &[(&str, String)],
-    ) {
-        let mut point = checked_point(
-            &self.source,
-            metric.to_string(),
-            TelemetryValue::Gauge(value),
-        )
-        .with_label("chassis", chassis_chunk.to_string());
+    /// The label is read off the subject — the bound `{chassis}` chunk — so
+    /// label and key name the same thing by construction. They disagreed
+    /// (#1130), which is how one chassis's series arrived under another's
+    /// name in every consumer that groups by the label rather than by the
+    /// key. `source` is the REPORTING HOST, never the chassis (#883): a
+    /// managed chassis is a facet of the vantage point that polls it, and it
+    /// rides in the key and in the labels.
+    async fn publish_point(&self, subject: Subject, value: f64, labels: &[(&str, String)]) {
+        let chassis = subject
+            .vars()
+            .into_iter()
+            .find(|(name, _)| *name == "chassis")
+            .map(|(_, chunk)| chunk)
+            .unwrap_or_default();
+        let mut point =
+            TelemetryPoint::for_subject(&self.source, &subject, TelemetryValue::Gauge(value))
+                .with_label("chassis", chassis);
         for (k, v) in labels {
             point = point.with_label(*k, v.clone());
         }
-        if let Err(e) = self.publisher.publish(&point.metric.clone(), &point).await {
+        if let Err(e) = self.publisher.publish_subject(&subject, &point).await {
             tracing::warn!(error = %e, "bmc: publish failed");
         }
     }

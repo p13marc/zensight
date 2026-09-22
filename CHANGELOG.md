@@ -67,12 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer disagree. A subject the registry does not declare has no
   constructor, which is the compile-time answer to the runtime question the
   metric guard asks on every put; a state subject handed to the telemetry
-  path is refused by name. `bmc` is the first sensor on it: its
-  `telemetry_guard.rs` is gone, its keys are byte-identical (pinned by
-  `typed_subjects::the_registered_families_render_their_tails`), and its
-  `chassis` label is read back from the subject's bound `{chassis}` rather
-  than spelled twice. The `&str`-suffix `publish` stays as the interim while
-  the other sensors move, one per PR. **pve** is the second sensor on it: all
+  path is refused by name. The `&str`-suffix `publish` stays as the interim
+  while the sensors move, one per PR. **bmc** is the exemplar (it shipped
+  after the API, not with it — the PR that claimed it carried only the
+  framework): its `telemetry_guard.rs` is gone, the builders take the raw
+  `endpoint-chassis` pair (`chassis_value`, beside `chassis_chunk` for the
+  state keys) and the raw component id, its tails are byte-identical (pinned
+  by `typed_subjects_render_the_hand_spelled_tails`), and its `chassis` label
+  is read off the subject's bound `{chassis}` rather than spelled twice. **pve** is the second sensor on it: all
   fourteen families (guest gauges and counters, node, ceph, storage, backup,
   backup job, cluster) build their subjects, a local pool's chunk is slugged
   once by the builder from the raw `node-storage` pair, and its
