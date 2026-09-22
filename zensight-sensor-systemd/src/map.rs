@@ -2,9 +2,21 @@
 //! under `systemd/unit/<unit>/*`, plus the `systemd/other/*` overflow bucket.
 //! Kept free of I/O so it is unit-testable without a bus.
 
+use zensight_common::registry::systemd::Subject;
 use zensight_common::telemetry::{TelemetryPoint, TelemetryValue};
 
 use crate::unit::UnitSample;
+
+/// One built point beside the subject it publishes under (#1274): the
+/// collector hands both to `Publisher::publish_subject`, and the metric on
+/// the point is the subject's tail by construction.
+pub type Built = (Subject, TelemetryPoint);
+
+/// A point under `subject` from `source`, paired with it.
+fn built(source: &str, subject: Subject, value: TelemetryValue) -> Built {
+    let point = TelemetryPoint::for_subject(source, &subject, value);
+    (subject, point)
+}
 
 /// Slug a unit name into a legal key-expression chunk (#843).
 ///
@@ -31,76 +43,78 @@ pub fn sanitize_unit(name: &str) -> String {
 /// a `unit` label with the raw name; resource points are emitted only when the
 /// unit has the matching accounting enabled (`Some`), and `exit_code` only when
 /// the unit is failed.
-pub fn unit_points(source: &str, s: &UnitSample) -> Vec<TelemetryPoint> {
-    let slug = sanitize_unit(&s.name);
-    let base = format!("unit/{slug}");
-    let point = |metric: String, value: TelemetryValue| {
-        crate::telemetry_guard::checked_point(source, metric, value)
-            .with_label("unit", s.name.clone())
+pub fn unit_points(source: &str, s: &UnitSample) -> Vec<Built> {
+    // The builders slug the unit name themselves (#1274) — the same escape
+    // `sanitize_unit` applies for the keys that are not telemetry.
+    let unit = s.name.as_str();
+    let point = |subject: Subject, value: TelemetryValue| {
+        let (subject, point) = built(source, subject, value);
+        (subject, point.with_label("unit", s.name.clone()))
     };
 
+    let (state_subject, state_point) = built(
+        source,
+        Subject::unit_state(unit),
+        TelemetryValue::Text(s.active_state.clone()),
+    );
     let mut pts = vec![
         point(
-            format!("{base}/active"),
+            Subject::unit_active(unit),
             TelemetryValue::Boolean(s.is_active()),
         ),
         // Active/sub state as text; load_state rides as a label for context.
-        crate::telemetry_guard::checked_point(
-            source,
-            format!("{base}/state"),
-            TelemetryValue::Text(s.active_state.clone()),
-        )
-        .with_label("unit", s.name.clone())
-        .with_label("load_state", s.load_state.clone())
-        .with_label("sub_state", s.sub_state.clone()),
+        (
+            state_subject,
+            state_point
+                .with_label("unit", s.name.clone())
+                .with_label("load_state", s.load_state.clone())
+                .with_label("sub_state", s.sub_state.clone()),
+        ),
         point(
-            format!("{base}/restarts_total"),
+            Subject::unit_restarts_total(unit),
             TelemetryValue::Counter(s.n_restarts as u64),
         ),
         point(
-            format!("{base}/active_since_usec"),
+            Subject::unit_active_since_usec(unit),
             TelemetryValue::Gauge(s.active_enter_usec as f64),
         ),
     ];
 
     if let Some(mem) = s.mem_bytes {
         pts.push(point(
-            format!("{base}/mem_bytes"),
+            Subject::unit_mem_bytes(unit),
             TelemetryValue::Gauge(mem as f64),
         ));
     }
     if let Some(cpu) = s.cpu_usec {
         // CPU time is monotonic → Counter.
         pts.push(point(
-            format!("{base}/cpu_usec"),
+            Subject::unit_cpu_usec(unit),
             TelemetryValue::Counter(cpu),
         ));
     }
     if let Some(tasks) = s.tasks {
         pts.push(point(
-            format!("{base}/tasks"),
+            Subject::unit_tasks(unit),
             TelemetryValue::Gauge(tasks as f64),
         ));
     }
     // Exit code is only meaningful for a failed unit.
     if s.is_failed() {
         pts.push(point(
-            format!("{base}/exit_code"),
+            Subject::unit_exit_code(unit),
             TelemetryValue::Gauge(s.exec_main_status as f64),
         ));
     }
     // Opt-in IP/IO accounting (present only when the unit enabled it).
-    for (metric, val) in [
-        ("ip_ingress_bytes", s.ip_ingress_bytes),
-        ("ip_egress_bytes", s.ip_egress_bytes),
-        ("io_read_bytes", s.io_read_bytes),
-        ("io_write_bytes", s.io_write_bytes),
+    for (subject, val) in [
+        (Subject::unit_ip_ingress_bytes(unit), s.ip_ingress_bytes),
+        (Subject::unit_ip_egress_bytes(unit), s.ip_egress_bytes),
+        (Subject::unit_io_read_bytes(unit), s.io_read_bytes),
+        (Subject::unit_io_write_bytes(unit), s.io_write_bytes),
     ] {
         if let Some(v) = val {
-            pts.push(point(
-                format!("{base}/{metric}"),
-                TelemetryValue::Counter(v),
-            ));
+            pts.push(point(subject, TelemetryValue::Counter(v)));
         }
     }
     pts
@@ -119,35 +133,35 @@ pub fn ip_rate_points(
     ingress_bps: Option<f64>,
     egress_bps: Option<f64>,
     accounting_off: bool,
-) -> Vec<TelemetryPoint> {
+) -> Vec<Built> {
     use zensight_common::bandwidth::{
         BandwidthSource, ByteSemantics, LABEL_SEMANTICS, LABEL_SOURCE,
     };
-    let slug = sanitize_unit(unit);
-    let base = format!("unit/{slug}");
-    let gauge = |metric: String, v: f64| {
-        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
-            .with_label("unit", unit.to_string())
-            .with_label(LABEL_SOURCE, BandwidthSource::Systemd.as_str())
-            .with_label(LABEL_SEMANTICS, ByteSemantics::WireL3.as_str())
-            .with_label("accounting", "cgroup_skb")
+    let gauge = |subject: Subject, v: f64| {
+        let (subject, point) = built(source, subject, TelemetryValue::Gauge(v));
+        (
+            subject,
+            point
+                .with_label("unit", unit.to_string())
+                .with_label(LABEL_SOURCE, BandwidthSource::Systemd.as_str())
+                .with_label(LABEL_SEMANTICS, ByteSemantics::WireL3.as_str())
+                .with_label("accounting", "cgroup_skb"),
+        )
     };
     let mut pts = Vec::new();
     if let Some(bps) = ingress_bps {
-        pts.push(gauge(format!("{base}/ip_ingress_bps"), bps));
+        pts.push(gauge(Subject::unit_ip_ingress_bps(unit), bps));
     }
     if let Some(bps) = egress_bps {
-        pts.push(gauge(format!("{base}/ip_egress_bps"), bps));
+        pts.push(gauge(Subject::unit_ip_egress_bps(unit), bps));
     }
     if accounting_off {
-        pts.push(
-            crate::telemetry_guard::checked_point(
-                source,
-                format!("{base}/ip_accounting"),
-                TelemetryValue::Boolean(false),
-            )
-            .with_label("unit", unit.to_string()),
+        let (subject, point) = built(
+            source,
+            Subject::unit_ip_accounting(unit),
+            TelemetryValue::Boolean(false),
         );
+        pts.push((subject, point.with_label("unit", unit.to_string())));
     }
     pts
 }
@@ -160,23 +174,23 @@ pub fn socket_points(
     n_accepted: u32,
     n_connections: u32,
     n_refused: u32,
-) -> Vec<TelemetryPoint> {
-    let base = format!("unit/{}", sanitize_unit(name));
-    let point = |metric: String, value: TelemetryValue| {
-        crate::telemetry_guard::checked_point(source, metric, value).with_label("unit", name)
+) -> Vec<Built> {
+    let point = |subject: Subject, value: TelemetryValue| {
+        let (subject, point) = built(source, subject, value);
+        (subject, point.with_label("unit", name))
     };
     vec![
         // n_accepted is monotonic (lifetime connections accepted) → Counter.
         point(
-            format!("{base}/n_accepted"),
+            Subject::unit_n_accepted(name),
             TelemetryValue::Counter(n_accepted as u64),
         ),
         point(
-            format!("{base}/n_connections"),
+            Subject::unit_n_connections(name),
             TelemetryValue::Gauge(n_connections as f64),
         ),
         point(
-            format!("{base}/n_refused"),
+            Subject::unit_n_refused(name),
             TelemetryValue::Counter(n_refused as u64),
         ),
     ]
@@ -190,18 +204,18 @@ pub fn timer_points(
     name: &str,
     last_trigger_usec: u64,
     next_elapse_usec: u64,
-) -> Vec<TelemetryPoint> {
-    let base = format!("unit/{}", sanitize_unit(name));
-    let point = |metric: String, value: TelemetryValue| {
-        crate::telemetry_guard::checked_point(source, metric, value).with_label("unit", name)
+) -> Vec<Built> {
+    let point = |subject: Subject, value: TelemetryValue| {
+        let (subject, point) = built(source, subject, value);
+        (subject, point.with_label("unit", name))
     };
     let mut pts = vec![point(
-        format!("{base}/last_trigger_usec"),
+        Subject::unit_last_trigger_usec(name),
         TelemetryValue::Gauge(last_trigger_usec as f64),
     )];
     if next_elapse_usec != 0 && next_elapse_usec != u64::MAX {
         pts.push(point(
-            format!("{base}/next_trigger_usec"),
+            Subject::unit_next_trigger_usec(name),
             TelemetryValue::Gauge(next_elapse_usec as f64),
         ));
     }
@@ -211,10 +225,7 @@ pub fn timer_points(
 /// Mount/automount state aggregates (#279, `collect.mounts`): `mounts/{total,
 /// mounted,failed}` from the enumerated units. `states` is the `active_state` of
 /// each `.mount`/`.automount` unit.
-pub fn mount_points<'a>(
-    source: &str,
-    states: impl IntoIterator<Item = &'a str>,
-) -> Vec<TelemetryPoint> {
+pub fn mount_points<'a>(source: &str, states: impl IntoIterator<Item = &'a str>) -> Vec<Built> {
     let (mut total, mut mounted, mut failed) = (0u64, 0u64, 0u64);
     for s in states {
         total += 1;
@@ -224,29 +235,21 @@ pub fn mount_points<'a>(
             _ => {}
         }
     }
-    let gauge = |metric: &str, v: u64| {
-        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v as f64))
-    };
+    let gauge = |subject: Subject, v: u64| built(source, subject, TelemetryValue::Gauge(v as f64));
     vec![
-        gauge("mounts/total", total),
-        gauge("mounts/mounted", mounted),
-        gauge("mounts/failed", failed),
+        gauge(Subject::MountsTotal, total),
+        gauge(Subject::MountsMounted, mounted),
+        gauge(Subject::MountsFailed, failed),
     ]
 }
 
 /// Journal store health (#279, `collect.journal`): `journal/{disk_usage_bytes,
 /// disk_available_bytes}`.
-pub fn journal_points(
-    source: &str,
-    usage_bytes: u64,
-    available_bytes: Option<u64>,
-) -> Vec<TelemetryPoint> {
-    let gauge = |metric: &str, v: f64| {
-        crate::telemetry_guard::checked_point(source, metric, TelemetryValue::Gauge(v))
-    };
-    let mut pts = vec![gauge("journal/disk_usage_bytes", usage_bytes as f64)];
+pub fn journal_points(source: &str, usage_bytes: u64, available_bytes: Option<u64>) -> Vec<Built> {
+    let gauge = |subject: Subject, v: f64| built(source, subject, TelemetryValue::Gauge(v));
+    let mut pts = vec![gauge(Subject::JournalDiskUsageBytes, usage_bytes as f64)];
     if let Some(avail) = available_bytes {
-        pts.push(gauge("journal/disk_available_bytes", avail as f64));
+        pts.push(gauge(Subject::JournalDiskAvailableBytes, avail as f64));
     }
     pts
 }
@@ -254,10 +257,10 @@ pub fn journal_points(
 /// The `systemd/other/*` overflow bucket (#273): a single gauge counting the
 /// units that are NOT individually streamed (total minus watched), so their
 /// existence isn't lost to the watchlist scoping.
-pub fn other_points(source: &str, unwatched_total: u64) -> Vec<TelemetryPoint> {
-    vec![crate::telemetry_guard::checked_point(
+pub fn other_points(source: &str, unwatched_total: u64) -> Vec<Built> {
+    vec![built(
         source,
-        "other/units_total",
+        Subject::OtherUnitsTotal,
         TelemetryValue::Gauge(unwatched_total as f64),
     )]
 }
@@ -328,7 +331,7 @@ mod tests {
     fn active_unit_points_shape_and_labels() {
         let pts = unit_points("host01", &sample("nginx.service"));
         let by: std::collections::HashMap<_, _> =
-            pts.iter().map(|p| (p.metric.as_str(), p)).collect();
+            pts.iter().map(|(_, p)| (p.metric.as_str(), p)).collect();
         assert_eq!(
             by["unit/nginx.service/active"].value,
             TelemetryValue::Boolean(true)
@@ -373,8 +376,10 @@ mod tests {
         s.cpu_usec = None;
         s.tasks = None;
         let pts = unit_points("host01", &s);
-        let by: std::collections::HashMap<_, _> =
-            pts.iter().map(|p| (p.metric.as_str(), &p.value)).collect();
+        let by: std::collections::HashMap<_, _> = pts
+            .iter()
+            .map(|(_, p)| (p.metric.as_str(), &p.value))
+            .collect();
         assert_eq!(
             by["unit/bad.service/exit_code"],
             &TelemetryValue::Gauge(203.0)
@@ -391,15 +396,17 @@ mod tests {
     fn other_bucket_is_single_gauge() {
         let pts = other_points("host01", 512);
         assert_eq!(pts.len(), 1);
-        assert_eq!(pts[0].metric, "other/units_total");
-        assert_eq!(pts[0].value, TelemetryValue::Gauge(512.0));
+        assert_eq!(pts[0].1.metric, "other/units_total");
+        assert_eq!(pts[0].1.value, TelemetryValue::Gauge(512.0));
     }
 
     #[test]
     fn socket_points_shape() {
         let pts = socket_points("h", "sshd.socket", 12, 3, 1);
-        let by: std::collections::HashMap<_, _> =
-            pts.iter().map(|p| (p.metric.as_str(), &p.value)).collect();
+        let by: std::collections::HashMap<_, _> = pts
+            .iter()
+            .map(|(_, p)| (p.metric.as_str(), &p.value))
+            .collect();
         assert_eq!(
             by["unit/sshd.socket/n_accepted"],
             &TelemetryValue::Counter(12)
@@ -413,7 +420,7 @@ mod tests {
             &TelemetryValue::Counter(1)
         );
         assert_eq!(
-            pts[0].labels.get("unit").map(String::as_str),
+            pts[0].1.labels.get("unit").map(String::as_str),
             Some("sshd.socket")
         );
     }
@@ -426,14 +433,16 @@ mod tests {
         // No next elapse (u64::MAX) → only last_trigger.
         let pts = timer_points("h", "logrotate.timer", 100, u64::MAX);
         assert_eq!(pts.len(), 1);
-        assert_eq!(pts[0].metric, "unit/logrotate.timer/last_trigger_usec");
+        assert_eq!(pts[0].1.metric, "unit/logrotate.timer/last_trigger_usec");
     }
 
     #[test]
     fn mount_points_counts_by_state() {
         let pts = mount_points("h", ["active", "mounted", "failed", "inactive"]);
-        let by: std::collections::HashMap<_, _> =
-            pts.iter().map(|p| (p.metric.as_str(), &p.value)).collect();
+        let by: std::collections::HashMap<_, _> = pts
+            .iter()
+            .map(|(_, p)| (p.metric.as_str(), &p.value))
+            .collect();
         assert_eq!(by["mounts/total"], &TelemetryValue::Gauge(4.0));
         assert_eq!(by["mounts/mounted"], &TelemetryValue::Gauge(2.0));
         assert_eq!(by["mounts/failed"], &TelemetryValue::Gauge(1.0));
@@ -444,7 +453,7 @@ mod tests {
         assert_eq!(journal_points("h", 1024, Some(2048)).len(), 2);
         let one = journal_points("h", 1024, None);
         assert_eq!(one.len(), 1);
-        assert_eq!(one[0].metric, "journal/disk_usage_bytes");
+        assert_eq!(one[0].1.metric, "journal/disk_usage_bytes");
     }
 
     /// The rate derivation this module used to own moved to
@@ -481,7 +490,7 @@ mod tests {
     fn ip_rate_points_are_labelled_wire_l3() {
         let pts = ip_rate_points("h", "nginx.service", Some(1000.0), Some(250.0), false);
         let by: std::collections::HashMap<_, _> =
-            pts.iter().map(|p| (p.metric.as_str(), p)).collect();
+            pts.iter().map(|(_, p)| (p.metric.as_str(), p)).collect();
         let ing = by["unit/nginx.service/ip_ingress_bps"];
         assert_eq!(ing.value, TelemetryValue::Gauge(1000.0));
         assert_eq!(
@@ -502,7 +511,7 @@ mod tests {
         // No bps (unknown), accounting off → emit the boolean marker, not a 0 bps.
         let pts = ip_rate_points("h", "sshd.service", None, None, true);
         assert_eq!(pts.len(), 1);
-        assert_eq!(pts[0].metric, "unit/sshd.service/ip_accounting");
-        assert_eq!(pts[0].value, TelemetryValue::Boolean(false));
+        assert_eq!(pts[0].1.metric, "unit/sshd.service/ip_accounting");
+        assert_eq!(pts[0].1.value, TelemetryValue::Boolean(false));
     }
 }

@@ -81,6 +81,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   come back slugged as before, and the counter-as-gauge guard container alone
   ran (#1071) now runs in `TelemetryPoint::for_subject` for every sensor on
   the typed path. Three more `telemetry_guard.rs` copies are gone.
+  **systemd and parallax** follow: systemd's `map.rs` builders hand back the
+  subject beside each point (`map::Built`) and the collector publishes
+  through it — the unit name goes to the builder raw and comes back slugged
+  exactly as `sanitize_unit` slugs it, `boot/{phase}` and `events/{kind}`
+  bind their whole chunk; parallax's stats ticker takes a subject. Two more
+  guards gone; one remains (logs).
 
 - **`docs/DEPLOYMENT.md` §8 — supervising services, not just hosts** (#1286).
   A 22-hour outage of `forgejo.service` on a live host reported green

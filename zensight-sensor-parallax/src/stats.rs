@@ -24,7 +24,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use zensight_common::TelemetryValue;
+use zensight_common::registry::parallax::Subject;
+use zensight_common::{TelemetryPoint, TelemetryValue};
 use zensight_sensor_core::Publisher;
 
 /// Lock-free counters for one stream (shared by its open profiles).
@@ -327,7 +328,7 @@ pub async fn run_ticker(
         publish(
             &publisher,
             &source,
-            "streams/advertised",
+            Subject::StreamsAdvertised,
             TelemetryValue::Gauge(advertised_streams as f64),
         )
         .await;
@@ -354,21 +355,21 @@ pub async fn run_ticker(
             publish(
                 &publisher,
                 &source,
-                &format!("{stream}/stats/fps"),
+                Subject::stats_fps(&stream),
                 TelemetryValue::Gauge(derived.fps),
             )
             .await;
             publish(
                 &publisher,
                 &source,
-                &format!("{stream}/stats/kbps"),
+                Subject::stats_kbps(&stream),
                 TelemetryValue::Gauge(derived.kbps),
             )
             .await;
             publish(
                 &publisher,
                 &source,
-                &format!("{stream}/stats/drops"),
+                Subject::stats_drops(&stream),
                 TelemetryValue::Counter(stats.drops.load(Ordering::Relaxed)),
             )
             .await;
@@ -379,7 +380,7 @@ pub async fn run_ticker(
             publish(
                 &publisher,
                 &source,
-                &format!("{stream}/stats/sink_queue"),
+                Subject::stats_sink_queue(&stream),
                 TelemetryValue::Gauge(stats.sink_queue.load(Ordering::Relaxed) as f64),
             )
             .await;
@@ -405,7 +406,7 @@ pub async fn run_ticker(
                 publish(
                     &publisher,
                     &source,
-                    &format!("{stream}/stats/rc_drops"),
+                    Subject::stats_rc_drops(&stream),
                     TelemetryValue::Counter(rc),
                 )
                 .await;
@@ -413,7 +414,7 @@ pub async fn run_ticker(
             publish(
                 &publisher,
                 &source,
-                &format!("{stream}/stats/viewers"),
+                Subject::stats_viewers(&stream),
                 TelemetryValue::Gauge(stats.viewers.load(Ordering::Relaxed) as f64),
             )
             .await;
@@ -426,14 +427,14 @@ pub async fn run_ticker(
                 publish(
                     &publisher,
                     &source,
-                    &format!("{stream}/stats/encode_p95_ms"),
+                    Subject::stats_encode_p95_ms(&stream),
                     TelemetryValue::Gauge(p95_ms),
                 )
                 .await;
                 publish(
                     &publisher,
                     &source,
-                    &format!("{stream}/stats/encode_p99_ms"),
+                    Subject::stats_encode_p99_ms(&stream),
                     TelemetryValue::Gauge(p99_ms),
                 )
                 .await;
@@ -443,7 +444,7 @@ pub async fn run_ticker(
                 publish(
                     &publisher,
                     &source,
-                    &format!("{stream}/stats/encode_ms"),
+                    Subject::stats_encode_ms(&stream),
                     TelemetryValue::Gauge(encode_ms),
                 )
                 .await;
@@ -489,39 +490,45 @@ async fn publish_rx_aggregate(
     reports: &crate::reports::ReceiverReports,
 ) {
     for agg in reports.aggregate(std::time::Instant::now()) {
-        let base = format!("{}/rx/{}", agg.stream, agg.tier);
+        let (stream, tier) = (agg.stream.as_str(), agg.tier.as_str());
         publish(
             publisher,
             source,
-            &format!("{base}/consumers"),
+            Subject::rx_consumers(stream, tier),
             TelemetryValue::Gauge(f64::from(agg.consumers)),
         )
         .await;
-        for (leaf, value) in [
-            ("loss_pct_max", agg.loss_pct_max),
-            ("loss_pct_p50", agg.loss_pct_p50),
-            ("frame_age_ms_max", agg.frame_age_ms_max),
-            ("frame_age_ms_p50", agg.frame_age_ms_p50),
-            ("decode_queue_max", agg.decode_queue_max),
-            ("decode_queue_p50", agg.decode_queue_p50),
+        for (subject, value) in [
+            (Subject::rx_loss_pct_max(stream, tier), agg.loss_pct_max),
+            (Subject::rx_loss_pct_p50(stream, tier), agg.loss_pct_p50),
+            (
+                Subject::rx_frame_age_ms_max(stream, tier),
+                agg.frame_age_ms_max,
+            ),
+            (
+                Subject::rx_frame_age_ms_p50(stream, tier),
+                agg.frame_age_ms_p50,
+            ),
+            (
+                Subject::rx_decode_queue_max(stream, tier),
+                agg.decode_queue_max,
+            ),
+            (
+                Subject::rx_decode_queue_p50(stream, tier),
+                agg.decode_queue_p50,
+            ),
         ] {
             if let Some(value) = value {
-                publish(
-                    publisher,
-                    source,
-                    &format!("{base}/{leaf}"),
-                    TelemetryValue::Gauge(value),
-                )
-                .await;
+                publish(publisher, source, subject, TelemetryValue::Gauge(value)).await;
             }
         }
     }
 }
 
-async fn publish(publisher: &Publisher, source: &str, metric: &str, value: TelemetryValue) {
-    let point = crate::telemetry_guard::checked_point(source, metric, value);
-    if let Err(e) = publisher.publish(metric, &point).await {
-        tracing::warn!(error = %e, metric = %metric, "failed to publish stream stats");
+async fn publish(publisher: &Publisher, source: &str, subject: Subject, value: TelemetryValue) {
+    let point = TelemetryPoint::for_subject(source, &subject, value);
+    if let Err(e) = publisher.publish_subject(&subject, &point).await {
+        tracing::warn!(error = %e, metric = %point.metric, "failed to publish stream stats");
     }
 }
 

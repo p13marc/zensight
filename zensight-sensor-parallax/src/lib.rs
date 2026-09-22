@@ -27,4 +27,33 @@ pub mod query;
 pub mod reports;
 pub mod session;
 pub mod stats;
-pub(crate) mod telemetry_guard;
+
+#[cfg(test)]
+mod typed_subjects {
+    use zensight_common::registry::parallax::Subject;
+    use zensight_common::subject::TelemetrySubject;
+
+    /// The generated subjects render the tails this sensor published by hand
+    /// (#1274): byte-identical keys, so every consumer's series carries over.
+    #[test]
+    fn the_registered_families_render_their_tails() {
+        for (subject, tail) in [
+            (Subject::StreamsAdvertised, "streams/advertised"),
+            (Subject::stats_fps("cam1"), "cam1/stats/fps"),
+            (
+                Subject::stats_encode_p95_ms("cam1"),
+                "cam1/stats/encode_p95_ms",
+            ),
+            (
+                Subject::rx_consumers("cam1", "low"),
+                "cam1/rx/low/consumers",
+            ),
+            (
+                Subject::rx_frame_age_ms_p50("cam1", "high"),
+                "cam1/rx/high/frame_age_ms_p50",
+            ),
+        ] {
+            assert_eq!(subject.tail(), tail);
+        }
+    }
+}

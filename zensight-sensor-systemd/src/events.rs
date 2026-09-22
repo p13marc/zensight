@@ -101,7 +101,7 @@ impl EventState {
     }
 
     /// Optional streamed per-kind counters: `events/<kind>_total`.
-    pub fn counter_points(&self, source: &str) -> Vec<TelemetryPoint> {
+    pub fn counter_points(&self, source: &str) -> Vec<crate::map::Built> {
         let snapshot: Vec<(String, u64)> = self
             .inner
             .counters
@@ -111,11 +111,12 @@ impl EventState {
         snapshot
             .into_iter()
             .map(|(kind, total)| {
-                crate::telemetry_guard::checked_point(
-                    source,
-                    format!("events/{kind}_total"),
-                    TelemetryValue::Counter(total),
-                )
+                // `{kind}` binds the whole chunk, `<kind>_total`.
+                let subject =
+                    zensight_common::registry::systemd::Subject::events(format!("{kind}_total"));
+                let point =
+                    TelemetryPoint::for_subject(source, &subject, TelemetryValue::Counter(total));
+                (subject, point)
             })
             .collect()
     }
@@ -318,7 +319,7 @@ mod tests {
         let by: HashMap<_, _> = s
             .counter_points("h")
             .into_iter()
-            .map(|p| (p.metric, p.value))
+            .map(|(_, p)| (p.metric, p.value))
             .collect();
         assert_eq!(by["events/job_removed_total"], TelemetryValue::Counter(2));
         assert_eq!(by["events/unit_new_total"], TelemetryValue::Counter(1));
