@@ -113,9 +113,22 @@ impl UpstreamChecker {
     /// cannot answer — not on the allowlist, needs auth, does not exist.
     /// `None` must never be read as "up to date".
     pub async fn digest_for(&self, reference: &str) -> Option<String> {
-        let r = parse_reference(reference)?;
+        self.digest_lookup(reference).await.ok()
+    }
+
+    /// [`Self::digest_for`] with the reason it could not answer — for
+    /// `--diagnose`, which exists to name silences. The sensor itself reads
+    /// only the `Option`: a reason is a sentence for an operator, not a
+    /// field on the bus.
+    pub async fn digest_lookup(&self, reference: &str) -> Result<String, String> {
+        let r = parse_reference(reference).ok_or_else(|| {
+            "digest-pinned or unparsable reference — no tag to resolve".to_string()
+        })?;
         if !self.allowed(&r) {
-            return None;
+            return Err(format!(
+                "registry {} is not in container.upstream.registries",
+                r.registry
+            ));
         }
         let url = format!(
             "https://{}/v2/{}/manifests/{}",
@@ -124,25 +137,33 @@ impl UpstreamChecker {
             r.tag
         );
         let resp = self
-            .http
-            .head(&url)
-            .header(
-                "Accept",
-                "application/vnd.oci.image.index.v1+json, \
-                 application/vnd.oci.image.manifest.v1+json, \
-                 application/vnd.docker.distribution.manifest.list.v2+json, \
-                 application/vnd.docker.distribution.manifest.v2+json",
-            )
-            .send()
-            .await
-            .ok()?;
+            .head(&url, &r, |req| {
+                req.header(
+                    "Accept",
+                    "application/vnd.oci.image.index.v1+json, \
+                     application/vnd.oci.image.manifest.v1+json, \
+                     application/vnd.docker.distribution.manifest.list.v2+json, \
+                     application/vnd.docker.distribution.manifest.v2+json",
+                )
+            })
+            .await?;
         if !resp.status().is_success() {
-            return None;
+            return Err(format!(
+                "{} answered HTTP {}",
+                r.api_host(),
+                resp.status().as_u16()
+            ));
         }
         resp.headers()
             .get("docker-content-digest")
             .and_then(|v| v.to_str().ok())
             .map(str::to_string)
+            .ok_or_else(|| {
+                format!(
+                    "{} answered without a Docker-Content-Digest header",
+                    r.api_host()
+                )
+            })
     }
 
     /// Whether a cosign signature object exists for `digest`.
@@ -154,12 +175,21 @@ impl UpstreamChecker {
     /// claim, and it is exactly the claim that would have caught cosign
     /// signing nothing for eight days.
     pub async fn signature_present(&self, reference: &str, digest: &str) -> Option<bool> {
+        self.signature_lookup(reference, digest).await.ok()
+    }
+
+    /// [`Self::signature_present`] with the reason for a non-answer.
+    pub async fn signature_lookup(&self, reference: &str, digest: &str) -> Result<bool, String> {
         if !self.signatures {
-            return None;
+            return Err("container.upstream.signatures is false".to_string());
         }
-        let r = parse_reference(reference)?;
+        let r = parse_reference(reference)
+            .ok_or_else(|| "digest-pinned or unparsable reference".to_string())?;
         if !self.allowed(&r) {
-            return None;
+            return Err(format!(
+                "registry {} is not in container.upstream.registries",
+                r.registry
+            ));
         }
         let tag = format!("{}.sig", digest.replace(':', "-"));
         let url = format!(
@@ -167,20 +197,163 @@ impl UpstreamChecker {
             r.api_host(),
             r.repository
         );
-        let resp = self.http.head(&url).send().await.ok()?;
+        let resp = self.head(&url, &r, |req| req).await?;
         match resp.status().as_u16() {
-            200 => Some(true),
-            404 => Some(false),
+            200 => Ok(true),
+            404 => Ok(false),
             // 401/403/5xx: the registry did not answer the question. Silence,
             // not "unsigned".
-            _ => None,
+            code => Err(format!("{} answered HTTP {code}", r.api_host())),
         }
     }
+
+    /// One HEAD, with the anonymous bearer dance a public registry may demand.
+    ///
+    /// Docker Hub (and ghcr.io) answer an unauthenticated manifest request
+    /// with `401` and a `WWW-Authenticate: Bearer realm=…,service=…,scope=…`
+    /// challenge; a public repository then hands out a token to *anyone* who
+    /// asks the realm. Without this step every Docker Hub image was "not
+    /// resolved" and no `image-behind` could ever fire on the reference
+    /// fleet, whose images are mostly `docker.io/library/*` — found by the
+    /// first `--diagnose` against a real socket (#947). Still anonymous: no
+    /// credential is read, sent or stored, and a 401 *after* the token (a
+    /// private repository) stays a non-answer.
+    async fn head(
+        &self,
+        url: &str,
+        r: &ImageRef,
+        decorate: impl Fn(reqwest::RequestBuilder) -> reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, String> {
+        let send = |token: Option<String>| {
+            let mut req = decorate(self.http.head(url));
+            if let Some(t) = token {
+                req = req.bearer_auth(t);
+            }
+            req.send()
+        };
+        let resp = send(None)
+            .await
+            .map_err(|e| format!("{}: {e}", r.api_host()))?;
+        if resp.status().as_u16() != 401 {
+            return Ok(resp);
+        }
+        let Some(challenge) = resp
+            .headers()
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .and_then(bearer_challenge)
+        else {
+            return Ok(resp);
+        };
+        let token_url = challenge.token_url();
+        let token: serde_json::Value = self
+            .http
+            .get(&token_url)
+            .send()
+            .await
+            .map_err(|e| format!("{}: token request: {e}", challenge.realm))?
+            .json()
+            .await
+            .map_err(|e| format!("{}: token reply: {e}", challenge.realm))?;
+        let Some(token) = token
+            .get("token")
+            .or_else(|| token.get("access_token"))
+            .and_then(|v| v.as_str())
+        else {
+            return Err(format!(
+                "{} handed out no anonymous token for {}",
+                challenge.realm, r.repository
+            ));
+        };
+        send(Some(token.to_string()))
+            .await
+            .map_err(|e| format!("{}: {e}", r.api_host()))
+    }
+}
+
+/// A parsed `WWW-Authenticate: Bearer …` challenge (RFC 6750 §3, as the
+/// distribution spec uses it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BearerChallenge {
+    pub realm: String,
+    pub service: Option<String>,
+    pub scope: Option<String>,
+}
+
+impl BearerChallenge {
+    /// The token endpoint with the challenge's own parameters as the query —
+    /// which is all an anonymous pull needs on Docker Hub, ghcr.io and quay.
+    pub fn token_url(&self) -> String {
+        let mut url = self.realm.clone();
+        let mut sep = if url.contains('?') { '&' } else { '?' };
+        for (k, v) in [("service", &self.service), ("scope", &self.scope)] {
+            if let Some(v) = v {
+                url.push(sep);
+                url.push_str(k);
+                url.push('=');
+                url.push_str(&v.replace(' ', "%20"));
+                sep = '&';
+            }
+        }
+        url
+    }
+}
+
+/// Parse `Bearer realm="…",service="…",scope="…"`. Anything that is not a
+/// Bearer challenge with a realm is `None` — a `Basic` challenge is a private
+/// registry, and this sensor holds no credential to answer it with.
+pub fn bearer_challenge(header: &str) -> Option<BearerChallenge> {
+    let rest = header.trim().strip_prefix("Bearer ")?;
+    let mut realm = None;
+    let mut service = None;
+    let mut scope = None;
+    for part in rest.split(',') {
+        let (k, v) = part.trim().split_once('=')?;
+        let v = v.trim().trim_matches('"').to_string();
+        match k.trim() {
+            "realm" => realm = Some(v),
+            "service" => service = Some(v),
+            "scope" => scope = Some(v),
+            _ => {}
+        }
+    }
+    Some(BearerChallenge {
+        realm: realm?,
+        service,
+        scope,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Docker Hub's exact challenge, verbatim from `registry-1.docker.io`.
+    #[test]
+    fn docker_hubs_bearer_challenge_yields_its_token_url() {
+        let c = bearer_challenge(
+            "Bearer realm=\"https://auth.docker.io/token\",service=\"registry.docker.io\",\
+             scope=\"repository:library/alpine:pull\"",
+        )
+        .unwrap();
+        assert_eq!(c.realm, "https://auth.docker.io/token");
+        assert_eq!(
+            c.token_url(),
+            "https://auth.docker.io/token?service=registry.docker.io&scope=repository:library/alpine:pull"
+        );
+    }
+
+    /// A `Basic` challenge is a private registry; this sensor has no
+    /// credential and must not pretend it can answer.
+    #[test]
+    fn a_basic_challenge_is_not_a_bearer_one() {
+        assert_eq!(bearer_challenge("Basic realm=\"private\""), None);
+        assert_eq!(
+            bearer_challenge("Bearer service=\"x\""),
+            None,
+            "no realm, no token endpoint"
+        );
+    }
 
     #[test]
     fn a_bare_name_is_docker_hubs_library_namespace() {

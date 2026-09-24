@@ -86,6 +86,43 @@ than "unsigned", which would not be.
 
 Turning it on logs a `warn` naming the registries, on every start.
 
+## One-shot diagnosis
+
+```bash
+zensight-sensor-container --config /etc/zensight/container.json5 --diagnose
+```
+
+Every rule in [`assertions.md`](assertions.md) reads a field that can be
+*silent* — a healthcheck the runtime never ran, a cgroup the sensor cannot
+read, an `oom_kill` counter that is absent rather than zero, a signature that
+was never looked for — and the sensor reports each silence as a silence. An
+operator still has to find out **which** silence they have. `--diagnose`
+answers that in plain sentences and exits: which conventional sockets are
+present and which absent (absent is normal for a runtime the host does not
+run), what each socket lists, and per container every input of the seven
+rules with the verdict it produces — `never ran` versus `unhealthy`, an exit
+code the runtime did or did not report, the running digest (which the Docker
+compatibility API omits), the upstream digest and the signature **with the
+reason** when the registry did not answer, and the cgroup directory with each
+file read or named unreadable. It is read-only and **never opens a Zenoh
+session**: debugging a socket permission should not join a fleet.
+
+The egress block is honoured as configured — with `upstream.enabled: false`
+nothing leaves the host and the diagnosis says so; with it on, the same
+allowlist applies.
+
+### Docker Hub needs a token even to read a public manifest
+
+Found by the first `--diagnose` against a real socket (#947): Docker Hub and
+ghcr.io answer an anonymous manifest `HEAD` with `401` and a
+`WWW-Authenticate: Bearer` challenge, then hand a public repository's token
+to anyone who asks the realm. quay.io answers anonymously. Before this the
+sensor gave up at the `401`, so every `docker.io/library/*` image was "not
+resolved" and `image-behind` could never fire on the reference fleet. The
+sensor now follows the challenge — still anonymously: no credential is read,
+sent or stored, and a `401` *after* the token (a private repository) stays a
+non-answer, never "unsigned".
+
 ## Validation
 
 Every problem is reported at once:

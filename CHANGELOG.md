@@ -57,6 +57,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`zensight-sensor-container --diagnose`** (#947, the container twin of
+  pve's #880). One command, plain sentences, no Zenoh session: which
+  conventional sockets are present and which absent, what each socket lists,
+  and per container every input of the seven rules with the verdict it
+  yields — `never ran` kept apart from `unhealthy`, the exit code the runtime
+  did or did not report, the running digest (which the Docker compatibility
+  API omits), the upstream digest and the signature **with the reason** for a
+  non-answer, and the cgroup directory with each file read or named
+  unreadable. Its first run against a real rootless podman socket found the
+  Docker Hub divergence below. `UpstreamChecker::digest_lookup` /
+  `signature_lookup` return the reason; the `Option` forms the sensor reads
+  are unchanged.
+
 - **A browser's way onto the bus: the zenoh remote-api bridge** (#705, the
   first step of #704). `configs/router-remote-api.json5` configures
   `zenoh-bridge-remote-api` — the standalone binary, deliberately, because a
@@ -693,6 +706,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   installing the evaluator a second time by hand. One `PublishStats`, not two.
 
 ### Fixed
+
+- **The container sensor's upstream digest and signature checks now resolve
+  Docker Hub and ghcr.io images** (#947). Both registries answer an anonymous
+  manifest `HEAD` with `401` and a `WWW-Authenticate: Bearer` challenge, and
+  hand a public repository's token to anyone who asks the realm; the checker
+  gave up at the `401`, so every `docker.io/library/*` image was "not
+  resolved" and `image-behind` could never fire on a fleet whose images
+  mostly are. It now follows the challenge, still anonymously — no credential
+  is read, sent or stored, and a `401` after the token (a private repository)
+  stays a non-answer, never "unsigned". quay.io, which answers anonymously,
+  is unaffected. Found by the first `--diagnose` against a real socket.
 
 - **A sensor stopping mid-artifact leaves a terminal state, not a silence**
   (#1156, its last bullet). Shutdown was abort-every-worker, sleep 100 ms,

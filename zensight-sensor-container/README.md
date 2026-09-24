@@ -84,6 +84,15 @@ every cycle for something that host simply does not do.
 `packaging/systemd/` and `packaging/quadlet/` ship units. The quadlet mounts the
 socket and the cgroup tree read-only.
 
+```bash
+zensight-sensor-container --config /etc/zensight/container.json5 --diagnose
+```
+
+asks every socket the sensor would poll what it actually answers — each
+container's healthcheck, restart, exit, image, digest, signature and cgroup
+facts, with every silence named — prints it, and exits without opening a
+Zenoh session (#947). See [`docs/configuration.md`](docs/configuration.md).
+
 ## Docs
 
 | | |
