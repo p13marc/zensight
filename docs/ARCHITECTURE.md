@@ -627,3 +627,12 @@ zensight/                            # Workspace root
 
 > For the full key tree see [KEYSPACE.md](KEYSPACE.md); for per-crate details see each
 > crate's `README.md` + `docs/` (indexed in [README.md](README.md)).
+
+## The browser leg
+
+A browser reaches the same bus through `zenoh-bridge-remote-api` (#705,
+`configs/router-remote-api.json5`, `just remote-api`): one WebSocket, one
+native session per tab, the deployment namespace set on the bridge and never
+in the page. `web/` is the client (#706): the parallax catalogue, status and
+control plane over zenoh-ts, with its types generated from the fleet type
+table. See [`web/README.md`](../web/README.md).

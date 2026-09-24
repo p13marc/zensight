@@ -1,0 +1,112 @@
+{
+  "$defs": {
+    "StreamDescriptor": {
+      "description": "One advertised media stream, served from the `streams` query topic.\n\n**Capability-bearing** (#507): a viewer builds a sensible tier selector from\nthe camera's *native* geometry and the tiers on offer, without opening the\nstream first. Native `width`/`height`/`fps` are probed from the source\n(`None` when genuinely unknown — e.g. an RTSP stream whose SDP carries no\ndimensions); `codecs` reflects the real per-source capability, not a\nhardcoded pair.",
+      "properties": {
+        "active": {
+          "description": "Whether the stream is currently open (any tier publishing).",
+          "type": "boolean"
+        },
+        "codecs": {
+          "description": "Codecs this stream can be opened with (e.g. `[\"h264\", \"mjpeg\"]`).",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "description": "Optional human-readable description (camera position, …).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "fps": {
+          "description": "Native capture framerate; `None` if unknown.",
+          "format": "float",
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "height": {
+          "description": "Native capture height in pixels; `None` if unknown.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "stream": {
+          "description": "Stream identifier (the `<stream>` key chunk).",
+          "type": "string"
+        },
+        "tiers": {
+          "description": "The bandwidth tiers this stream offers, so a viewer can subscribe to an\nexact `<tier>` key and never advertise a tier the camera can't feed.",
+          "items": {
+            "$ref": "#/$defs/TierSpec"
+          },
+          "type": "array"
+        },
+        "width": {
+          "description": "Native capture width in pixels; `None` if unknown.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "stream",
+        "codecs",
+        "active"
+      ],
+      "type": "object"
+    },
+    "TierSpec": {
+      "description": "One named bandwidth **tier** a stream offers — the `<tier>` key chunk plus\nits target encoder parameters (RFC 07 §1). Tiers are published concurrently,\neach on its own `@media/<stream>/video/<codec>/<tier>` key; a viewer\nsubscribes to exactly the tier its link can take, so two viewers on\ndifferent links never fight over one encoder (#494, #497).\n\nThis is the tier *definition* — the sensor owns the numbers; the wire and\nthe key carry the *name*. It appears in [`StreamDescriptor::tiers`] (the\ncatalogue); the ladder itself is configured in `configs/parallax.json5`.",
+      "properties": {
+        "bitrate_kbps": {
+          "description": "Target encoded bitrate.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fps": {
+          "description": "Target framerate.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "max_height": {
+          "description": "Aspect-preserving height cap in pixels; `None` = native.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "name": {
+          "description": "Tier name — the `<tier>` key chunk (`low` / `medium` / `high`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "fps",
+        "bitrate_kbps"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "items": {
+    "$ref": "#/$defs/StreamDescriptor"
+  },
+  "title": "Array_of_StreamDescriptor",
+  "type": "array"
+}

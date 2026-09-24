@@ -343,6 +343,29 @@ jobs:
       - name: cargo deny (cached advisory database, fetch failure isolated)
         run: scripts/cargo-deny-checked.sh
 
+  # The browser client (#706, web/): a TypeScript package the Rust jobs never
+  # see. Its types are generated from the fleet type table — the Rust half of
+  # that drift guard is zensight-common/tests/web_schemas.rs in `test`; this
+  # is the TypeScript half (`npm run gen -- --check`), the unit tests against
+  # a fake bus, and a production build, which is what proves zenoh-ts's wasm
+  # still bundles. Node 22 for the runtime; the package itself allows >=20.
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: https://data.forgejo.org/actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: https://data.forgejo.org/actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+        working-directory: web
+      - run: npm run check
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
   lint:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
