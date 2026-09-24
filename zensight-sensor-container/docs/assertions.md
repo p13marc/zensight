@@ -83,6 +83,13 @@ verification needs the public key and belongs in a tool that has one. Presence
 is the strongest honest claim, and it is exactly the claim that would have
 caught cosign signing nothing for eight days.
 
+**`--diagnose`** prints, per container, every input these rules read and the
+verdict it yields — the healthcheck state with `never ran` kept apart from
+`unhealthy`, the exit code, the restart count (a delta rule, so a count alone
+never fires), the running and upstream digests and the signature with the
+reason for any non-answer, and each cgroup file or its absence. It never opens
+a Zenoh session (#947).
+
 ## What is deliberately not asserted
 
 - **Anything requiring a write.** The socket client has two methods and both

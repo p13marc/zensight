@@ -41,6 +41,7 @@
 
 pub mod alerts;
 pub mod cgroup;
+pub mod cli;
 pub mod config;
 pub mod inspect;
 pub mod poller;

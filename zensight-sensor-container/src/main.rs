@@ -4,16 +4,19 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use zensight_sensor_core::{AlertReporter, SensorArgs, SensorConfig, SensorRunner};
+use zensight_sensor_core::{AlertReporter, SensorConfig, SensorRunner};
 
+use zensight_sensor_container::cli::ContainerArgs;
 use zensight_sensor_container::config::ContainerSensorConfig;
 use zensight_sensor_container::poller::Poller;
-use zensight_sensor_container::runtime::{RuntimeClient, default_sockets};
+use zensight_sensor_container::runtime::RuntimeClient;
 use zensight_sensor_container::upstream::UpstreamChecker;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let args = SensorArgs::parse_with_default("container.json5");
+    let args = ContainerArgs::parse_with_default("container.json5");
+    let diagnose = args.diagnose;
+    let args = args.common;
     let config = ContainerSensorConfig::load(&args.config).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // `--check-config` stops here, before the runner, the session and any
@@ -27,6 +30,14 @@ async fn main() -> Result<()> {
     let source = config.container.resolved_source();
     let cc = config.container.clone();
 
+    // The one-shot diagnosis (#947) short-circuits HERE, before the runner,
+    // the session or any publisher exists. An operator debugging a socket
+    // permission should not thereby join a fleet, and the way to guarantee
+    // that is to never build the thing that would.
+    if diagnose {
+        return zensight_sensor_container::cli::diagnose(&cc).await;
+    }
+
     let mut runner = SensorRunner::new_with_args("container", source.clone(), config, Some(&args))
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -35,24 +46,9 @@ async fn main() -> Result<()> {
 
     let timeout = Duration::from_secs(cc.timeout_secs);
     // An explicit list wins; otherwise the conventional paths, and only the
-    // ones that exist — listing a socket that is not there would make every
-    // cycle log a failure for a runtime this host does not run.
-    let sockets: Vec<(std::path::PathBuf, bool)> = if cc.sockets.is_empty() {
-        default_sockets()
-            .into_iter()
-            .filter(|(p, _)| p.exists())
-            .collect()
-    } else {
-        cc.sockets
-            .iter()
-            .map(|s| {
-                // A socket under a user runtime dir is a rootless session, and
-                // that changes where its containers' cgroups live.
-                let rootless = s.contains("/run/user/");
-                (std::path::PathBuf::from(s), rootless)
-            })
-            .collect()
-    };
+    // ones that exist — `cli::socket_candidates`, shared with `--diagnose` so
+    // the diagnosis reports the sockets the sensor would actually poll.
+    let sockets = zensight_sensor_container::cli::socket_candidates(&cc);
     if sockets.is_empty() {
         // Loud, and not fatal: a host may gain a runtime later, and a sensor
         // that exits here would need a restart to notice.
