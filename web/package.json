@@ -1,0 +1,29 @@
+{
+  "name": "zensight-web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A browser client for ZenSight's @media plane (#704): the parallax catalogue and control plane over zenoh-ts",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "vitest run",
+    "gen": "node scripts/gen-types.mjs",
+    "check": "tsc --noEmit && node scripts/gen-types.mjs --check && vitest run",
+    "smoke": "tsc -p tsconfig.smoke.json && node --experimental-websocket --experimental-wasm-modules --no-warnings .smoke/scripts/smoke.js"
+  },
+  "dependencies": {
+    "@eclipse-zenoh/zenoh-ts": "1.10.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.43",
+    "json-schema-to-typescript": "^15.0.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.1.0",
+    "vite-plugin-wasm": "^3.6.0",
+    "vitest": "^3.0.5"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

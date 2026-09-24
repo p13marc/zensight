@@ -1,0 +1,245 @@
+{
+  "$defs": {
+    "StreamEnd": {
+      "description": "Why one tier of a stream stopped, reported inside [`StreamStatus`] (#691).\n\nThe tier is **named**, not implied. `StreamStatus::tiers` is a *live set* —\na tier that died is removed from it — so an end reported inside a\n[`TierStatus`] would either be unreachable (the last tier's death empties\nthe vec entirely) or force a non-empty `tiers` onto an `open: false`\ndocument, which every consumer reads as \"these tiers are live\". That would\nbe a worse lie than the one this type exists to end.",
+      "properties": {
+        "reason": {
+          "$ref": "#/$defs/StreamEndReason",
+          "description": "What happened."
+        },
+        "tier": {
+          "description": "Which tier ended: a ladder rung's name (`low`/`medium`/`high`), or the\nliteral `preview` for the JPEG preview profile.\n\nThe same one-string tier vocabulary the `rx/{tier}/…` receiver-feedback\ntelemetry uses (#715), minted from the producer's own profile, so a\nreported end can never name a tier an `open_stream` could not.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "StreamEndReason": {
+      "description": "The producer's own account of why a tier stopped (#691).\n\n**The producer is the only party that knows.** Before this existed a viewer\nhad to invent a sentence — *\"stream ended\"*, *\"stream failed to open on the\nsensor\"* — out of an `open: false` and nothing else, and those sentences\nwere wrong as often as they were right: an idle reap, an operator close and\na dead camera were the same single bit.\n\nThree families, told apart by [`Self::is_failure`]:\n\n- **we ended it** — [`Closed`](Self::Closed), [`Idle`](Self::Idle),\n  [`Superseded`](Self::Superseded), [`Shutdown`](Self::Shutdown). Nothing is\n  wrong, and device health must not count these.\n- **it ended itself** — [`SourceEnded`](Self::SourceEnded).\n- **it failed** — [`Stalled`](Self::Stalled), [`Failed`](Self::Failed),\n  [`FailedOpen`](Self::FailedOpen). These, and only these, record a device\n  failure and fire the source's alert.",
+      "oneOf": [
+        {
+          "description": "Every opener called `close_stream`, and the idle countdown that follows\na close ran out.\n\nA close does not stop a pipeline on its own — it releases a refcount,\nand the reaper does the stopping — so this is the *terminal* reason for\na clean operator close, and it arrives one idle window after the close\nitself.",
+          "properties": {
+            "type": {
+              "const": "closed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reaped unwatched while an opener still held a refcount: nobody ever\nsubscribed, or the last viewer left and the opener never said goodbye.\n\nThe crash backstop for a viewer that died without `close_stream`. Told\napart from [`Closed`](Self::Closed) by the refcount at reap time, which\nis the honest discriminator: one says *the system did what it was\ntold*, the other *the system cleaned up after something that vanished*.",
+          "properties": {
+            "type": {
+              "const": "idle",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Released so another tier of the same stream could open.\n\nOne camera serves one capture at a time, so on an exclusive source\n(V4L2/RTSP) a tier switch must hand the device over rather than wait out\nthe idle window. With receiver-driven tier selection (#720) this is a\nroutine event, and a viewer whose tile blinks through a switch is owed\nthe reason.",
+          "properties": {
+            "type": {
+              "const": "superseded",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The producer is stopping.",
+          "properties": {
+            "type": {
+              "const": "shutdown",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The source signalled end-of-stream by itself — a finite source ran out.\n\nA live camera should never do this. If one does, that *is* the finding,\nwhich is why it is not folded into [`Closed`](Self::Closed).",
+          "properties": {
+            "type": {
+              "const": "source_ended",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The pipeline built and started but delivered no frame at all within the\nproducer's first-frame window.\n\nA wedged source. Deliberately payload-free and deliberately not a\n[`Failed`](Self::Failed): the open succeeded, no element failed, and\nthere is no error to quote — so none is invented. The window is a\nproducer constant and appears in its logs.",
+          "properties": {
+            "type": {
+              "const": "stalled",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "A pipeline element failed mid-stream.",
+          "properties": {
+            "message": {
+              "description": "The failure, **in the failing element's own words**. Never a\nparaphrase: `node` and `message` stay separate on the wire, and only\n[`Display`](std::fmt::Display) ever joins them.",
+              "type": "string"
+            },
+            "node": {
+              "description": "The element that failed, when the pipeline named one; `egress` when\nthe failure was on the producer's side of the sink (frame-metadata\nencoding, or the media publish itself).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "failed",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "The open never completed: the pipeline could not be built or started, a\npublisher or listener could not be declared, or the camera could not be\nreached.\n\nDistinct from [`Failed`](Self::Failed) because this tier never ran, and\nthe two send an operator to different places — *it never started* means\ncheck the config and whether the camera is reachable; *it stopped* means\ncheck the element `node` names. A late-joining consumer cannot recover\nthat difference from context.",
+          "properties": {
+            "message": {
+              "description": "Why the open failed, in the failing layer's own words.",
+              "type": "string"
+            },
+            "type": {
+              "const": "failed_open",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "TierApplied": {
+      "description": "The parameters of one running tier, as reported by the sensor.\n\n**Two of these four are measured and two are not** (#504). `width`/`height`\ncome from the built pipeline — the scaler even-aligns dimensions and never\nupscales, so they are genuinely what the encoder produces and can differ\nfrom what the tier asked for. `fps` and `bitrate_kbps` are the tier's\nconfigured *targets* read back out of its [`TierSpec`]; nothing measures\nthem here, and a hardware encoder that silently ignores a knob would not\nshow up in either.\n\nFor what a tier actually costs on the wire, read the stream's\n`stats/kbps` telemetry (per stream, summed over open tiers) or measure at\nthe subscriber — `zensight-sensor-parallax/tests/e2e.rs` does the latter\nper tier. `stats/rc_drops` says whether the bitrate cap is currently\nbiting (#510).",
+      "properties": {
+        "bitrate_kbps": {
+          "description": "Applied encoded bitrate.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "fps": {
+          "description": "Applied framerate cap.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "height": {
+          "description": "Encoded height in pixels.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "width": {
+          "description": "Encoded width in pixels (post-scale, even-aligned).",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "width",
+        "height",
+        "fps",
+        "bitrate_kbps"
+      ],
+      "type": "object"
+    },
+    "TierStatus": {
+      "description": "State of one running tier, reported inside [`StreamStatus`].",
+      "properties": {
+        "applied": {
+          "$ref": "#/$defs/TierApplied",
+          "description": "Parameters actually in effect on this tier's encoder."
+        },
+        "tier": {
+          "description": "Tier name (the `<tier>` key chunk).",
+          "type": "string"
+        },
+        "viewers": {
+          "description": "Matching subscribers observed by this tier's media publisher.",
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "tier",
+        "applied",
+        "viewers"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Current state of one stream, reported on the `stream/<stream>` status doc.\n\n**Per-tier** (#497): a stream can have several tiers live at once, each with\nits own applied params and viewer count. A single `Option<profile>` could\nnot express two live tiers — this is a `Vec`.",
+  "properties": {
+    "last_end": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StreamEnd"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "Why the most recent tier of this stream stopped, if one has and the\nstream has not since resumed on that tier (#691).\n\n**Absent means no tier has stopped since this stream last opened** — not\n\"stopped for an unknown reason\". `skip_serializing_if` keeps it out of\nthe map entirely rather than present-and-null, the same discipline\n[`FrameMeta`] and [`MediaReceiverReport`] follow.\n\nOne end, not a per-tier history. This is an LWW state document (RFC 05\n§5) republished on every transition, so it says what *is*; a consumer\nthat wants every end reads every transition, which every live consumer\nalready does."
+    },
+    "open": {
+      "description": "Whether the stream is currently open (any tier publishing).",
+      "type": "boolean"
+    },
+    "stream": {
+      "description": "Stream identifier.",
+      "type": "string"
+    },
+    "tiers": {
+      "description": "Per-tier state for every tier currently live.",
+      "items": {
+        "$ref": "#/$defs/TierStatus"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "stream",
+    "open"
+  ],
+  "title": "StreamStatus",
+  "type": "object"
+}

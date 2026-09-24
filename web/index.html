@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ZenSight — parallax control</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        font: 14px/1.4 system-ui, sans-serif;
+      }
+      body { margin: 0; padding: 16px; max-width: 1100px; }
+      h1 { font-size: 18px; margin: 0 0 12px; }
+      fieldset { border: 1px solid #8884; border-radius: 6px; margin: 0 0 12px; padding: 8px 12px; }
+      legend { padding: 0 4px; color: #888; }
+      label { margin-right: 12px; }
+      input, select, button { font: inherit; }
+      input[type="text"] { width: 22ch; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { text-align: left; vertical-align: top; padding: 6px 8px; border-bottom: 1px solid #8883; }
+      td div + div { color: #888; font-size: 12px; }
+      pre#log { background: #8881; padding: 8px; border-radius: 6px; max-height: 14em; overflow: auto; font-size: 12px; }
+      .hint { color: #888; font-size: 12px; margin: 4px 0 0; }
+    </style>
+  </head>
+  <body>
+    <h1>ZenSight — parallax catalogue and control</h1>
+
+    <fieldset>
+      <legend>bridge</legend>
+      <label>remote-api <input id="locator" type="text" value="ws://localhost:10000" /></label>
+      <button id="connect">connect</button>
+      <span id="link">not connected</span>
+      <p class="hint">
+        The WebSocket is <code>zenoh-bridge-remote-api</code> (<code>just remote-api</code>). The deployment
+        namespace is the bridge's; this page spells base-less keys.
+      </p>
+    </fieldset>
+
+    <fieldset>
+      <legend>origin — which host's sensor</legend>
+      <label>alive <select id="origins"></select></label>
+      <label>or by hand <input id="origin-manual" type="text" placeholder="h-3fa9c2d41b7e" /></label>
+      <button id="use-origin">use</button>
+      <button id="reload">reload catalogue</button>
+      <p class="hint">
+        Hosts are resolved from the parallax liveliness token. A stream control is a statement to one host;
+        there is no fleet-wide spelling and this page will not broadcast one (RFC 07 §3).
+      </p>
+    </fieldset>
+
+    <table>
+      <thead>
+        <tr>
+          <th>stream</th>
+          <th>native · codecs</th>
+          <th>status</th>
+          <th>tier</th>
+          <th>control</th>
+        </tr>
+      </thead>
+      <tbody id="streams"></tbody>
+    </table>
+
+    <pre id="log"></pre>
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

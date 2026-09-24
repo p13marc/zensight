@@ -44,6 +44,7 @@ design rationale lives in [`docs/design/`](docs/design/).
 | `zensight-conformance/` | CI harness (#744): stands a deployment up and runs `zenkey-fleet`'s RFC judges against it. `publish = false`. It links `zenkey-fleet`, as does `zensight` for the fleet view (#745); the invariant is that **no crate a sensor links may** — see `Cargo.toml`'s note on the dependency |
 | [`zblob`](https://github.com/p13marc/zblob) | resumable content-addressed large-data transfer (external repo, was in-tree `zenoh-blob/`) |
 | `zensight-sensor-{netlink,sysinfo}-ebpf{,-common}/` | opt-in eBPF programs (compile to host stubs) |
+| `web/` | the browser client (#704): the parallax catalogue and control plane over zenoh-ts through the remote-api bridge (#705). Not a crate — `npm run check` there; its `src/types.gen.ts` is generated from the fleet type table (drift guard: `zensight-common/tests/web_schemas.rs`) |
 
 ## Build Commands
 

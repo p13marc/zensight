@@ -950,3 +950,36 @@ remote-api connect=hub mode="peer" version="1.10.1":
     fi
     exec zenoh-bridge-remote-api -c configs/router-remote-api.json5 \
       -m "$mode" -e "$connect" --no-multicast-scouting
+
+# The browser client's dev server (#706, web/): the parallax catalogue and
+# control plane in a tab, against `just remote-api`'s bridge. First use
+# installs the npm dependencies.
+web:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd web
+    test -d node_modules || npm ci
+    exec npm run dev
+
+# The browser control plane against a REAL bus, on isolated ports (#706):
+# a zenohd on 17447, the parallax sensor with its synthetic test source as a
+# client of it, the remote-api bridge on ws://localhost:10000, then
+# `npm run smoke` — origin from liveliness, catalogue, open, status open,
+# keyframe, profile-correct close, status closed after the idle window.
+# Everything it starts is stopped on exit.
+web-smoke: build
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd web && (test -d node_modules || npm ci) && cd ..
+    logs="$(mktemp -d)"
+    pids=()
+    cleanup() { for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done; }
+    trap cleanup EXIT
+    zenohd -l tcp/127.0.0.1:17447 --no-multicast-scouting >"$logs/zenohd.log" 2>&1 & pids+=($!)
+    sleep 2
+    ZENSIGHT_ZENOH_MODE=client ZENSIGHT_ZENOH_CONNECT=tcp/127.0.0.1:17447 ZENSIGHT_ZENOH_SCOUTING=false \
+      {{bindir}}/zensight-sensor-parallax --config configs/parallax.json5 >"$logs/parallax.log" 2>&1 & pids+=($!)
+    zenoh-bridge-remote-api -c configs/router-remote-api.json5 -m client -e tcp/127.0.0.1:17447 \
+      --no-multicast-scouting >"$logs/bridge.log" 2>&1 & pids+=($!)
+    sleep 5
+    (cd web && ZENSIGHT_BRIDGE=ws://localhost:10000 npm run smoke) || { echo "logs in $logs"; exit 1; }

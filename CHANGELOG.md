@@ -57,6 +57,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A browser client for the parallax catalogue and control plane** (#706,
+  the second step of #704; `web/`). zenoh-ts 1.10.1 through the remote-api
+  bridge (#705), with no new server-side machinery: origins resolved from
+  the parallax liveliness token, the catalogue read from
+  `@rpc/parallax/streams`, per-stream `StreamStatus` documents subscribed,
+  and open / close / keyframe sent as `Command<StreamControl>` on
+  `@rpc/parallax/stream/set`, the answer read as executed or as the
+  sensor's `RpcError`. The two traps the iced GUI learned are code, not
+  advice: a close always names its codec and tier (`Profile.closeCommand`,
+  the only spelling of a close), commands on one host are sent serially so
+  close-then-open arrive in order, and a `*` origin is unrepresentable — a
+  stream control is a statement to one host and the page refuses to
+  broadcast one. The TypeScript types are **generated** from the fleet type
+  table: `zensight-common/tests/web_schemas.rs` dumps the four wire types'
+  JSON Schemas into `web/schemas/` and fails on drift, `npm run gen` compiles
+  them. A new CI job (`web`) runs the type check, the schema-drift check,
+  the unit tests against a fake bus, and a production build; `just web-smoke`
+  runs the control plane against a real bus on isolated ports, which is how
+  the sensor's close semantics were confirmed — a close decrements the
+  refcount and the status says closed only after the idle countdown reaps
+  the tier. Pixels are #707; the second session for `@media` is #723.
+
 - **`zensight-sensor-container --diagnose`** (#947, the container twin of
   pve's #880). One command, plain sentences, no Zenoh session: which
   conventional sockets are present and which absent, what each socket lists,

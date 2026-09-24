@@ -1,0 +1,118 @@
+{
+  "$defs": {
+    "StreamControl": {
+      "description": "Runtime control for one media stream, sent on the `stream` command topic.\n\nTagged like the other sensor command enums (`type`, snake_case), so on the\nwire an open looks like\n`{\"type\":\"open_stream\",\"stream\":\"cam0\",\"tier\":\"high\"}`.\n\nNote per-viewer quality is expressed by *which `<tier>` key you subscribe\nto*, not by a command (#494). These commands manage a stream's lifecycle and\nkeyframes; redefining what a tier *means* ([`TierSpec`]) is config-only\n(`configs/parallax.json5`), not a bus command (#513).",
+      "oneOf": [
+        {
+          "description": "Open (start publishing) one tier of a stream. The sensor declares the\nmedia publisher on the concrete `@media/<stream>/video/<codec>/<tier>`\nkey (or `…/preview/<format>` for the preview codec) and starts the\npipeline. Distinct tiers open independent encoders.",
+          "properties": {
+            "codec": {
+              "description": "Requested codec (e.g. `h264`, `mjpeg` for the preview); `None` =\nsensor default (video).",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stream": {
+              "description": "Stream identifier (the `<stream>` key chunk).",
+              "type": "string"
+            },
+            "tier": {
+              "description": "Which tier to open (the `<tier>` key chunk); `None` = the sensor's\ndefault tier. Ignored for the preview codec.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "open_stream",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "stream"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Close (stop publishing) one tier of a stream and undeclare its media\npublisher. Mirrors the `OpenStream` selector.",
+          "properties": {
+            "codec": {
+              "description": "Codec, matching the open; `None` = video default.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "stream": {
+              "description": "Stream identifier.",
+              "type": "string"
+            },
+            "tier": {
+              "description": "Tier, matching the open; `None` = default tier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "close_stream",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "stream"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Force the encoder to emit a keyframe (IDR) on the next access unit of one\ntier. Normally unnecessary — the matching listener forces a keyframe when\na subscriber appears — but RFC 07 §1 mandates it for the Nth viewer, who\ngets no matching-listener edge.",
+          "properties": {
+            "stream": {
+              "description": "Stream identifier.",
+              "type": "string"
+            },
+            "tier": {
+              "description": "Which tier's encoder to force; `None` = default tier.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "const": "request_keyframe",
+              "type": "string"
+            }
+          },
+          "required": [
+            "type",
+            "stream"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Optional envelope carrying a correlation id alongside a command body.",
+  "properties": {
+    "body": {
+      "$ref": "#/$defs/StreamControl",
+      "description": "The topic-specific command payload."
+    },
+    "id": {
+      "description": "Optional correlation id, echoed in a reply for request/response matching.",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "body"
+  ],
+  "title": "Command",
+  "type": "object"
+}
