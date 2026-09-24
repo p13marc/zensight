@@ -10,7 +10,8 @@
     "test": "vitest run",
     "gen": "node scripts/gen-types.mjs",
     "check": "tsc --noEmit && node scripts/gen-types.mjs --check && vitest run",
-    "smoke": "tsc -p tsconfig.smoke.json && node --experimental-websocket --experimental-wasm-modules --no-warnings .smoke/scripts/smoke.js"
+    "smoke": "tsc -p tsconfig.smoke.json && node --experimental-websocket --experimental-wasm-modules --no-warnings .smoke/scripts/smoke.js",
+    "smoke:media": "tsc -p tsconfig.smoke.json && node --experimental-websocket --experimental-wasm-modules --no-warnings .smoke/scripts/smoke-media.js"
   },
   "dependencies": {
     "@eclipse-zenoh/zenoh-ts": "1.10.1"

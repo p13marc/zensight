@@ -20,6 +20,7 @@ const EXPORTED: &[(&str, &str)] = &[
     ("Vec<StreamDescriptor>", "StreamDescriptors.json"),
     ("StreamStatus", "StreamStatus.json"),
     ("Command<StreamControl>", "StreamCommand.json"),
+    ("MediaReceiverReport", "MediaReceiverReport.json"),
 ];
 
 fn schemas_dir() -> PathBuf {

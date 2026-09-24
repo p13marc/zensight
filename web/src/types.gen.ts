@@ -6,6 +6,148 @@
 //   npm run gen
 /* eslint-disable */
 
+// ── MediaReceiverReport.json ────────────────────────────────────
+/**
+ * Receiver feedback for one `@media` key — the payload of
+ * `@rpc/<producer>/stream/report` (RFC 07 §1.1, #714).
+ *
+ * # What it is, and what a producer may do with it
+ *
+ * A **snapshot**, which is what makes the procedure's `idempotent = true`
+ * true: every counter is cumulative since this consumer subscribed, so a
+ * resend under RFC 05 retry repeats a statement rather than adding to one. A
+ * delta payload would not be idempotent.
+ *
+ * RFC 07 §1.2 is **normative** about the other half: a producer **MUST NOT**
+ * re-tune a shared tier from one consumer's report, and where it acts on
+ * *aggregate* feedback it must state its arbitration rule — which must not be
+ * "the most recent report". Two viewers share a tier; one reports loss; the
+ * bitrate drops; the healthy viewer's picture degrades for a reason it cannot
+ * see, caused by a peer it does not know exists. **Feedback informs; it does
+ * not command.** The sanctioned adaptation is the *consumer* changing which
+ * tier key it subscribes to, and the escape hatch for a viewer that needs its
+ * own rate is a tier of its own.
+ *
+ * # Absent is not zero
+ *
+ * Four fields are `Option` because "not measured" and "measured as zero" are
+ * different observations and a controller must be able to tell them apart.
+ * The `skip_serializing_if` attributes are wire shape, not style: an absent
+ * field is **missing from the map**, never present-and-null. RFC 07 §1.3 makes
+ * this normative for frame age — where a deployment does not timestamp, frame
+ * age is *not asked*, **never zero** — and the same reasoning covers a
+ * consumer with no decode queue to report.
+ *
+ * Field order is pinned by `tests/receiver_report_corpus.rs`, since serde
+ * emits fields in declaration order and the vectors are compared byte for
+ * byte.
+ */
+export interface MediaReceiverReport {
+  /**
+   * Codec, as in [`StreamControl::CloseStream`]. `None` means the
+   * producer's default video profile.
+   *
+   * Present because `(stream, tier)` alone cannot name the JPEG preview
+   * key, and because reusing the open/close selector shape means a report
+   * can never name a key an `OpenStream` could not.
+   */
+  codec?: string | null;
+  /**
+   * Stable for this viewer instance, regenerated when a tile reopens.
+   *
+   * **In the payload, never in a key** (RFC 07 §1.1). N viewers are N
+   * callers of one key, told apart here — which is why the feedback surface
+   * costs no keyspace at all, and why viewer-origin telemetry was rejected.
+   */
+  consumer_id: string;
+  /**
+   * Frames that reached the screen.
+   */
+  decoded_frames: number;
+  /**
+   * Decoder queue depth at the end of the interval.
+   *
+   * Absent when the consumer has no queue to report — the JPEG preview tile,
+   * which decodes each frame as it arrives and has nothing to queue. `0`
+   * would read "queue empty" where the truth is "no queue". The H.264 tile
+   * does report one (#717): a bounded channel drained by the decode task, so
+   * the depth is `max_capacity() - capacity()` — the browser tile's
+   * `decodeQueueSize`, same field and same meaning.
+   */
+  decoder_queue_depth?: number | null;
+  /**
+   * Frames the consumer shed on purpose (a deadline miss, a resync).
+   */
+  dropped_frames: number;
+  /**
+   * **Maximum** frame age over the interval, same clock and same caveats.
+   *
+   * Both a median and a max, because a producer aggregating N consumers must
+   * publish both a worst case and a typical case, and one scalar per
+   * consumer can feed only one of them honestly.
+   */
+  frame_age_max_ms?: number | null;
+  /**
+   * **Median** frame age over the interval: publisher HLC minus local
+   * arrival, in milliseconds.
+   *
+   * *Observed skewed latency* in RFC 07 §1.3's sense — an observation, never
+   * a verdict on the transport. **Negative values are reported, not
+   * clamped**, because a negative age *is* the skew evidence. Absent when
+   * the samples arrived unstamped: that is "not asked", and treating it as
+   * zero silently disables every deadline built on it.
+   */
+  frame_age_ms?: number | null;
+  /**
+   * Inter-arrival jitter, milliseconds. Undefined before the second frame.
+   */
+  interarrival_jitter_ms?: number | null;
+  /**
+   * Milliseconds covered by this report.
+   *
+   * A **duration**, deliberately, where a wallclock instant would have been
+   * the obvious choice. A consumer's wallclock is a second skewed cross-host
+   * clock, and its only plausible use — `now - report_ms` — is precisely the
+   * laundered-latency mistake RFC 07 §1.3 forbids. The producer already
+   * knows when the report arrived; what it cannot know is the window the
+   * counters cover, which is what turns them into rates.
+   */
+  interval_ms: number;
+  /**
+   * Sequence number of the last keyframe the consumer decoded.
+   */
+  last_keyframe_sequence?: number | null;
+  /**
+   * The highest `FrameMeta.sequence` seen.
+   */
+  last_sequence: number;
+  /**
+   * Frames inferred missing from sequence gaps — *network* loss.
+   */
+  lost_frames: number;
+  /**
+   * Samples received on this key.
+   */
+  received_frames: number;
+  /**
+   * Consumer-local milliseconds elapsed since that keyframe.
+   *
+   * Monotonic elapsed time on one host, not a cross-host subtraction: it can
+   * never be negative, and it must not share a mental bucket with
+   * [`Self::frame_age_ms`], which can. Hence the name.
+   */
+  since_last_keyframe_ms?: number | null;
+  /**
+   * Stream identifier.
+   */
+  stream: string;
+  /**
+   * Tier name. `None` means the producer's default tier, as in
+   * [`StreamControl::OpenStream`].
+   */
+  tier?: string | null;
+}
+
 // ── StreamCommand.json ──────────────────────────────────────────
 /**
  * The topic-specific command payload.

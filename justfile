@@ -965,7 +965,9 @@ web:
 # a zenohd on 17447, the parallax sensor with its synthetic test source as a
 # client of it, the remote-api bridge on ws://localhost:10000, then
 # `npm run smoke` — origin from liveliness, catalogue, open, status open,
-# keyframe, profile-correct close, status closed after the idle window.
+# keyframe, profile-correct close, status closed after the idle window —
+# then `npm run smoke:media` (#707): the tier key through the bridge,
+# attachments and timestamps intact, a keyframe first, reports accepted.
 # Everything it starts is stopped on exit.
 web-smoke: build
     #!/usr/bin/env bash
@@ -983,3 +985,4 @@ web-smoke: build
       --no-multicast-scouting >"$logs/bridge.log" 2>&1 & pids+=($!)
     sleep 5
     (cd web && ZENSIGHT_BRIDGE=ws://localhost:10000 npm run smoke) || { echo "logs in $logs"; exit 1; }
+    (cd web && ZENSIGHT_BRIDGE=ws://localhost:10000 npm run smoke:media) || { echo "logs in $logs"; exit 1; }

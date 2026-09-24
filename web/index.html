@@ -21,6 +21,10 @@
       td div + div { color: #888; font-size: 12px; }
       pre#log { background: #8881; padding: 8px; border-radius: 6px; max-height: 14em; overflow: auto; font-size: 12px; }
       .hint { color: #888; font-size: 12px; margin: 4px 0 0; }
+      #tiles { display: flex; flex-wrap: wrap; gap: 12px; margin: 12px 0; }
+      .tile { border: 1px solid #8884; border-radius: 6px; padding: 8px; max-width: 480px; }
+      .tile canvas { display: block; max-width: 464px; height: auto; background: #000; }
+      .tile .caption { font-size: 12px; color: #888; margin-top: 4px; white-space: pre-wrap; }
     </style>
   </head>
   <body>
@@ -29,11 +33,15 @@
     <fieldset>
       <legend>bridge</legend>
       <label>remote-api <input id="locator" type="text" value="ws://localhost:10000" /></label>
+      <label>media session <select id="media-session"><option value="separate">separate WebSocket</option><option value="shared">shared with control</option></select></label>
+      <label>latency deadline <input id="deadline" type="number" value="1500" min="0" max="30000" step="100" style="width: 7ch" /> ms</label>
       <button id="connect">connect</button>
       <span id="link">not connected</span>
       <p class="hint">
         The WebSocket is <code>zenoh-bridge-remote-api</code> (<code>just remote-api</code>). The deployment
-        namespace is the bridge's; this page spells base-less keys.
+        namespace is the bridge's; this page spells base-less keys. Video rides a second session by default
+        (#723): a WebSocket is one ordered stream, and a saturated tile must not queue in front of an alert.
+        The deadline is #716's: a delta older than it is shed and a keyframe asked for; 0 disables it.
       </p>
     </fieldset>
 
@@ -61,6 +69,8 @@
       </thead>
       <tbody id="streams"></tbody>
     </table>
+
+    <div id="tiles"></div>
 
     <pre id="log"></pre>
     <script type="module" src="./src/main.ts"></script>

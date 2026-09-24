@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Receiver feedback for one `@media` key — the payload of\n`@rpc/<producer>/stream/report` (RFC 07 §1.1, #714).\n\n# What it is, and what a producer may do with it\n\nA **snapshot**, which is what makes the procedure's `idempotent = true`\ntrue: every counter is cumulative since this consumer subscribed, so a\nresend under RFC 05 retry repeats a statement rather than adding to one. A\ndelta payload would not be idempotent.\n\nRFC 07 §1.2 is **normative** about the other half: a producer **MUST NOT**\nre-tune a shared tier from one consumer's report, and where it acts on\n*aggregate* feedback it must state its arbitration rule — which must not be\n\"the most recent report\". Two viewers share a tier; one reports loss; the\nbitrate drops; the healthy viewer's picture degrades for a reason it cannot\nsee, caused by a peer it does not know exists. **Feedback informs; it does\nnot command.** The sanctioned adaptation is the *consumer* changing which\ntier key it subscribes to, and the escape hatch for a viewer that needs its\nown rate is a tier of its own.\n\n# Absent is not zero\n\nFour fields are `Option` because \"not measured\" and \"measured as zero\" are\ndifferent observations and a controller must be able to tell them apart.\nThe `skip_serializing_if` attributes are wire shape, not style: an absent\nfield is **missing from the map**, never present-and-null. RFC 07 §1.3 makes\nthis normative for frame age — where a deployment does not timestamp, frame\nage is *not asked*, **never zero** — and the same reasoning covers a\nconsumer with no decode queue to report.\n\nField order is pinned by `tests/receiver_report_corpus.rs`, since serde\nemits fields in declaration order and the vectors are compared byte for\nbyte.",
+  "properties": {
+    "codec": {
+      "description": "Codec, as in [`StreamControl::CloseStream`]. `None` means the\nproducer's default video profile.\n\nPresent because `(stream, tier)` alone cannot name the JPEG preview\nkey, and because reusing the open/close selector shape means a report\ncan never name a key an `OpenStream` could not.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "consumer_id": {
+      "description": "Stable for this viewer instance, regenerated when a tile reopens.\n\n**In the payload, never in a key** (RFC 07 §1.1). N viewers are N\ncallers of one key, told apart here — which is why the feedback surface\ncosts no keyspace at all, and why viewer-origin telemetry was rejected.",
+      "type": "string"
+    },
+    "decoded_frames": {
+      "description": "Frames that reached the screen.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "decoder_queue_depth": {
+      "description": "Decoder queue depth at the end of the interval.\n\nAbsent when the consumer has no queue to report — the JPEG preview tile,\nwhich decodes each frame as it arrives and has nothing to queue. `0`\nwould read \"queue empty\" where the truth is \"no queue\". The H.264 tile\ndoes report one (#717): a bounded channel drained by the decode task, so\nthe depth is `max_capacity() - capacity()` — the browser tile's\n`decodeQueueSize`, same field and same meaning.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "dropped_frames": {
+      "description": "Frames the consumer shed on purpose (a deadline miss, a resync).",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "frame_age_max_ms": {
+      "description": "**Maximum** frame age over the interval, same clock and same caveats.\n\nBoth a median and a max, because a producer aggregating N consumers must\npublish both a worst case and a typical case, and one scalar per\nconsumer can feed only one of them honestly.",
+      "format": "float",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "frame_age_ms": {
+      "description": "**Median** frame age over the interval: publisher HLC minus local\narrival, in milliseconds.\n\n*Observed skewed latency* in RFC 07 §1.3's sense — an observation, never\na verdict on the transport. **Negative values are reported, not\nclamped**, because a negative age *is* the skew evidence. Absent when\nthe samples arrived unstamped: that is \"not asked\", and treating it as\nzero silently disables every deadline built on it.",
+      "format": "float",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "interarrival_jitter_ms": {
+      "description": "Inter-arrival jitter, milliseconds. Undefined before the second frame.",
+      "format": "float",
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "interval_ms": {
+      "description": "Milliseconds covered by this report.\n\nA **duration**, deliberately, where a wallclock instant would have been\nthe obvious choice. A consumer's wallclock is a second skewed cross-host\nclock, and its only plausible use — `now - report_ms` — is precisely the\nlaundered-latency mistake RFC 07 §1.3 forbids. The producer already\nknows when the report arrived; what it cannot know is the window the\ncounters cover, which is what turns them into rates.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "last_keyframe_sequence": {
+      "description": "Sequence number of the last keyframe the consumer decoded.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "last_sequence": {
+      "description": "The highest `FrameMeta.sequence` seen.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "lost_frames": {
+      "description": "Frames inferred missing from sequence gaps — *network* loss.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "received_frames": {
+      "description": "Samples received on this key.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "since_last_keyframe_ms": {
+      "description": "Consumer-local milliseconds elapsed since that keyframe.\n\nMonotonic elapsed time on one host, not a cross-host subtraction: it can\nnever be negative, and it must not share a mental bucket with\n[`Self::frame_age_ms`], which can. Hence the name.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "stream": {
+      "description": "Stream identifier.",
+      "type": "string"
+    },
+    "tier": {
+      "description": "Tier name. `None` means the producer's default tier, as in\n[`StreamControl::OpenStream`].",
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "stream",
+    "consumer_id",
+    "interval_ms",
+    "received_frames",
+    "lost_frames",
+    "dropped_frames",
+    "decoded_frames",
+    "last_sequence"
+  ],
+  "title": "MediaReceiverReport",
+  "type": "object"
+}

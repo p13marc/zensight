@@ -23,6 +23,10 @@ export interface BusSample {
   key: string;
   payload: Uint8Array;
   alive: boolean;
+  /** The sample's attachment — on `@media`, the CBOR `FrameMeta` sidecar (#707). */
+  attachment?: Uint8Array;
+  /** The publisher's HLC stamp as ms since the epoch — the frame-age clock (RFC 07 §1.3). Absent when unstamped. */
+  publishedMs?: number;
 }
 
 /** Undeclares the subscription. The falling edge is the sensor's teardown signal on `@media`, so it is never optional. */
@@ -116,11 +120,16 @@ function intoBusReply(reply: Reply): BusReply {
 }
 
 function intoBusSample(s: Sample): BusSample {
-  return {
+  const out: BusSample = {
     key: s.keyexpr().toString(),
     payload: s.payload().toBytes(),
     alive: s.kind() !== SampleKind.DELETE,
   };
+  const attachment = s.attachment();
+  if (attachment) out.attachment = attachment.toBytes();
+  const ts = s.timestamp();
+  if (ts) out.publishedMs = ts.getMsSinceUnixEpoch();
+  return out;
 }
 
 export { json } from "./json.js";
