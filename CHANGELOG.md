@@ -57,6 +57,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The browser's pixels: a WebCodecs H.264 tile and a JPEG preview tile**
+  (#707, the third step of #704; `web/`). The iced tile's receive loop
+  ported with its rules intact and its constants shared, so both clients'
+  reports mean the same thing: the keyframe gate; the codec string parsed
+  from the first keyframe's SPS and `VideoDecoder` configured without a
+  `description` (Annex-B); resync on any sequence break through one 2 s
+  gate cleared only by a healthy decode; a counter regression past 300 read
+  as the sensor's pipeline restarting; the frame-age deadline that sheds a
+  late delta, never a late keyframe, and disarms itself when no frame has
+  ever met it; `decodeQueueSize` as the backpressure at 8; three end
+  conditions with a reason. The JPEG preview has no gate and the
+  latest-wins drain the video path never copies. Every tile reports a
+  `MediaReceiverReport` every 3 s to its own origin — `lost_frames` apart
+  from `dropped_frames`, absent never zero — with a refusal said once. A
+  dependency-free CBOR decoder reads the `FrameMeta` attachment and is
+  tested against the same corpus the Rust side pins. The page opens a second
+  WebSocket for `@media` by default (#723's shape; its measurement is not
+  done). `npm run smoke:media` proves through the real bridge that samples
+  cross with their attachment and HLC timestamp intact, a keyframe first,
+  contiguous, reports accepted — everything but the decoder, which is the
+  browser's.
+
 - **A browser client for the parallax catalogue and control plane** (#706,
   the second step of #704; `web/`). zenoh-ts 1.10.1 through the remote-api
   bridge (#705), with no new server-side machinery: origins resolved from

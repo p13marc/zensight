@@ -4,7 +4,13 @@
     "noEmit": false,
     "outDir": ".smoke",
     "rootDir": ".",
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["src", "scripts/smoke.ts"]
+  "include": [
+    "src",
+    "scripts/smoke.ts",
+    "scripts/smoke-media.ts"
+  ]
 }

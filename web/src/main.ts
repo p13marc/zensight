@@ -11,8 +11,13 @@ import {
 import { ControlPlane, Profile, type Sent } from "./control.js";
 import { Origin } from "./keys.js";
 import { watchOrigins } from "./origins.js";
+import { PreviewTile } from "./preview.js";
+import { maxLiveLatencyFrom } from "./receiver.js";
+import { Reporter } from "./report.js";
 import { describe } from "./rpc.js";
-import type { StreamEnd, StreamStatus } from "./types.gen.js";
+import { VideoTile } from "./tile.js";
+import type { MediaReceiverReport, StreamEnd, StreamStatus } from "./types.gen.js";
+import { WebCodecsDecoder, canvasPainter } from "./webcodecs.js";
 
 const $ = <T extends HTMLElement>(id: string): T => {
   const el = document.getElementById(id);
@@ -29,10 +34,16 @@ const ui = {
   use: $<HTMLButtonElement>("use-origin"),
   reload: $<HTMLButtonElement>("reload"),
   streams: $<HTMLTableSectionElement>("streams"),
+  tiles: $<HTMLDivElement>("tiles"),
   log: $<HTMLPreElement>("log"),
+  mediaSession: $<HTMLSelectElement>("media-session"),
+  deadline: $<HTMLInputElement>("deadline"),
 };
 
 let bus: Bus | undefined;
+/** The `@media` session (#723): a second WebSocket so video cannot queue in front of control, or `bus` when shared. */
+let mediaBus: Bus | undefined;
+let reporter: Reporter | undefined;
 let stopOrigins: Undeclare | undefined;
 let stopStatus: Undeclare | undefined;
 let control: ControlPlane | undefined;
@@ -40,6 +51,16 @@ let catalogue: StreamDescriptor[] = [];
 let statuses: ReadonlyMap<string, StreamStatus> = new Map();
 /** What this page opened, per stream: the profile its close must name. */
 const opened = new Map<string, Profile>();
+
+/** One live picture: the subscriber (its undeclare is the sensor's teardown signal) and the tile behind it. */
+interface LiveTile {
+  profile: Profile;
+  stop: Undeclare;
+  close(): void;
+  root: HTMLDivElement;
+  caption: HTMLDivElement;
+}
+const tiles = new Map<string, LiveTile>();
 
 function log(line: string): void {
   const t = new Date().toISOString().slice(11, 19);
@@ -68,6 +89,17 @@ ui.connect.addEventListener("click", async () => {
   }
   ui.link.textContent = `connected to ${locator}`;
   log(`connected to ${locator}`);
+  if (ui.mediaSession.value === "separate") {
+    try {
+      mediaBus = await connect(locator);
+      log("media session: a second WebSocket to the same bridge (#723)");
+    } catch (e) {
+      log(`media session failed, sharing the control session: ${(e as Error).message}`);
+      mediaBus = bus;
+    }
+  } else {
+    mediaBus = bus;
+  }
   stopOrigins = await watchOrigins(bus, (view) => {
     const current = ui.origins.value;
     ui.origins.replaceChildren();
@@ -104,11 +136,18 @@ ui.reload.addEventListener("click", () => {
 async function selectOrigin(origin: Origin): Promise<void> {
   if (!bus) return;
   if (stopStatus) await stopStatus();
+  await closeAllTiles();
   opened.clear();
   control = new ControlPlane(bus, origin, onSent);
+  reporter = new Reporter(bus, origin, log);
   statuses = new Map();
   stopStatus = await watchStatus(bus, origin, (m) => {
     statuses = m;
+    // The sensor closing a stream under a tile with no picture is one of the
+    // three end conditions; a tile that has a picture rides out a status lag.
+    for (const [stream, live] of tiles) {
+      if (m.get(stream)?.open === false) live.close();
+    }
     render();
   });
   await loadCatalogue(origin);
@@ -147,20 +186,32 @@ function render(): void {
 
     const openVideo = button("open video", async () => {
       const to = Profile.video(d.stream, tiers.value);
+      // The outgoing tile's subscriber goes first (its falling edge is the
+      // sensor's teardown signal), then close-then-open on the control plane.
+      await stopTile(d.stream);
       const outcome = await control!.switchTo(current, to);
-      if (outcome.ok) opened.set(d.stream, to);
+      if (outcome.ok) {
+        opened.set(d.stream, to);
+        await startTile(to);
+      }
       render();
     });
-    openVideo.disabled = !canVideo;
+    openVideo.disabled = !canVideo || !WebCodecsDecoder.available();
+    if (!WebCodecsDecoder.available()) openVideo.title = "this browser has no WebCodecs VideoDecoder";
     const openPreview = button("open preview", async () => {
       const to = Profile.preview(d.stream);
+      await stopTile(d.stream);
       const outcome = await control!.switchTo(current, to);
-      if (outcome.ok) opened.set(d.stream, to);
+      if (outcome.ok) {
+        opened.set(d.stream, to);
+        await startTile(to);
+      }
       render();
     });
     openPreview.disabled = !d.codecs.includes("mjpeg");
     const close = button("close", async () => {
       if (!current) return;
+      await stopTile(d.stream);
       await control!.close(current);
       opened.delete(d.stream);
       render();
@@ -231,7 +282,92 @@ function cell(...content: (string | Node)[]): HTMLTableCellElement {
   return td;
 }
 
+/** Subscribe to the profile's EXACT media key and put a tile on the page. */
+async function startTile(profile: Profile): Promise<void> {
+  const mb = mediaBus ?? bus;
+  if (!mb || !control || !reporter) return;
+  const origin = control.origin;
+  const root = document.createElement("div");
+  root.className = "tile";
+  const title = document.createElement("div");
+  title.textContent = `${profile.stream} — ${profile.codec}${profile.tier ? `/${profile.tier}` : ""}`;
+  const canvas = document.createElement("canvas");
+  canvas.width = 16;
+  canvas.height = 9;
+  const caption = document.createElement("div");
+  caption.className = "caption";
+  caption.textContent = "waiting for frames…";
+  root.append(title, canvas, caption);
+  ui.tiles.append(root);
+
+  const onReport = (r: MediaReceiverReport) => {
+    reporter!.send(r);
+    const age = r.frame_age_ms == null ? "age n/a" : `age ${r.frame_age_ms.toFixed(0)} ms`;
+    const q = r.decoder_queue_depth == null ? "" : ` · queue ${r.decoder_queue_depth}`;
+    caption.textContent = `rx ${r.received_frames} · lost ${r.lost_frames} · shed ${r.dropped_frames} · decoded ${r.decoded_frames} · ${age}${q}`;
+  };
+  const onEnded = (reason: string | undefined) => {
+    caption.textContent = reason ?? "closed";
+    if (reason) log(`${profile.stream}: ${reason}`);
+  };
+
+  if (profile.codec === "h264" && profile.tier) {
+    const tier = profile.tier;
+    let tile: VideoTile;
+    const decoder = new WebCodecsDecoder(
+      canvas,
+      (d) => tile.onDecoded(d),
+      (m) => tile.onDecodeError(m),
+    );
+    tile = new VideoTile({
+      stream: profile.stream,
+      tier,
+      decoder,
+      maxLiveLatencyMs: maxLiveLatencyFrom(Number(ui.deadline.value)),
+      events: {
+        requestKeyframe: () => void control!.requestKeyframe(profile),
+        report: onReport,
+        ended: onEnded,
+        configured: (codec) => (title.textContent += ` · ${codec}`),
+      },
+    });
+    const key = `v1/${origin.value}/@media/parallax/${profile.stream}/video/h264/${tier}`;
+    const stop = await mb.subscribe(key, (s) =>
+      tile.onSample({ payload: s.payload, attachment: s.attachment, publishedMs: s.publishedMs }),
+    );
+    // RFC 07 §1: the Nth viewer gets no matching-listener edge, so ask.
+    void control.requestKeyframe(profile);
+    tiles.set(profile.stream, { profile, stop, close: () => tile.close(), root, caption });
+  } else {
+    const tile = new PreviewTile({
+      stream: profile.stream,
+      paint: canvasPainter(canvas),
+      events: { report: onReport, ended: onEnded },
+    });
+    const key = `v1/${origin.value}/@media/parallax/${profile.stream}/preview/jpeg`;
+    const stop = await mb.subscribe(key, (s) =>
+      tile.onSample({ payload: s.payload, attachment: s.attachment, publishedMs: s.publishedMs }),
+    );
+    tiles.set(profile.stream, { profile, stop, close: () => tile.close(), root, caption });
+  }
+}
+
+/** Undeclare the stream's subscriber and drop its tile. The control-plane close is the caller's. */
+async function stopTile(stream: string): Promise<void> {
+  const live = tiles.get(stream);
+  if (!live) return;
+  tiles.delete(stream);
+  live.close();
+  await live.stop();
+  live.root.remove();
+}
+
+async function closeAllTiles(): Promise<void> {
+  for (const stream of [...tiles.keys()]) await stopTile(stream);
+}
+
 async function teardown(): Promise<void> {
+  await closeAllTiles();
   // Close what this page opened, profile-correctly, before the session goes:
   // the sensor reaps on the subscriber's falling edge (#707), but a close it
   // was told about is a close it need not wait an idle window for.
@@ -243,6 +379,9 @@ async function teardown(): Promise<void> {
   if (stopOrigins) await stopOrigins();
   stopStatus = stopOrigins = undefined;
   control = undefined;
+  if (mediaBus && mediaBus !== bus) await mediaBus.close();
+  mediaBus = undefined;
+  reporter = undefined;
   if (bus) await bus.close();
   bus = undefined;
   catalogue = [];
