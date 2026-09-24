@@ -486,6 +486,20 @@ async fn shutdown_leaves_a_terminal_state_for_an_in_flight_production() {
         .await
         .expect("shutdown winds down within its budget");
 
+    // Two documents follow: `shutdown`'s own, and the one `drive` publishes
+    // once the producer notices its token and returns "cancelled". Waiting
+    // for both makes the race deterministic in the order that lost on CI
+    // (2026-09-24, run 1105): the producer's account of the interruption
+    // must not overwrite the terminal state shutdown already recorded.
+    let mut after_shutdown = Vec::new();
+    for which in ["shutdown's document", "the producer's own document"] {
+        after_shutdown.push(
+            documents
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| panic!("{which} after shutdown")),
+        );
+    }
+
     // The read procedure still answers — with the terminal state.
     let status = poll_status(&session, &artifact_status_key(producer_name))
         .await
@@ -501,16 +515,22 @@ async fn shutdown_leaves_a_terminal_state_for_an_in_flight_production() {
         "an interrupted kind is not busy: {status:?}"
     );
 
-    // And the document says the same, for a consumer that was not polling.
-    let failed = documents
-        .recv_timeout(Duration::from_secs(2))
-        .expect("the Failed document");
-    let doc: ArtifactStatus =
-        serde_json::from_slice(&failed.payload().to_bytes()).expect("an ArtifactStatus");
-    assert!(matches!(
-        kind_current(&doc, "report"),
-        Some(ArtifactState::Failed { .. })
-    ));
+    // And the documents say the same, for a consumer that was not polling —
+    // BOTH of them: the producer's own, published last, must carry
+    // shutdown's reason and not "cancelled".
+    for failed in &after_shutdown {
+        let doc: ArtifactStatus =
+            serde_json::from_slice(&failed.payload().to_bytes()).expect("an ArtifactStatus");
+        match kind_current(&doc, "report") {
+            Some(ArtifactState::Failed { reason, .. }) => {
+                assert!(
+                    reason.contains("shutting down"),
+                    "document reason was: {reason}"
+                );
+            }
+            other => panic!("expected a Failed document, got {other:?}"),
+        }
+    }
 }
 
 /// Count regular files under a directory, recursively (the DirStore layout).

@@ -876,6 +876,15 @@ impl ArtifactChannel {
 
         let mut rt = self.state.lock().await;
         let kr = rt.entry(slug).or_default();
+        // `shutdown` (#1156) may already have taken this production's
+        // in-flight slot and recorded its terminal state — `Failed { reason:
+        // "sensor shutting down" }` — before the producer noticed its token.
+        // That record is the one a consumer is owed; the producer's own
+        // account of the same interruption ("cancelled") arriving a few
+        // milliseconds later must not overwrite it. An `artifact/cancel`
+        // leaves the slot in place, so its outcome is still recorded here.
+        let interrupted_by_shutdown = kr.in_flight.is_none()
+            && matches!(&kr.current, Some(ArtifactState::Failed { id: recorded, .. }) if *recorded == id);
         kr.busy = false;
         kr.last_gen = Some(Instant::now());
         kr.in_flight = None;
@@ -887,6 +896,12 @@ impl ArtifactChannel {
                 }
                 kr.active = Some(active);
                 kr.current = Some(state);
+            }
+            Err(_) if interrupted_by_shutdown => {
+                // The terminal state is already on record and was published
+                // by `shutdown`; a failed tree build's chunks still need the
+                // sweep below, which runs for every failure.
+                self.sweep_store().await;
             }
             Err(e) => {
                 kr.current = Some(ArtifactState::Failed {

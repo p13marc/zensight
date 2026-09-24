@@ -707,6 +707,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A production interrupted by shutdown keeps shutdown's terminal state**
+  (sensor-core, #1156's contract). `ArtifactChannel::shutdown` records
+  `Failed { reason: "sensor shutting down" }` and cancels the producer's
+  token; when the producer noticed the token a few milliseconds later and
+  returned "cancelled", `drive` overwrote that record with its own reason,
+  so a consumer reading the kind's status or state document after a
+  shutdown could see `cancelled` — a word that means an operator asked —
+  instead of the sensor going away. Seen as a flaky `test` job (run 1105).
+  `drive` now leaves a terminal state that shutdown already recorded for
+  the same id alone; an `artifact/cancel` still records the producer's
+  outcome, because cancel leaves the in-flight slot in place. The test
+  waits for the producer's own document and asserts both documents carry
+  shutdown's reason, which fails deterministically without the fix.
+
 - **The container sensor's upstream digest and signature checks now resolve
   Docker Hub and ghcr.io images** (#947). Both registries answer an anonymous
   manifest `HEAD` with `401` and a `WWW-Authenticate: Bearer` challenge, and
