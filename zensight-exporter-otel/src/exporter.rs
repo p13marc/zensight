@@ -101,6 +101,14 @@ pub struct ExporterStats {
     /// New series refused by the cardinality budget, by producer (#1145) —
     /// the attribution the single `warn!` never carried.
     pub series_refused_by_producer: HashMap<String, u64>,
+    /// Histogram points replayed into an SDK instrument (#1151).
+    pub histograms_recorded: u64,
+    /// Histogram replays whose sum could not be made exact — a distribution
+    /// whose `sum` its own counts contradict. The counts stayed exact.
+    pub histogram_sum_inexact: u64,
+    /// Histogram points refused: malformed, bounds changed mid-flight, or a
+    /// window too large to replay.
+    pub histograms_refused: u64,
 }
 
 /// Build a collision-resistant gauge key from metric name and attributes.
@@ -211,7 +219,49 @@ enum ObsKind {
     Counter,
     /// `TelemetryValue::Gauge` / `Boolean` — a current level.
     Gauge,
+    /// `TelemetryValue::Histogram` (#1151) — a synchronous SDK histogram fed by
+    /// replaying each point's delta (`metrics::histogram_replay`).
+    Histogram,
 }
+
+/// The declared bounds of every histogram instrument this process has
+/// registered, by OTel name (#1151). The provider's view reads it so a
+/// histogram's stream aggregates over exactly its declared buckets **with
+/// `record_min_max` off** — min and max of replayed values would be values
+/// nobody observed. Filled just before the instrument is created, which is
+/// when the SDK consults the view.
+static HISTOGRAM_BOUNDS: std::sync::LazyLock<RwLock<HashMap<String, Vec<f64>>>> =
+    std::sync::LazyLock::new(|| RwLock::new(HashMap::new()));
+
+/// The view every meter provider carries (#1151): a registered zensight
+/// histogram aggregates over its declared bounds without min/max; everything
+/// else is left to the SDK's defaults.
+fn histogram_view(
+    i: &opentelemetry_sdk::metrics::Instrument,
+) -> Option<opentelemetry_sdk::metrics::Stream> {
+    if i.kind() != opentelemetry_sdk::metrics::InstrumentKind::Histogram {
+        return None;
+    }
+    let bounds = HISTOGRAM_BOUNDS.read().get(i.name()).cloned()?;
+    opentelemetry_sdk::metrics::Stream::builder()
+        .with_aggregation(
+            opentelemetry_sdk::metrics::Aggregation::ExplicitBucketHistogram {
+                boundaries: bounds,
+                record_min_max: false,
+            },
+        )
+        .build()
+        .ok()
+}
+
+/// A histogram series: `(scope, metric name, series key)`.
+type HistogramSeries = (String, String, String);
+
+/// The largest single histogram delta the exporter will replay: one `record`
+/// per observation, so an unbounded window is an unbounded loop on the
+/// receive path. A sensor that publishes each interval is orders of
+/// magnitude below it; a window above it is refused and counted.
+const MAX_REPLAY_OBSERVATIONS: u64 = 1_000_000;
 
 /// One observed series: its latest value, its attributes, and when it last
 /// moved.
@@ -331,6 +381,11 @@ pub struct OtelExporter {
     /// the lifetime.
     counters: RwLock<HashMap<(String, String), opentelemetry::metrics::ObservableCounter<u64>>>,
     gauges: RwLock<HashMap<(String, String), opentelemetry::metrics::ObservableGauge<f64>>>,
+    /// Histogram instruments (#1151), keyed like the others.
+    histograms: RwLock<HashMap<(String, String), opentelemetry::metrics::Histogram<f64>>>,
+    /// The last cumulative value per histogram series `(scope, metric, series
+    /// key)` — what the next point is diffed against.
+    histogram_last: RwLock<HashMap<HistogramSeries, (zensight_common::HistogramValue, Instant)>>,
     /// Maximum number of series to store, across all metric names.
     max_gauge_series: usize,
 }
@@ -411,6 +466,8 @@ impl OtelExporter {
             dropped_resources: RwLock::new(0),
             counters: RwLock::new(HashMap::new()),
             gauges: RwLock::new(HashMap::new()),
+            histograms: RwLock::new(HashMap::new()),
+            histogram_last: RwLock::new(HashMap::new()),
             max_gauge_series: 100_000,
         }
     }
@@ -530,6 +587,8 @@ impl OtelExporter {
             dropped_resources: RwLock::new(0),
             counters: RwLock::new(HashMap::new()),
             gauges: RwLock::new(HashMap::new()),
+            histograms: RwLock::new(HashMap::new()),
+            histogram_last: RwLock::new(HashMap::new()),
             max_gauge_series: 100_000,
         })
     }
@@ -580,6 +639,7 @@ impl OtelExporter {
         let provider = SdkMeterProvider::builder()
             .with_resource(resource)
             .with_reader(reader)
+            .with_view(histogram_view)
             .build();
 
         info!("Meter provider initialized");
@@ -788,6 +848,7 @@ impl OtelExporter {
         let kind = match identity.kind {
             MetricKind::Counter => ObsKind::Counter,
             MetricKind::Gauge => ObsKind::Gauge,
+            MetricKind::Histogram => ObsKind::Histogram,
             MetricKind::Text | MetricKind::Unsupported => return,
         };
 
@@ -810,6 +871,11 @@ impl OtelExporter {
             _ => String::new(),
         };
         let store_key = (scope.clone(), metric_name.clone());
+
+        if let zensight_common::TelemetryValue::Histogram(h) = &point.value {
+            self.record_histogram(&meter, store_key, &attributes, h, identity.unit.as_deref());
+            return;
+        }
 
         let Some(value) = extract_value(&point.value) else {
             warn!(
@@ -1113,6 +1179,111 @@ impl OtelExporter {
                     .write()
                     .insert((scope.to_string(), metric_name.to_string()), inst);
             }
+            // Histograms are synchronous and registered by
+            // `record_histogram`, never here.
+            ObsKind::Histogram => {}
+        }
+    }
+
+    /// Record one histogram point (#1151): diff it against the series' last
+    /// cumulative value and replay the delta into the SDK instrument, whose
+    /// view aggregates over the declared bounds. See
+    /// [`crate::metrics::histogram_replay`] for what is exact.
+    ///
+    /// A producer restart (counts went down) makes the new value its own
+    /// window, the same reset rule a counter's rate applies. A series whose
+    /// bounds change mid-flight is refused, not merged: the instrument's
+    /// buckets are fixed at creation.
+    fn record_histogram(
+        &self,
+        meter: &Meter,
+        store_key: (String, String),
+        attributes: &[KeyValue],
+        h: &zensight_common::HistogramValue,
+        unit: Option<&str>,
+    ) {
+        let refuse = |why: &str| {
+            trace!(metric = %store_key.1, why, "Histogram point refused");
+            self.stats.write().histograms_refused += 1;
+        };
+        if !h.is_consistent() {
+            return refuse("malformed");
+        }
+        if let Some(existing) = self.registered.read().get(&store_key).copied()
+            && existing != ObsKind::Histogram
+        {
+            warn!(metric = %store_key.1, ?existing, "Metric changed value kind mid-flight; keeping the first");
+            self.stats.write().metrics_failed += 1;
+            return;
+        }
+        if let Some(bounds) = HISTOGRAM_BOUNDS.read().get(&store_key.1)
+            && !h.same_bounds(bounds)
+        {
+            return refuse("bounds changed mid-flight");
+        }
+        let series_key = build_series_key(&store_key.1, attributes);
+        let last_key = (store_key.0.clone(), store_key.1.clone(), series_key);
+        // A NEW histogram series has to fit under the exporter's series cap,
+        // like any other: the SDK's own histogram state cannot be evicted, so
+        // the cap is what bounds it.
+        if !self.histogram_last.read().contains_key(&last_key)
+            && self.histogram_last.read().len() >= self.max_gauge_series
+        {
+            return refuse("series cap");
+        }
+        let delta = {
+            let last = self.histogram_last.read();
+            match last.get(&last_key) {
+                Some((prev, _)) => h.delta_since(prev).unwrap_or_else(|| h.clone()),
+                None => h.clone(),
+            }
+        };
+        if delta.count > MAX_REPLAY_OBSERVATIONS {
+            // Remember it anyway, so the NEXT window is small again.
+            self.histogram_last
+                .write()
+                .insert(last_key, (h.clone(), Instant::now()));
+            return refuse("window too large to replay");
+        }
+        let instrument = {
+            let existing = self.histograms.read().get(&store_key).cloned();
+            match existing {
+                Some(i) => i,
+                None => {
+                    HISTOGRAM_BOUNDS
+                        .write()
+                        .insert(store_key.1.clone(), h.buckets.clone());
+                    let mut b = meter
+                        .f64_histogram(store_key.1.clone())
+                        .with_boundaries(h.buckets.clone());
+                    if let Some(u) = unit {
+                        b = b.with_unit(u.to_string());
+                    }
+                    let inst = b.build();
+                    self.histograms
+                        .write()
+                        .insert(store_key.clone(), inst.clone());
+                    self.registered
+                        .write()
+                        .insert(store_key.clone(), ObsKind::Histogram);
+                    inst
+                }
+            }
+        };
+        let replay = crate::metrics::histogram_replay(&delta);
+        for (value, times) in &replay.values {
+            for _ in 0..*times {
+                instrument.record(*value, attributes);
+            }
+        }
+        self.histogram_last
+            .write()
+            .insert(last_key, (h.clone(), Instant::now()));
+        let mut stats = self.stats.write();
+        stats.histograms_recorded += 1;
+        stats.metrics_exported += 1;
+        if !replay.sum_exact {
+            stats.histogram_sum_inexact += 1;
         }
     }
 
@@ -1498,6 +1669,30 @@ impl OtelExporter {
         let after: usize = store.values().map(HashMap::len).sum();
         drop(store);
 
+        // Histogram series age out the same way (#1151). The SDK's own
+        // histogram state cannot be evicted, but the series' last value and
+        // — once a metric name has no series left — its instrument handle
+        // can, so a host that stopped reporting releases them and its stack.
+        let mut gone = gone;
+        {
+            let mut last = self.histogram_last.write();
+            last.retain(|_, (_, at)| at.elapsed() < max_age);
+            let alive: std::collections::HashSet<(String, String)> = last
+                .keys()
+                .map(|(s, m, _)| (s.clone(), m.clone()))
+                .collect();
+            let mut histograms = self.histograms.write();
+            let dead: Vec<(String, String)> = histograms
+                .keys()
+                .filter(|k| !alive.contains(*k))
+                .cloned()
+                .collect();
+            for k in dead {
+                histograms.remove(&k);
+                gone.push(k);
+            }
+        }
+
         // AND DROP WHAT OBSERVED THEM (#1146).
         //
         // This used to say the instrument "stays registered (its callback just
@@ -1553,12 +1748,14 @@ impl OtelExporter {
         }
         // A scope is a host's key into the observation store, so a host is
         // still live exactly when some `(scope, _)` entry names it.
-        let live: std::collections::HashSet<String> = self
+        let mut live: std::collections::HashSet<String> = self
             .observations
             .read()
             .keys()
             .map(|(scope, _)| scope.clone())
             .collect();
+        // A host reporting only histograms (#1151) is live too.
+        live.extend(self.histogram_last.read().keys().map(|(s, _, _)| s.clone()));
         let mut pool = self.per_origin.write();
         let before = pool.len();
         pool.retain(|origin, _| live.contains(origin));
@@ -1770,7 +1967,10 @@ mod tests {
     fn harness() -> (OtelExporter, InMemoryMetricExporter) {
         let sink = InMemoryMetricExporter::default();
         let reader = PeriodicReader::builder(sink.clone()).build();
-        let mp = SdkMeterProvider::builder().with_reader(reader).build();
+        let mp = SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_view(histogram_view)
+            .build();
         (OtelExporter::with_meter_provider(mp), sink)
     }
 
@@ -1864,6 +2064,97 @@ mod tests {
             })
             .sum();
         assert_eq!(points, 0, "an evicted series must produce no data points");
+    }
+
+    /// #1151: two cumulative histogram points arrive; the OTLP stream is ONE
+    /// explicit-bucket Histogram over exactly the declared bounds, with the
+    /// sensor's own counts, count and sum — and no min/max, which would be
+    /// replayed values nobody observed.
+    #[test]
+    fn a_histogram_exports_the_sensors_buckets_count_and_sum() {
+        let (exporter, sink) = harness();
+        let bounds = zensight_common::registry::probe::Subject::duration_seconds("web")
+            .buckets()
+            .expect("declared");
+        let mut h = zensight_common::HistogramValue::new(bounds);
+        let key = "v1/h-0123456789ab/telemetry/probe/web/duration_seconds";
+        for v in [0.004, 0.02] {
+            h.observe(v);
+        }
+        let p = point(
+            "edge",
+            "web/duration_seconds",
+            TelemetryValue::Histogram(h.clone()),
+        );
+        exporter.record_metric(key, &p);
+        for v in [0.02, 0.3, 45.0] {
+            h.observe(v);
+        }
+        let p = point(
+            "edge",
+            "web/duration_seconds",
+            TelemetryValue::Histogram(h.clone()),
+        );
+        exporter.record_metric(key, &p);
+        exporter
+            .meter_provider
+            .as_ref()
+            .expect("meter provider")
+            .force_flush()
+            .expect("flush");
+        let metrics = sink.get_finished_metrics().expect("finished metrics");
+        let mut seen = None;
+        for rm in &metrics {
+            for sm in rm.scope_metrics() {
+                for m in sm.metrics() {
+                    if !m.name().contains("duration_seconds") {
+                        continue;
+                    }
+                    let AggregatedMetrics::F64(MetricData::Histogram(hist)) = m.data() else {
+                        panic!("a histogram must export as a Histogram: {}", m.name());
+                    };
+                    for dp in hist.data_points() {
+                        seen = Some((
+                            dp.bounds().collect::<Vec<_>>(),
+                            dp.bucket_counts().collect::<Vec<_>>(),
+                            dp.count(),
+                            dp.sum(),
+                            dp.min(),
+                            dp.max(),
+                        ));
+                    }
+                }
+            }
+        }
+        let (got_bounds, counts, count, sum, min, max) = seen.expect("a data point");
+        assert_eq!(got_bounds, bounds.to_vec(), "the declared bounds, exactly");
+        assert_eq!(counts, h.counts, "the sensor's counts, exactly");
+        assert_eq!(count, 5);
+        assert!((sum - h.sum).abs() < 1e-9, "{sum} vs {}", h.sum);
+        assert_eq!((min, max), (None, None), "no invented min/max");
+        let stats = exporter.stats.read();
+        assert_eq!(stats.histograms_recorded, 2);
+        assert_eq!(stats.histogram_sum_inexact, 0);
+    }
+
+    /// A malformed histogram is refused and counted, never replayed.
+    #[test]
+    fn a_malformed_histogram_is_refused() {
+        let (exporter, _sink) = harness();
+        let bad = zensight_common::HistogramValue {
+            buckets: vec![1.0],
+            counts: vec![1, 1],
+            count: 9,
+            sum: 1.0,
+        };
+        let p = point(
+            "edge",
+            "web/duration_seconds",
+            TelemetryValue::Histogram(bad),
+        );
+        exporter.record_metric("v1/h-0123456789ab/telemetry/probe/web/duration_seconds", &p);
+        assert_eq!(exporter.stats.read().histograms_refused, 1);
+        assert!(exporter.histograms.read().is_empty());
     }
 
     /// One instrument per metric name, however many points arrive. The old path

@@ -608,6 +608,7 @@ subject	probe	targets/failing	telemetry	TelemetryPoint
 subject	probe	targets/total	telemetry	TelemetryPoint
 subject	probe	{target}/dns_answers	telemetry	TelemetryPoint
 subject	probe	{target}/duration_ms	telemetry	TelemetryPoint
+subject	probe	{target}/duration_seconds	telemetry	TelemetryPoint	histogram
 subject	probe	{target}/http_status	telemetry	TelemetryPoint
 subject	probe	{target}/http_ttfb_ms	telemetry	TelemetryPoint
 subject	probe	{target}/jitter_ms	telemetry	TelemetryPoint

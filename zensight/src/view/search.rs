@@ -35,6 +35,7 @@ fn value_label(value: &zensight_common::TelemetryValue) -> String {
         TelemetryValue::Boolean(b) => b.to_string(),
         TelemetryValue::Text(s) => s.clone(),
         TelemetryValue::Binary(b) => format!("{} bytes", b.len()),
+        TelemetryValue::Histogram(h) => h.summary(None),
     }
 }
 

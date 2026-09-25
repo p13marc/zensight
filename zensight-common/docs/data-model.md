@@ -55,7 +55,7 @@ why a process that is not a sensor is in it.
 
 ### TelemetryValue
 
-A tagged enum (`#[serde(tag = "type", content = "value")]`) with five variants:
+A tagged enum (`#[serde(tag = "type", content = "value")]`) with six variants:
 
 | Variant | Rust type | Wire tag | Use |
 |---------|-----------|----------|-----|
@@ -64,6 +64,38 @@ A tagged enum (`#[serde(tag = "type", content = "value")]`) with five variants:
 | `Text` | `String` | `text` | string value |
 | `Boolean` | `bool` | `boolean` | true/false |
 | `Binary` | `Vec<u8>` | `binary` | raw bytes |
+| `Histogram` | `HistogramValue` | `histogram` | a fixed-bucket distribution (#1151) |
+
+**`Histogram`** is the registry's `kind = "histogram"` (RFC 08 §2 v1.36,
+zenkey 0.9) spelled on the wire, and its payload shape is this profile's
+(RFC 11 §4 leaves it here):
+
+```json
+{"type": "histogram",
+ "value": {"buckets": [0.005, 0.01, 0.025],
+           "counts":  [3, 10, 2, 1],
+           "count": 16, "sum": 0.19}}
+```
+
+`buckets` are the upper bounds, strictly ascending and finite, `+Inf` implicit,
+and **equal to the subject's declared `buckets` bit for bit** — the publish
+site's guard (`registry::kind_matches`) and zenkey's `kind-mismatch` judge both
+check it, because two producers of one subject are comparable only if their
+bounds are. `counts` is **not** cumulative: `counts[i]` falls in
+`(buckets[i-1], buckets[i]]` and the last entry is the `+Inf` overflow, so there
+is one more count than bound (the OTLP explicit-bucket layout; Prometheus's
+cumulative `le` view is derived). `count` is the sum of `counts`; `sum` the sum
+of every observed value. The whole value is **cumulative since the producer
+started**, like a counter, and a restart resets it — a consumer diffs two
+values for a window (`HistogramValue::delta_since`, which returns `None` across
+a reset). `quantile` and `summary` give an *estimate* by interpolation inside a
+bucket, and anything rendering one marks it `≈`.
+
+What each consumer does with it: both exporters export a real histogram
+(see their references); the GUI renders the count, mean and estimated p50/p95;
+the store, the historian and the rerun bridge skip it and count it — none of
+them holds one number per instant that a distribution could honestly become —
+and a threshold rule cannot target it, for the same reason.
 
 `From` conversions are provided for the obvious types. Note the deliberate
 `i64` rule: a **non-negative** `i64` becomes `Counter` (no `f64` precision loss),

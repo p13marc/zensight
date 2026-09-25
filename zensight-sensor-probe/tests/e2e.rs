@@ -648,3 +648,86 @@ fn burst_target(name: &str, addr: &str) -> Target {
     t.spacing_ms = Some(20);
     t
 }
+
+/// #1151: every checked target publishes its duration as a DISTRIBUTION —
+/// `{target}/duration_seconds`, a `TelemetryValue::Histogram` over exactly
+/// the declared buckets, cumulative, with this check's duration as its one
+/// observation — beside the `duration_ms` gauge, which it does not replace.
+/// A refused connection is observed too, at its duration.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn each_target_publishes_its_durations_as_a_histogram() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let live = listener.local_addr().unwrap();
+    tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+
+    let session = Arc::new(zenoh::open(isolated_config()).await.expect("open zenoh"));
+    let sub = session
+        .declare_subscriber("v1/*/telemetry/probe/*/duration_seconds")
+        .await
+        .unwrap();
+    let cfg = ProbeConfig {
+        interval_secs: 60,
+        timeout_secs: 1,
+        max_concurrent: 4,
+        targets: vec![
+            target("listening", ProbeKind::Tcp, &live.to_string()),
+            target("refused", ProbeKind::Tcp, "127.0.0.1:1"),
+        ],
+        ..Default::default()
+    };
+    let format = zensight_common::Format::Json;
+    let targets_for_poller = cfg.targets.clone();
+    let mut poller = Poller::new(
+        cfg,
+        zensight_sensor_probe::poller::TargetSet::new(targets_for_poller),
+        Publisher::new(session.clone(), "probe", format),
+        Arc::new(
+            zensight_sensor_core::AdvancedPublisherRegistry::new(
+                session.clone(),
+                zensight_sensor_core::v1::for_producer("probe").telemetry_prefix(),
+                format,
+                zensight_sensor_core::AdvancedPublisherConfig::cache_only(1),
+                Default::default(),
+            )
+            .with_qos(zensight_sensor_probe::poller::STATE_QOS),
+        ),
+        None,
+        Arc::new(zensight_sensor_core::SensorHealth::new("probe")),
+        zensight_sensor_core::relation::RelationSet::new(
+            "probe",
+            session.clone(),
+            format,
+            Default::default(),
+        ),
+    )
+    .unwrap();
+    let results = poller.sweep().await;
+    poller.publish(&results).await;
+
+    let declared = zensight_common::registry::probe::Subject::duration_seconds("x")
+        .buckets()
+        .expect("declared");
+    let mut seen = std::collections::HashMap::new();
+    while let Ok(Ok(s)) = tokio::time::timeout(Duration::from_secs(2), sub.recv_async()).await {
+        let p: TelemetryPoint = decode_auto(&s.payload().to_bytes()).expect("a point");
+        seen.insert(p.metric.clone(), p);
+        if seen.len() == 2 {
+            break;
+        }
+    }
+    for r in &results {
+        let metric = format!("{}/duration_seconds", r.name);
+        let p = seen
+            .get(&metric)
+            .unwrap_or_else(|| panic!("{metric} was not published: {:?}", seen.keys()));
+        let zensight_common::TelemetryValue::Histogram(h) = &p.value else {
+            panic!("{metric} is not a histogram: {:?}", p.value);
+        };
+        assert!(h.same_bounds(declared), "{metric}: declared bounds");
+        assert!(h.is_consistent(), "{metric}: {h:?}");
+        assert_eq!(h.count, 1, "{metric}: one check, one observation");
+        let secs = r.duration_ms.expect("a duration") / 1000.0;
+        assert!((h.sum - secs).abs() < 1e-9, "{metric}: {} vs {secs}", h.sum);
+        assert_eq!(p.unit.as_deref(), Some("s"));
+    }
+}

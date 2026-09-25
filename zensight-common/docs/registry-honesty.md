@@ -83,6 +83,12 @@ each crate's `checked_point`. Two asymmetries are deliberate:
   either way today and both render as a gauge; forcing the variant is a
   separate change with its own wire note.
 
+zenkey 0.9 (RFC 08 §2 v1.36) added a fifth kind, `histogram`, with a
+required `buckets` list (#1151). For it `kind_matches` checks twice: the
+variant, and the value's bounds against the declared `buckets`, bit for bit;
+a malformed value (a count that is not the sum of its counts) is refused too.
+`probe`'s `{target}/duration_seconds` is the first histogram subject.
+
 `container.toml` is the first slice declared. The remaining ~300 subjects are a
 mechanical pass, and one worth doing carefully: the CI conformance job runs
 `sysinfo logs systemd hostspec probe` against a live bus, where zenkey-fleet

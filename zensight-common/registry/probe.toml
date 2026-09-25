@@ -24,7 +24,7 @@
 # acquire more than that.
 
 [registry]
-version = "1.5"
+version = "1.6"
 app = "zensight"
 convention = 1
 
@@ -49,6 +49,25 @@ type = "TelemetryPoint"
 cardinality = 512
 since = "1.0"
 description = "total elapsed, milliseconds. Published on a TIMEOUT too: the duration IS the diagnosis — 20 s of connect timeout is what the 2026-08-20 hairpin looked like, and recognising it took eight days"
+
+# #1151 — the check durations as a DISTRIBUTION (RFC 08 §2 v1.36), beside the
+# per-check `duration_ms` gauge rather than instead of it. A gauge says what
+# the last check took; this says how the checks are spread, and it aggregates:
+# the same target probed from three vantages sums into one fleet histogram,
+# where three p95 gauges could only be averaged, which is wrong. Cumulative
+# since the sensor started. Timeouts are observed too, at their duration — a
+# timeout bucket is the hairpin's signature. Buckets in seconds, 5 ms to 30 s.
+[[subject]]
+path = "{target}/duration_seconds"
+class = "telemetry"
+type = "TelemetryPoint"
+kind = "histogram"
+buckets = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]
+unit = "s"
+semantic = "duration"
+cardinality = 512
+since = "1.6"
+description = "the distribution of check durations, seconds, cumulative since the sensor started — timeouts included at their duration"
 
 [[subject]]
 path = "{target}/timeout"

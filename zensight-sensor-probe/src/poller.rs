@@ -81,6 +81,10 @@ pub struct Poller {
     /// feed to gate this behind, and the vantage → target structure is already
     /// visible in the telemetry this sensor publishes anyway.
     relations: zensight_sensor_core::relation::RelationSet,
+    /// Every check's duration per target, as a distribution cumulative since
+    /// the sensor started (#1151) — `{target}/duration_seconds`. Pruned with
+    /// the target, so a removed target's distribution goes with it.
+    durations: HashMap<String, zensight_common::HistogramValue>,
 }
 
 /// The one HTTP client every check shares.
@@ -202,6 +206,7 @@ impl Poller {
             due: HashMap::new(),
             relations,
             last: HashMap::new(),
+            durations: HashMap::new(),
         })
     }
 
@@ -241,6 +246,8 @@ impl Poller {
             let live: std::collections::HashSet<&str> =
                 targets.iter().map(|t| t.name.as_str()).collect();
             self.last.retain(|name, _| live.contains(name.as_str()));
+            self.durations
+                .retain(|name, _| live.contains(name.as_str()));
             self.due.retain(|name, _| live.contains(name.as_str()));
         }
 
@@ -358,6 +365,21 @@ impl Poller {
             if let Some(d) = r.duration_ms {
                 points.push((Subject::duration_ms(t), d));
             }
+            // The distribution (#1151): this check's duration joins the
+            // target's cumulative histogram over the declared buckets —
+            // timeouts included, at their duration, because the timeout
+            // bucket is the diagnosis. Published every sweep the target was
+            // checked, cumulative, so a consumer diffs two for a window.
+            let histogram = r.duration_ms.and_then(|ms| {
+                let subject = Subject::duration_seconds(t);
+                let bounds = subject.buckets()?;
+                let h = self
+                    .durations
+                    .entry(r.name.clone())
+                    .or_insert_with(|| zensight_common::HistogramValue::new(bounds));
+                h.observe(ms / 1000.0);
+                Some((subject, h.clone()))
+            });
             if let Some(h) = &r.http {
                 if let Some(s) = h.status {
                     points.push((Subject::http_status(t), s as f64));
@@ -421,6 +443,18 @@ impl Poller {
                     &subject,
                     TelemetryValue::Gauge(value),
                 )
+                .with_labels(labels.clone());
+                if self.publisher.publish_subject(&subject, &p).await.is_ok() {
+                    published += 1;
+                }
+            }
+            if let Some((subject, h)) = histogram {
+                let p = TelemetryPoint::for_subject(
+                    &self.source,
+                    &subject,
+                    TelemetryValue::Histogram(h),
+                )
+                .with_unit("s")
                 .with_labels(labels.clone());
                 if self.publisher.publish_subject(&subject, &p).await.is_ok() {
                     published += 1;

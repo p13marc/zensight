@@ -37,6 +37,10 @@ use crate::collector::{SharedCollector, StoredMetric};
 use crate::config::RemoteWriteConfig;
 use crate::mapping::PrometheusType;
 
+/// One sample a stored metric expands to: `(__name__, extra label, value)` —
+/// one for a counter/gauge/text, a whole family for a histogram (#1151).
+type ExpandedSample = (String, Option<(String, String)>, f64);
+
 /// Value of the `X-Prometheus-Remote-Write-Version` header.
 pub const REMOTE_WRITE_VERSION: &str = "0.1.0";
 
@@ -164,42 +168,8 @@ pub fn build_write_request_since(
     let advanced = std::cell::RefCell::new(Vec::new());
     let mut timeseries: Vec<TimeSeries> = metrics
         .iter()
-        .filter_map(|m| {
+        .flat_map(|m| {
             let mut advanced = advanced.borrow_mut();
-            let (value, extra_label) = match m.metric_type {
-                PrometheusType::Text => {
-                    let text = m.text_value.as_ref()?;
-                    let label_name = m.text_label.clone().unwrap_or_else(|| "value".to_string());
-                    // Same duplicate-name guard as `/metrics`: a structural
-                    // label always wins over the text (#753).
-                    if m.key.labels.iter().any(|(k, _)| k == &label_name) {
-                        (1.0, None)
-                    } else {
-                        (1.0, Some((label_name, text.clone())))
-                    }
-                }
-                _ => (m.value?, None),
-            };
-
-            let mut labels: Vec<Label> = Vec::with_capacity(m.key.labels.len() + 2);
-            labels.push(Label {
-                name: "__name__".to_string(),
-                value: m.emitted_name(),
-            });
-            for (k, v) in &m.key.labels {
-                if !v.is_empty() {
-                    labels.push(Label {
-                        name: k.clone(),
-                        value: v.clone(),
-                    });
-                }
-            }
-            if let Some((k, v)) = extra_label {
-                labels.push(Label { name: k, value: v });
-            }
-            // Spec: labels MUST be sorted lexicographically by name.
-            labels.sort_by(|a, b| a.name.cmp(&b.name));
-
             // The point's own timestamp, falling back to the push time only
             // when the sensor supplied none.
             let ts = if m.timestamp_ms > 0 {
@@ -210,17 +180,82 @@ pub fn build_write_request_since(
             if let Some(&prev) = last_pushed.get(&m.key)
                 && prev >= ts
             {
-                return None;
+                return Vec::new();
             }
+            // `(name, extra label, value)` per sample this metric expands to:
+            // one for a counter/gauge/text, the whole family for a histogram
+            // (#1151), spelled by the same helper `/metrics` uses.
+            let samples: Vec<ExpandedSample> = match m.metric_type {
+                PrometheusType::Text => {
+                    let Some(text) = m.text_value.as_ref() else {
+                        return Vec::new();
+                    };
+                    let label_name = m.text_label.clone().unwrap_or_else(|| "value".to_string());
+                    // Same duplicate-name guard as `/metrics`: a structural
+                    // label always wins over the text (#753).
+                    if m.key.labels.iter().any(|(k, _)| k == &label_name) {
+                        vec![(m.emitted_name(), None, 1.0)]
+                    } else {
+                        vec![(m.emitted_name(), Some((label_name, text.clone())), 1.0)]
+                    }
+                }
+                PrometheusType::Histogram => {
+                    let Some(h) = m.histogram.as_ref() else {
+                        return Vec::new();
+                    };
+                    // The `le` guard `/metrics` applies: a family whose own
+                    // labels carry `le` is refused, never sent duplicated.
+                    if m.key.labels.iter().any(|(k, _)| k == "le") {
+                        return Vec::new();
+                    }
+                    crate::mapping::histogram_samples(h)
+                        .into_iter()
+                        .map(|(suffix, le, v)| {
+                            (
+                                format!("{}{suffix}", m.emitted_name()),
+                                le.map(|le| ("le".to_string(), le)),
+                                v,
+                            )
+                        })
+                        .collect()
+                }
+                _ => match m.value {
+                    Some(v) => vec![(m.emitted_name(), None, v)],
+                    None => return Vec::new(),
+                },
+            };
             advanced.push((m.key.clone(), ts));
 
-            Some(TimeSeries {
-                labels,
-                samples: vec![Sample {
-                    value,
-                    timestamp: ts,
-                }],
-            })
+            samples
+                .into_iter()
+                .map(|(name, extra_label, value)| {
+                    let mut labels: Vec<Label> = Vec::with_capacity(m.key.labels.len() + 2);
+                    labels.push(Label {
+                        name: "__name__".to_string(),
+                        value: name,
+                    });
+                    for (k, v) in &m.key.labels {
+                        if !v.is_empty() {
+                            labels.push(Label {
+                                name: k.clone(),
+                                value: v.clone(),
+                            });
+                        }
+                    }
+                    if let Some((k, v)) = extra_label {
+                        labels.push(Label { name: k, value: v });
+                    }
+                    // Spec: labels MUST be sorted lexicographically by name.
+                    labels.sort_by(|a, b| a.name.cmp(&b.name));
+                    TimeSeries {
+                        labels,
+                        samples: vec![Sample {
+                            value,
+                            timestamp: ts,
+                        }],
+                    }
+                })
+                .collect::<Vec<_>>()
         })
         .collect();
 

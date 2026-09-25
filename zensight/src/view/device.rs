@@ -780,6 +780,7 @@ pub(crate) fn format_value_for_export(value: &TelemetryValue) -> String {
         TelemetryValue::Text(s) => s.clone(),
         TelemetryValue::Boolean(b) => b.to_string(),
         TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
+        TelemetryValue::Histogram(h) => h.summary(None),
     }
 }
 
@@ -1638,7 +1639,13 @@ pub fn cell_text(
             Some(v) => with_unit(fmt_num(v), &unit),
             None => format_value_for_export(&point.value),
         },
-        Presentation::Label | Presentation::Distribution => format_value_for_export(&point.value),
+        Presentation::Label => format_value_for_export(&point.value),
+        // A distribution renders as its summary — count, mean, estimated
+        // median and p95, each estimate marked — in the field's unit.
+        Presentation::Distribution => match &point.value {
+            TelemetryValue::Histogram(h) => h.summary(field.unit.as_deref()),
+            other => format_value_for_export(other),
+        },
     }
 }
 
@@ -2687,6 +2694,7 @@ fn format_value_display_with_full(value: &TelemetryValue) -> (String, Option<Str
         }
         TelemetryValue::Boolean(b) => (if *b { "true" } else { "false" }.to_string(), None),
         TelemetryValue::Binary(data) => (format!("<{} bytes>", data.len()), None),
+        TelemetryValue::Histogram(h) => (h.summary(None), None),
     }
 }
 
@@ -2698,6 +2706,7 @@ fn value_type_name(value: &TelemetryValue) -> &'static str {
         TelemetryValue::Text(_) => "text",
         TelemetryValue::Boolean(_) => "bool",
         TelemetryValue::Binary(_) => "binary",
+        TelemetryValue::Histogram(_) => "histogram",
     }
 }
 

@@ -107,8 +107,29 @@ into attributes.
 | `Counter(u64)` | Sum (monotonic) |
 | `Gauge(f64)` | Gauge |
 | `Boolean(bool)` | Gauge (0/1) |
+| `Histogram` (#1151) | Histogram (explicit bucket, cumulative) |
 | `Text(String)` | not exported as a metric |
 | `Binary(Vec<u8>)` | not exported |
+
+**How a histogram reaches OTLP.** A sensor publishes an *already aggregated*
+distribution, and the OTel Rust SDK (0.32) cannot accept one: there is no
+asynchronous histogram, no `MetricProducer`, and its `HistogramDataPoint`
+cannot be built outside the SDK. So the exporter keeps each series' last
+cumulative value, diffs the new one against it (a producer restart — counts
+going down — makes the new value its own window), and **replays** the delta
+into a synchronous `f64_histogram` created with the declared bounds: per
+bucket, that many `record` calls at a value inside the bucket. The SDK
+aggregates them back into exactly the sensor's counts and count. The values
+are placed so they add up to the delta's own `sum`; when no placement inside
+the buckets can (a `sum` its counts contradict) the closest one is used and
+`histogram_sum_inexact` counts it. The meter provider's view turns
+`record_min_max` **off** for these instruments — the min and max of replayed
+values would be values nobody observed. A malformed value, a histogram whose
+bounds change mid-flight, and a window above 1 000 000 observations are
+refused and counted (`histograms_refused`); new histogram series share the
+exporter's series cap, and a series that stops reporting is evicted with its
+instrument handle like any other. Exemplars: none, for the reason the
+Prometheus reference gives.
 
 Every data point carries `source` and `protocol` attributes plus the point's own
 labels. Export is periodic/batched every `export_interval_secs` (default 10 s),

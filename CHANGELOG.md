@@ -57,6 +57,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A histogram value type on the bus, end to end** (#1151; #381 folded in).
+  zenkey 0.9 (RFC 08 §2 v1.36) ratified `kind = "histogram"` with declared
+  `buckets` and left the payload shape to this profile; this is that shape and
+  every consumer of it. A latency distribution had nowhere to go but N quantile
+  gauges, which cannot be aggregated (averaging quantiles is the classic wrong
+  answer) and whose boundaries were declared nowhere.
+  - `TelemetryValue::Histogram(HistogramValue)`, tag `histogram`: `buckets`
+    (the declared upper bounds, `+Inf` implicit), non-cumulative `counts` with
+    the overflow last, `count`, `sum` — cumulative since the producer started,
+    a restart resetting it like a counter. `delta_since`, `quantile` (an
+    interpolated estimate) and `summary` on it.
+  - `registry::kind_matches` holds a histogram to its declared bounds bit for
+    bit and refuses a malformed one at the publish site.
+  - **probe** publishes `{target}/duration_seconds` (registry 1.6), every
+    check's duration as a distribution from 5 ms to 30 s, beside the
+    `duration_ms` gauge.
+  - **Prometheus**: one classic family — cumulative `_bucket{le}`, `+Inf` =
+    `_count`, `_sum`, `_count`, `# TYPE … histogram` — on `/metrics` and, from
+    the same helper, on remote-write. demo-smoke now runs the probe sensor and
+    checks the family on a real scrape (buckets monotonic, `+Inf` = `_count`).
+  - **OTLP**: an explicit-bucket Histogram over the declared bounds with the
+    sensor's exact counts and count. The SDK cannot accept a pre-aggregated
+    distribution, so each delta is replayed into a synchronous instrument at
+    values inside its buckets, placed to reproduce the true `sum` (counted when
+    impossible), with `record_min_max` off — replayed values are not
+    observations.
+  - The GUI renders a `Distribution` field as count, mean and estimated
+    p50/p95 (marked `≈`), and hands scripts those numbers; the store, the
+    historian and the rerun bridge skip a histogram and count it; a threshold
+    rule cannot target one.
+  - **Exemplars (#381): deliberately none.** The value type now exists; the
+    trace id does not — no sensor observes a traced request, and the only span
+    ids in the tree are synthesized from alert lifecycles. The decision and
+    what would change it are in the Prometheus exporter's reference.
+
 - **The browser's pixels: a WebCodecs H.264 tile and a JPEG preview tile**
   (#707, the third step of #704; `web/`). The iced tile's receive loop
   ported with its rules intact and its constants shared, so both clients'

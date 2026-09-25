@@ -240,6 +240,7 @@ async fn main() -> anyhow::Result<()> {
             alerts = stats.alerts_published,
             entities = stats.entities_published,
             ignored_binary = stats.ignored_binary,
+            ignored_histogram = stats.ignored_histogram,
             sink_errors = stats.sink_errors,
             "Final statistics"
         ),

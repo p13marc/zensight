@@ -45,6 +45,7 @@ impl SeriesKey {
         let kind = match identity.kind {
             MetricKind::Counter => PrometheusType::Counter,
             MetricKind::Text => PrometheusType::Text,
+            MetricKind::Histogram => PrometheusType::Histogram,
             _ => PrometheusType::Gauge,
         };
         let name = crate::mapping::apply_conventions(&base, kind, identity.unit.as_deref());
@@ -83,6 +84,8 @@ pub struct StoredMetric {
     pub value: Option<f64>,
     /// Text value (for text/info metrics).
     pub text_value: Option<String>,
+    /// The distribution, for a histogram (#1151).
+    pub histogram: Option<zensight_common::HistogramValue>,
     /// Label name the text value rides under, derived from the subject leaf
     /// (#752). `None` for numeric metrics.
     pub text_label: Option<String>,
@@ -123,7 +126,16 @@ impl StoredMetric {
             MetricKind::Counter => PrometheusType::Counter,
             MetricKind::Gauge => PrometheusType::Gauge,
             MetricKind::Text => PrometheusType::Text,
+            MetricKind::Histogram => PrometheusType::Histogram,
             MetricKind::Unsupported => return None,
+        };
+        let histogram = match &point.value {
+            // A malformed histogram is not exported at all: a `_bucket` series
+            // that decreases across `le`, or a `_count` that disagrees with
+            // `+Inf`, makes `histogram_quantile` return nonsense silently.
+            TelemetryValue::Histogram(h) if h.is_consistent() => Some(h.clone()),
+            TelemetryValue::Histogram(_) => return None,
+            _ => None,
         };
         let value = extract_numeric_value(&point.value);
         let text_value = match &point.value {
@@ -139,6 +151,7 @@ impl StoredMetric {
             metric_type,
             value,
             text_value,
+            histogram,
             text_label,
             help: identity.description.clone(),
             unit: identity.unit.clone(),
@@ -716,6 +729,32 @@ impl MetricCollector {
 
                             let label_str = format_labels(&labels);
                             write_or_count!(output, "{}{} 1", name, label_str);
+                        }
+                    }
+                    PrometheusType::Histogram => {
+                        // A histogram whose own labels already carry `le` would
+                        // emit a duplicate label on every bucket — refused, and
+                        // counted, never rendered invalid (#753's rule).
+                        if metric.key.labels.iter().any(|(k, _)| k == "le") {
+                            render_errors += 1;
+                            continue;
+                        }
+                        if let Some(h) = &metric.histogram {
+                            for (suffix, le, value) in crate::mapping::histogram_samples(h) {
+                                let mut labels = metric.key.labels.clone();
+                                if let Some(le) = le {
+                                    labels.push(("le".to_string(), le));
+                                    labels.sort_by(|a, b| a.0.cmp(&b.0));
+                                }
+                                write_or_count!(
+                                    output,
+                                    "{}{}{} {}",
+                                    metric.key.name,
+                                    suffix,
+                                    format_labels(&labels),
+                                    format_value(value)
+                                );
+                            }
                         }
                     }
                     _ => {
@@ -1313,6 +1352,82 @@ mod tests {
         assert!(output.contains("zensight_snmp_sysuptime_total{"));
         assert!(output.contains("source=\"router01\""));
         assert!(output.contains("12345"));
+    }
+
+    /// #1151: a histogram point renders as ONE classic histogram family —
+    /// cumulative `_bucket{le}` per declared bound, the `+Inf` bucket equal to
+    /// `_count`, then `_sum` and `_count` — under `# TYPE … histogram`, the
+    /// name keeping its `_seconds` unit suffix and never gaining `_total`.
+    #[test]
+    fn a_histogram_renders_as_one_classic_histogram_family() {
+        let collector = MetricCollector::new(
+            PrometheusConfig::default(),
+            AggregationConfig::default(),
+            FilterConfig::default(),
+        );
+        let bounds = zensight_common::registry::probe::Subject::duration_seconds("web")
+            .buckets()
+            .expect("the probe declares its buckets");
+        let mut h = zensight_common::HistogramValue::new(bounds);
+        for v in [0.004, 0.02, 0.02, 0.3, 45.0] {
+            h.observe(v);
+        }
+        let point = make_point("edge", "web/duration_seconds", TelemetryValue::Histogram(h));
+        collector.record(&key_for("probe", &point), &point);
+        let out = collector.render();
+        let name = "zensight_probe_duration_seconds";
+        assert!(out.contains(&format!("# TYPE {name} histogram")), "{out}");
+        let lines: Vec<&str> = out.lines().filter(|l| l.starts_with(name)).collect();
+        // 12 declared bounds + `+Inf` + `_sum` + `_count`.
+        assert_eq!(lines.len(), 15, "{lines:#?}");
+        let value_of = |needle: &str| -> String {
+            lines
+                .iter()
+                .find(|l| l.contains(needle))
+                .unwrap_or_else(|| panic!("no line with {needle}: {lines:#?}"))
+                .rsplit(' ')
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(value_of("le=\"0.005\""), "1", "cumulative: 0.004");
+        assert_eq!(value_of("le=\"0.025\""), "3", "cumulative: + two at 0.02");
+        assert_eq!(value_of("le=\"0.5\""), "4");
+        assert_eq!(value_of("le=\"30\""), "4", "45 s is past the last bound");
+        assert_eq!(value_of("le=\"+Inf\""), "5");
+        assert_eq!(value_of(&format!("{name}_count")), "5");
+        assert_eq!(value_of(&format!("{name}_sum")), "45.344");
+        assert!(
+            !out.contains(&format!("{name}_total")),
+            "a histogram is never a counter: {out}"
+        );
+        // Every bucket line carries the target's labels and one `le`, sorted.
+        for l in lines.iter().filter(|l| l.contains("_bucket")) {
+            assert_eq!(l.matches("le=").count(), 1, "{l}");
+        }
+    }
+
+    /// A malformed histogram is refused whole, never half-exported.
+    #[test]
+    fn a_malformed_histogram_is_not_exported() {
+        let collector = MetricCollector::new(
+            PrometheusConfig::default(),
+            AggregationConfig::default(),
+            FilterConfig::default(),
+        );
+        let bad = zensight_common::HistogramValue {
+            buckets: vec![1.0],
+            counts: vec![1, 1],
+            count: 7,
+            sum: 1.0,
+        };
+        let point = make_point(
+            "edge",
+            "web/duration_seconds",
+            TelemetryValue::Histogram(bad),
+        );
+        collector.record(&key_for("probe", &point), &point);
+        assert_eq!(collector.series_count(), 0);
     }
 
     #[test]

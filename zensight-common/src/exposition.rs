@@ -292,6 +292,9 @@ pub enum MetricKind {
     Gauge,
     /// A string value.
     Text,
+    /// A fixed-bucket distribution (#1151): a Prometheus `histogram`
+    /// family, an OTLP explicit-bucket Histogram.
+    Histogram,
     /// Nothing an exporter can represent (binary blobs).
     Unsupported,
 }
@@ -305,6 +308,7 @@ impl MetricKind {
             V::Counter(_) => MetricKind::Counter,
             V::Gauge(_) | V::Boolean(_) => MetricKind::Gauge,
             V::Text(_) => MetricKind::Text,
+            V::Histogram(_) => MetricKind::Histogram,
             V::Binary(_) => MetricKind::Unsupported,
         }
     }

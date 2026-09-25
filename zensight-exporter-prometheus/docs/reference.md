@@ -55,7 +55,22 @@ state/direction/device become labels.
 | `Gauge(f64)` | gauge |
 | `Boolean(bool)` | gauge (0/1) |
 | `Text(String)` | info (value 1, text carried as a label) |
+| `Histogram` (#1151) | histogram — one classic family |
 | `Binary(Vec<u8>)` | not exported |
+
+A **histogram** renders as one family under `# TYPE <name> histogram`: a
+`<name>_bucket{…,le="<bound>"}` per declared bound with the **cumulative**
+count, `le="+Inf"` equal to `<name>_count`, then `<name>_sum` and
+`<name>_count`. `le` is spelled the way a client library spells it (`0.005`,
+`1`, `2.5`), so `histogram_quantile` over ZenSight's series lines up with any
+other. The name keeps its unit suffix (`_seconds`) and never gains `_total`.
+A family whose own labels already carry `le` is refused rather than rendered
+with a duplicate label, and a malformed value (`count` not the sum of its
+counts) is not exported at all — a `_bucket` series that decreases across `le`
+makes `histogram_quantile` silently wrong. Remote-write expands a histogram
+into the same series through the same helper (`mapping::histogram_samples`),
+one watermark per histogram. demo-smoke runs the probe sensor and checks the
+family on a real scrape.
 
 ### Name and label sanitization
 
@@ -116,9 +131,17 @@ Extra `headers` (e.g. `Authorization`, `X-Scope-OrgID`) are attached to each pus
 - The `/metrics` endpoint keeps serving regardless.
 - Validation requires an `http(s)` URL and a non-zero interval when enabled.
 - The protobuf types are hand-written with `prost` derive, so no `protoc` is
-  needed at build time. Exemplars are deliberately omitted (would need a
-  histogram-shaped value type and a real trace id, neither of which the bus
-  carries).
+  needed at build time.
+- **Exemplars are deliberately omitted** (#1151, which folded in #381). The
+  histogram-shaped value type exists now; the trace id still does not. An
+  exemplar links *one observation* to the trace it happened in, and nothing a
+  sensor observes is a traced request — a probe check has no W3C trace
+  context, and the only span ids in this tree are the ones the OTel exporter
+  synthesizes from alert lifecycles, which no histogram observation belongs
+  to. Attaching either would publish a link to a trace that does not exist.
+  The day a producer observes requests that carry `traceparent`, the value
+  type is where the exemplar goes (one per bucket, with its trace id), and
+  both exporters then have a real one to emit.
 
 ### A push is delivered or it is retried (#1143)
 

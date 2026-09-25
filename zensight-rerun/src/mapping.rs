@@ -25,14 +25,19 @@ pub enum Class {
 
 /// Classify a telemetry point (02-mapping.md §2/§4).
 ///
-/// 1. `Binary` → `Ignore` (no meaningful Rerun rendering).
+/// 1. `Binary` and `Histogram` → `Ignore` (no meaningful Rerun scalar
+///    rendering; a histogram is counted separately so it is never mistaken
+///    for a blob).
 /// 2. A metric path under `events/` is the sensors' discrete control-plane
 ///    timeline (e.g. netlink `events/ipsec/...`, `events/route/...`) → `Event`
 ///    with the kind derived from the path.
 /// 3. `Text` → `Event(Other("text"))`, message = the text.
 /// 4. `Gauge`/`Counter`/`Boolean` → `Metric`.
 pub fn classify(point: &TelemetryPoint) -> Class {
-    if matches!(point.value, TelemetryValue::Binary(_)) {
+    if matches!(
+        point.value,
+        TelemetryValue::Binary(_) | TelemetryValue::Histogram(_)
+    ) {
         return Class::Ignore;
     }
     if let Some(rest) = point.metric.strip_prefix("events/") {
