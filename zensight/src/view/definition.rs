@@ -1235,6 +1235,9 @@ fn default_cell(
                     zensight_common::TelemetryValue::Text(t) => t.clone(),
                     other => format!("{other:?}"),
                 },
+                Presentation::Distribution => {
+                    crate::view::device::format_value_for_export(&point.value)
+                }
             },
             _ => "—".to_string(),
         },

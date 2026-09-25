@@ -773,7 +773,7 @@ fn escape_csv(s: &str) -> String {
 }
 
 /// Format a value for export.
-fn format_value_for_export(value: &TelemetryValue) -> String {
+pub(crate) fn format_value_for_export(value: &TelemetryValue) -> String {
     match value {
         TelemetryValue::Counter(v) => v.to_string(),
         TelemetryValue::Gauge(v) => v.to_string(),
@@ -1638,7 +1638,7 @@ pub fn cell_text(
             Some(v) => with_unit(fmt_num(v), &unit),
             None => format_value_for_export(&point.value),
         },
-        Presentation::Label => format_value_for_export(&point.value),
+        Presentation::Label | Presentation::Distribution => format_value_for_export(&point.value),
     }
 }
 
