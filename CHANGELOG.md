@@ -430,6 +430,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **zenkey 0.9, zenkey-build 0.9, zenkey-fleet 0.14** (zenkey release 0.10.0,
+  RFC v1.36). The one break in this tree was the GUI family model's match
+  over `SubjectKind`, which gains a `Distribution` presentation for the new
+  `histogram` kind (rendered as the value's own text until #1151 gives it a
+  value type). And the family model's binder now **delegates** to zenkey's
+  `RegistrySlice::bind` (zenkey #460) instead of carrying a private copy of
+  the matcher — the module said it would, once that shipped, and #1153's
+  lesson is why the copy is deleted rather than kept beside it. No wire or
+  config change.
+
 - **The chart and the groups panel are one `Message` variant each** (#1306,
   the road to #1261's "under 200"). `Message::Chart(chart::Action)` replaces
   the 23 chart variants (select/add/remove/toggle series, the windows and

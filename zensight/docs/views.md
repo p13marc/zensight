@@ -141,9 +141,11 @@ declared) and `description`. A trailing rest variable (`{metric...}`, the
 proxy producers' device trees) makes an **open** family whose field is named
 by the live tail. `FamilyModel::instances` folds a device's metric map into
 one **instance** per variable binding (`rack7/inlet`) with the latest point
-per field; `bind` is the private binder over zenkey's `SubjectPattern` with
-its precedence (literals before variables before rest), to be replaced by
-`RegistrySlice::bind` when zenkey #460 lands — not kept beside it.
+per field; `bind` delegates to zenkey's `RegistrySlice::bind` (zenkey #460,
+zenkey 0.9) — the generated parse's grammar and precedence, literals before
+variables before rest — and keeps only the index from a declaration to the
+family and field it became. The private matcher it carried until then is
+gone, not kept beside it.
 
 Two families may share a variable name and not a prefix — pve's
 `guest/{vmid}` and `backup/{vmid}` — and they stay two families; joining them

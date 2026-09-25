@@ -27,13 +27,13 @@
 //! Nothing in this module touches Iced. The renderers (#1258) read it; the
 //! ratchet in `app::system_view_tests` pins it at gate 2.
 //!
-//! **The binder is private, deliberately temporary.** Binding a live tail to
-//! a declared subject is `RegistrySlice::bind(class, tail)` in zenkey #460,
-//! which has not landed; this file carries the smallest copy that works
-//! (`SubjectPattern::matches` under `best_match` precedence) and nothing
-//! else. When #460 ships, [`FamilyModel::bind`] delegates to it and the
-//! `patterns` table goes — do not let the two live side by side (#1153's
-//! lesson about second copies).
+//! **The binder is zenkey's.** Binding a live tail to a declared subject is
+//! `RegistrySlice::bind(class, tail)` (zenkey #460, in zenkey 0.9): the
+//! generated parse's grammar and precedence, once, for every consumer. This
+//! module keeps only the index from a declaration to the family and field
+//! it became. It carried a private copy of the matcher until that shipped —
+//! #1153's lesson about second copies is why the copy is gone, not kept
+//! beside the delegation.
 
 use std::collections::BTreeMap;
 
@@ -53,6 +53,10 @@ pub enum Presentation {
     State,
     /// Text: a label.
     Label,
+    /// A histogram (RFC 08 §2, v1.36): a distribution over the declared
+    /// `buckets`, summarized — count, mean, estimated quantiles — never one
+    /// number pretending to be the value.
+    Distribution,
     /// The slice declared no kind, or one this build does not know.
     Unknown,
 }
@@ -94,6 +98,7 @@ impl Field {
             Some(SubjectKind::Gauge) => Presentation::Absolute,
             Some(SubjectKind::Bool) => Presentation::State,
             Some(SubjectKind::Text) => Presentation::Label,
+            Some(SubjectKind::Histogram) => Presentation::Distribution,
             None => Presentation::Unknown,
         }
     }
@@ -228,9 +233,12 @@ pub struct FamilyModel {
     /// The procedures the slice declares (#1261), so a view can offer a
     /// read call without a message per procedure. Declaration order.
     pub procedures: Vec<Procedure>,
-    /// The private binder (see the module doc): one pattern per declared
-    /// telemetry subject, with the family and field it belongs to.
-    patterns: Vec<(SubjectPattern, usize, usize)>,
+    /// The slice the model was derived from — what [`Self::bind`] asks.
+    slice: RegistrySlice,
+    /// Declared path → the `(family, field)` it became. A declaration that
+    /// did not become a field (a duplicate tail) is absent, and binds to
+    /// nothing.
+    fields_by_path: BTreeMap<String, (usize, usize)>,
 }
 
 impl FamilyModel {
@@ -238,7 +246,7 @@ impl FamilyModel {
     /// take part; state documents are the intake's (#1256).
     pub fn from_slice(slice: &RegistrySlice) -> Self {
         let mut families: Vec<Family> = Vec::new();
-        let mut patterns = Vec::new();
+        let mut fields_by_path = BTreeMap::new();
         for decl in slice
             .subjects
             .iter()
@@ -265,7 +273,7 @@ impl FamilyModel {
                 continue;
             }
             fam.fields.push(Field::from_decl(tail, decl));
-            patterns.push((pattern, family, fam.fields.len() - 1));
+            fields_by_path.insert(decl.path.clone(), (family, fam.fields.len() - 1));
         }
         let procedures = slice
             .procedures
@@ -288,7 +296,8 @@ impl FamilyModel {
             producer: slice.name.clone(),
             families,
             procedures,
-            patterns,
+            slice: slice.clone(),
+            fields_by_path,
         }
     }
 
@@ -325,31 +334,24 @@ impl FamilyModel {
     /// `{target}/total` when a slice declares both.
     pub fn bind(&self, tail: &str) -> Option<Binding> {
         let chunks: Vec<&str> = tail.split('/').collect();
-        let mut order: Vec<usize> = (0..self.patterns.len()).collect();
-        order.sort_by(|&a, &b| self.patterns[a].0.precedence_cmp(&self.patterns[b].0));
-        for idx in order {
-            let (pattern, family, field) = &self.patterns[idx];
-            let Some(binds) = pattern.matches(&chunks) else {
-                continue;
-            };
-            let fam = &self.families[*family];
-            let mut bindings = Vec::new();
-            let mut rest = None;
-            for (name, value) in binds {
-                if fam.vars.iter().any(|v| v == name) {
-                    bindings.push((name.to_string(), value));
-                } else {
-                    rest = Some(value);
-                }
+        let bound = self.slice.bind(Class::Telemetry, &chunks)?;
+        let &(family, field) = self.fields_by_path.get(&bound.decl.path)?;
+        let fam = &self.families[family];
+        let mut bindings = Vec::new();
+        let mut rest = None;
+        for (name, value) in bound.vars {
+            if fam.vars.iter().any(|v| v == name) {
+                bindings.push((name.to_string(), value));
+            } else {
+                rest = Some(value);
             }
-            return Some(Binding {
-                family: *family,
-                field: *field,
-                bindings,
-                rest,
-            });
         }
-        None
+        Some(Binding {
+            family,
+            field,
+            bindings,
+            rest,
+        })
     }
 
     /// Fold a device's latest points into instances, per family.
