@@ -127,7 +127,10 @@ wrong address here" cannot be written down.
 
 - **Latency thresholds.** `duration_ms` and `http_ttfb_ms` are published and an
   operator can alert on them downstream. A built-in "slow" rule would need a
-  number this sensor cannot know.
+  number this sensor cannot know. The distribution is published too —
+  `{target}/duration_seconds`, a histogram (#1151) — so a downstream rule can
+  ask for a quantile over a window (`histogram_quantile` over its buckets)
+  instead of reading one check at a time.
 - **Content beyond a literal substring.** A body matcher that grows a query
   language becomes a second, worse test framework.
 - **That the service is reachable from the internet.** A probe running on the

@@ -283,7 +283,12 @@ impl SampleValue {
             TelemetryValue::Counter(v) => Some(SampleValue::Counter(*v)),
             TelemetryValue::Gauge(v) => Some(SampleValue::Gauge(*v)),
             TelemetryValue::Boolean(b) => Some(SampleValue::Bool(*b)),
-            TelemetryValue::Text(_) | TelemetryValue::Binary(_) => None,
+            // A distribution is not a sample (#1151): the tiers hold one
+            // number per instant, and any one number chosen from a histogram
+            // would be an estimate stored as a measurement.
+            TelemetryValue::Text(_) | TelemetryValue::Binary(_) | TelemetryValue::Histogram(_) => {
+                None
+            }
         }
     }
 
@@ -532,8 +537,9 @@ pub fn telemetry_to_f64(value: &TelemetryValue) -> Option<f64> {
         // Booleans become a 0/1 step series (#126) so flap-prone signals (iface
         // up/carrier, route present, wg up) get history + trend, not a snapshot.
         TelemetryValue::Boolean(b) => Some(if *b { 1.0 } else { 0.0 }),
-        // Text/binary aren't numeric series — skip, don't fake a 0.
-        TelemetryValue::Text(_) | TelemetryValue::Binary(_) => None,
+        // Text/binary aren't numeric series — skip, don't fake a 0. Nor is a
+        // histogram (#1151): no one number is its value.
+        TelemetryValue::Text(_) | TelemetryValue::Binary(_) | TelemetryValue::Histogram(_) => None,
     }
 }
 

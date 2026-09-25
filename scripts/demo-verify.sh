@@ -81,7 +81,7 @@ die() {
 echo "==> building"
 cargo build $relflag --locked -p zensight-exporter-prometheus -p zensight-exporter-otel \
     -p zensight-sensor-sysinfo -p zensight-sensor-netlink -p zensight-historian \
-    -p zensight-desired -p zensight-correlator >/dev/null
+    -p zensight-desired -p zensight-correlator -p zensight-sensor-probe >/dev/null
 # The one-shot @rpc client the historian phase queries with (#912). An
 # example, not a binary: it is a test fixture with a `main`, and shipping it
 # in the release tarball would suggest otherwise.
@@ -101,7 +101,7 @@ cargo build $relflag --locked -p zensight >/dev/null
 # `cargo build` says a binary exists somewhere. This says it exists HERE.
 require_bins "$BIN/zensight-exporter-prometheus" "$BIN/zensight-exporter-otel" \
     "$BIN/zensight-sensor-sysinfo" "$BIN/zensight-sensor-netlink" "$BIN/zensight-historian" \
-    "$BIN/zensight-desired" "$BIN/zensight-correlator" "$BIN/examples/historian-query" \
+    "$BIN/zensight-sensor-probe" "$BIN/zensight-desired" "$BIN/zensight-correlator" "$BIN/examples/historian-query" \
     "$BIN/examples/rpc_get" "$BIN/examples/state_watch" "$BIN/zensight"
 
 tmp="$(mktemp -d)"
@@ -167,6 +167,20 @@ echo "==> starting netlink sensor"
 ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
     "$BIN/zensight-sensor-netlink" --config "$tmp/netlink.json5" \
     >"$tmp/netlink.log" 2>&1 &
+pids+=($!)
+
+# The probe sensor (#1151), so a HISTOGRAM crosses a real scrape. It checks
+# one thing that is always there — the exporter's own scrape port, over TCP —
+# and the first sweep runs at start, so its `duration_seconds` distribution
+# arrives without waiting out the 60 s interval. Unprivileged: a TCP connect.
+echo "==> starting probe sensor (one TCP target: the scrape port)"
+sed -E "s|^(\s*)targets: \[|\1targets: [ { name: \"scrape\", kind: \"tcp\", target: \"$SCRAPE\" },|" \
+    "$tmp/probe.json5" > "$tmp/probe-ci.json5"
+grep -q 'name: "scrape"' "$tmp/probe-ci.json5" \
+    || die "could not add the CI target to probe.json5 — its 'targets: [' line moved"
+ZENSIGHT_ZENOH_CONNECT="$HUB" ZENSIGHT_ZENOH_SCOUTING=false \
+    "$BIN/zensight-sensor-probe" --config "$tmp/probe-ci.json5" \
+    >"$tmp/probe.log" 2>&1 &
 pids+=($!)
 
 echo "==> waiting for telemetry to reach the exporter"
@@ -272,6 +286,49 @@ PY
 )
 [[ -z "$dupes" ]] || die "duplicate label name in series:
 $dupes"
+
+# --- A histogram crosses the scrape whole (#1151) ---------------------------
+#
+# The probe's `duration_seconds` is a `TelemetryValue::Histogram`. On the
+# wire it must be ONE classic histogram family: `# TYPE … histogram`, a
+# `_bucket` per declared bound plus `le="+Inf"`, non-decreasing across `le`,
+# the `+Inf` bucket equal to `_count`, and a `_sum`. Any one of those broken
+# makes `histogram_quantile` silently wrong rather than failing.
+for _ in $(seq 30); do
+    grep -q '^zensight_probe_duration_seconds_count' <<<"$metrics" && break
+    still_running "${pids[@]:-}" || break
+    sleep 1
+    metrics=$(curl -sf "http://$SCRAPE/metrics") || die "/metrics did not answer"
+done
+hist=$(python3 - "$metrics" <<'HIST'
+import re, sys
+name = "zensight_probe_duration_seconds"
+lines = sys.argv[1].splitlines()
+if f"# TYPE {name} histogram" not in lines:
+    print(f"no '# TYPE {name} histogram' line"); sys.exit()
+buckets, count, total = [], None, None
+for l in lines:
+    if l.startswith(name + "_bucket{"):
+        le = re.search(r'le="([^"]+)"', l).group(1)
+        buckets.append((float("inf") if le == "+Inf" else float(le), float(l.rsplit(" ", 1)[1])))
+    elif l.startswith(name + "_count"):
+        count = float(l.rsplit(" ", 1)[1])
+    elif l.startswith(name + "_sum"):
+        total = float(l.rsplit(" ", 1)[1])
+problems = []
+if len(buckets) < 2: problems.append(f"{len(buckets)} bucket line(s)")
+if [b for b, _ in buckets] != sorted(b for b, _ in buckets): problems.append("le out of order")
+if any(b[1] > a[1] for b, a in zip(buckets, buckets[1:])): problems.append("a bucket DECREASES across le")
+if not buckets or buckets[-1][0] != float("inf"): problems.append('no le="+Inf" bucket')
+elif count is None or buckets[-1][1] != count: problems.append(f"+Inf {buckets[-1][1]} != _count {count}")
+if total is None: problems.append("no _sum")
+if count is not None and count < 1: problems.append("_count is 0: no check was observed")
+print("; ".join(problems))
+HIST
+)
+[[ -z "$hist" ]] || die "the probe's duration histogram is not a valid histogram family: $hist
+$(grep '^zensight_probe_duration_seconds' <<<"$metrics" || echo '(no zensight_probe_duration_seconds series at all)')$(logs_note "$tmp" "$tmp/probe.log")"
+echo "     histogram: zensight_probe_duration_seconds — buckets monotonic, +Inf = _count"
 
 # --- The semconv path fired, not merely "some series exist" ----------------
 grep -q '^zensight_system_cpu_utilization' <<<"$metrics" \

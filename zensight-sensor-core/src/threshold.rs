@@ -527,7 +527,10 @@ fn numeric(value: &TelemetryValue) -> Option<f64> {
         // natural rule anyone will write, and refusing it would send them to
         // write `up < 1` instead.
         TelemetryValue::Boolean(b) => Some(f64::from(u8::from(*b))),
-        TelemetryValue::Text(_) | TelemetryValue::Binary(_) => None,
+        // A distribution is not one number (#1151). A rule over its mean or a
+        // quantile would be a threshold on an estimate this sensor invented;
+        // the rule is written against a gauge the producer publishes instead.
+        TelemetryValue::Text(_) | TelemetryValue::Binary(_) | TelemetryValue::Histogram(_) => None,
     }
 }
 

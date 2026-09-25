@@ -58,12 +58,39 @@ pub fn kind_matches(
     if ok {
         return Ok(());
     }
+    // A histogram (RFC 08 §2, v1.36) is judged twice: the variant, and its
+    // bounds against the declared `buckets` — equal bit for bit, or two
+    // producers of one subject are not comparable, which is the whole reason
+    // the declaration is required. A malformed value is refused here too.
+    if let (K::Histogram, V::Histogram(h)) = (declared, value) {
+        let declared_bounds = subject.buckets().unwrap_or_default();
+        if !h.same_bounds(declared_bounds) {
+            return Err(format!(
+                "{producer} telemetry {metric:?} is a histogram over {:?}, but the registry \
+                 declares buckets = {declared_bounds:?} (RFC 08 §2): publish over the declared \
+                 bounds, or change the declaration in zensight-common/registry/{producer}.toml",
+                h.buckets
+            ));
+        }
+        if !h.is_consistent() {
+            return Err(format!(
+                "{producer} telemetry {metric:?} is a malformed histogram: {} count(s) for {} \
+                 bound(s), count {} against a sum of counts of {}",
+                h.counts.len(),
+                h.buckets.len(),
+                h.count,
+                h.counts.iter().sum::<u64>()
+            ));
+        }
+        return Ok(());
+    }
     let got = match value {
         V::Counter(_) => "counter",
         V::Gauge(_) => "gauge",
         V::Boolean(_) => "bool",
         V::Text(_) => "text",
         V::Binary(_) => "binary",
+        V::Histogram(_) => "histogram",
     };
     Err(format!(
         "{producer} telemetry {metric:?} is declared kind = {:?} but published as {got}. \
@@ -73,4 +100,57 @@ pub fn kind_matches(
          (a changed kind is incompatible: retire and add a sibling)",
         declared.token()
     ))
+}
+
+#[cfg(test)]
+mod histogram_kind_tests {
+    use super::{kind_matches, probe};
+    use crate::{HistogramValue, TelemetryValue};
+
+    fn declared() -> &'static [f64] {
+        probe::Subject::duration_seconds("web")
+            .buckets()
+            .expect("the probe declares its buckets")
+    }
+
+    /// #1151: a histogram subject accepts a histogram over exactly its
+    /// declared bounds, and refuses one over any other bounds, a malformed
+    /// one, and a scalar.
+    #[test]
+    fn a_histogram_subject_holds_the_value_to_its_declared_bounds() {
+        let metric = "web/duration_seconds";
+        let mut ok = HistogramValue::new(declared());
+        ok.observe(0.02);
+        assert_eq!(
+            kind_matches("probe", metric, &TelemetryValue::Histogram(ok.clone())),
+            Ok(())
+        );
+
+        let other = HistogramValue::new(&[0.1, 1.0]);
+        let e = kind_matches("probe", metric, &TelemetryValue::Histogram(other)).unwrap_err();
+        assert!(e.contains("declares buckets"), "{e}");
+
+        let mut bad = ok;
+        bad.count += 1;
+        let e = kind_matches("probe", metric, &TelemetryValue::Histogram(bad)).unwrap_err();
+        assert!(e.contains("malformed histogram"), "{e}");
+
+        let e = kind_matches("probe", metric, &TelemetryValue::Gauge(0.02)).unwrap_err();
+        assert!(
+            e.contains("declared kind = \"histogram\" but published as gauge"),
+            "{e}"
+        );
+    }
+
+    /// And a histogram published under a gauge subject is the variant
+    /// mismatch it always was.
+    #[test]
+    fn a_histogram_on_a_gauge_subject_is_refused() {
+        let h = HistogramValue::new(&[1.0]);
+        let e = kind_matches("probe", "web/rtt_p95_ms", &TelemetryValue::Histogram(h));
+        if let Some(k) = probe::Subject::rtt_p95_ms("web").kind() {
+            assert_eq!(k, zenkey::SubjectKind::Gauge);
+            assert!(e.unwrap_err().contains("published as histogram"));
+        }
+    }
 }

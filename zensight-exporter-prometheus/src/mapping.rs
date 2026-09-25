@@ -146,6 +146,10 @@ pub enum PrometheusType {
     /// `_info` suffix is load-bearing: it keeps a text family from ever sharing
     /// a `# TYPE` block with a numeric family of the same name.
     Text,
+    /// A `TelemetryValue::Histogram` (#1151): a classic histogram family —
+    /// `<name>_bucket{le=…}` cumulative per bound and `+Inf`, then
+    /// `<name>_sum` and `<name>_count`, all under one `# TYPE … histogram`.
+    Histogram,
     Untyped,
 }
 
@@ -157,6 +161,7 @@ impl PrometheusType {
             TelemetryValue::Gauge(_) => PrometheusType::Gauge,
             TelemetryValue::Boolean(_) => PrometheusType::Gauge,
             TelemetryValue::Text(_) => PrometheusType::Text,
+            TelemetryValue::Histogram(_) => PrometheusType::Histogram,
             TelemetryValue::Binary(_) => PrometheusType::Untyped,
         }
     }
@@ -170,6 +175,7 @@ impl PrometheusType {
             PrometheusType::Counter => "counter",
             PrometheusType::Gauge => "gauge",
             PrometheusType::Text => "gauge",
+            PrometheusType::Histogram => "histogram",
             PrometheusType::Untyped => "untyped",
         }
     }
@@ -213,6 +219,39 @@ pub fn clamp_text(text: &str) -> String {
     cleaned
 }
 
+/// The samples a histogram family expands to (#1151), in exposition order:
+/// one `_bucket` per declared bound with its **cumulative** count and `le`,
+/// the `+Inf` bucket (= `count`), then `_sum` and `_count`. `/metrics` and
+/// remote-write both spell a histogram through this, so the two can never
+/// disagree about a series (the rule #752 set for text).
+///
+/// Each entry is `(name suffix, le, value)`; `le` is `None` for `_sum` and
+/// `_count`.
+pub fn histogram_samples(
+    h: &zensight_common::HistogramValue,
+) -> Vec<(&'static str, Option<String>, f64)> {
+    let cumulative = h.cumulative();
+    let mut out = Vec::with_capacity(h.buckets.len() + 3);
+    for (bound, c) in h.buckets.iter().zip(&cumulative) {
+        out.push(("_bucket", Some(format_le(*bound)), *c as f64));
+    }
+    out.push(("_bucket", Some("+Inf".to_string()), h.count as f64));
+    out.push(("_sum", None, h.sum));
+    out.push(("_count", None, h.count as f64));
+    out
+}
+
+/// A bucket bound as an `le` label value: Prometheus's own float spelling
+/// (`0.005`, `1`, `2.5`), so a `histogram_quantile` over our series and one
+/// over a client library's line up bucket for bucket.
+pub fn format_le(bound: f64) -> String {
+    if bound.fract() == 0.0 && bound.abs() < 1e15 {
+        format!("{bound:.0}")
+    } else {
+        format!("{bound}")
+    }
+}
+
 /// Extract a numeric value from TelemetryValue for Prometheus.
 ///
 /// Returns None for values that can't be represented as numbers (Text, Binary).
@@ -223,6 +262,8 @@ pub fn extract_numeric_value(value: &TelemetryValue) -> Option<f64> {
         TelemetryValue::Boolean(v) => Some(if *v { 1.0 } else { 0.0 }),
         TelemetryValue::Text(_) => None,
         TelemetryValue::Binary(_) => None,
+        // No one number is a distribution's value; see `histogram_samples`.
+        TelemetryValue::Histogram(_) => None,
     }
 }
 

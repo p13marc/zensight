@@ -14,6 +14,8 @@ fn every_registered_family_has_an_emitter() {
     let emitted: Vec<String> = [
         "forge/up",
         "forge/duration_ms",
+        // The distribution beside it (#1151).
+        "forge/duration_seconds",
         "forge/timeout",
         "forge/http_status",
         "forge/http_ttfb_ms",

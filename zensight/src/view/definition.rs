@@ -628,6 +628,20 @@ fn dyn_of(v: &zensight_common::TelemetryValue) -> Dynamic {
         Boolean(b) => Dynamic::from(*b),
         Text(t) => Dynamic::from(t.clone()),
         Binary(b) => Dynamic::from(format!("<{} bytes>", b.len())),
+        // A distribution reaches a script as its summary numbers (#1151):
+        // the count, the sum, the mean and the estimated median and p95 —
+        // a slot can sort by a mean or label a tail, never pretend one
+        // number is the value. An absent statistic is unit, not 0.
+        Histogram(h) => {
+            let mut m = Map::new();
+            let opt = |v: Option<f64>| v.map(Dynamic::from).unwrap_or(Dynamic::UNIT);
+            m.insert("count".into(), Dynamic::from(h.count as f64));
+            m.insert("sum".into(), Dynamic::from(h.sum));
+            m.insert("mean".into(), opt(h.mean()));
+            m.insert("p50".into(), opt(h.quantile(0.5)));
+            m.insert("p95".into(), opt(h.quantile(0.95)));
+            Dynamic::from_map(m)
+        }
     }
 }
 
@@ -1235,9 +1249,12 @@ fn default_cell(
                     zensight_common::TelemetryValue::Text(t) => t.clone(),
                     other => format!("{other:?}"),
                 },
-                Presentation::Distribution => {
-                    crate::view::device::format_value_for_export(&point.value)
-                }
+                Presentation::Distribution => match &point.value {
+                    zensight_common::TelemetryValue::Histogram(h) => {
+                        h.summary(field.unit.as_deref())
+                    }
+                    other => crate::view::device::format_value_for_export(other),
+                },
             },
             _ => "—".to_string(),
         },

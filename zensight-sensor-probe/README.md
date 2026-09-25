@@ -86,6 +86,14 @@ interval. A check that can outlive its own tick is queued, not bounded.
 | `ntp` | **clock offset, delay, stratum, leap and reference id** from an SNTP query (RFC 4330) — one UDP exchange, no privilege, and it never sets the clock |
 | `burst` | **latency, jitter and loss for a link** — `count` probes `spacing_ms` apart in one interval, reduced to rtt min/avg/max/p95, mean absolute IPDV and loss % |
 
+Every kind also publishes its check durations as a **distribution**,
+`{target}/duration_seconds` (#1151): a histogram over declared buckets from
+5 ms to 30 s, cumulative since the sensor started, timeouts included at their
+duration. It sits beside the per-check `duration_ms` gauge rather than
+replacing it: the gauge says what the last check took, the histogram how the
+checks are spread — and unlike three p95 gauges from three vantages, three
+histograms of one target sum into one honest fleet distribution.
+
 ### What the `ntp` check does and does not tell you
 
 **`offset_ms` is measured against the probe host's own clock**, which is the

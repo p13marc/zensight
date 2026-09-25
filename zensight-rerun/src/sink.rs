@@ -77,6 +77,9 @@ pub struct WorkerStats {
     pub entities_published: u64,
     /// `Binary` values (unrenderable) — counted, never logged.
     pub ignored_binary: u64,
+    /// `Histogram` values (#1151) — a distribution has no one scalar to plot;
+    /// counted apart from blobs, never logged.
+    pub ignored_histogram: u64,
     /// Points suppressed by the per-series sampler.
     pub sampled_out: u64,
     /// Counter samples absorbed by the rate converter (first sample / reset).
@@ -187,7 +190,10 @@ impl SinkWorker {
     fn handle_point(&mut self, item: TelemetryItem) {
         let TelemetryItem { producer, point } = item;
         match classify(&point) {
-            Class::Ignore => self.stats.ignored_binary += 1,
+            Class::Ignore => match point.value {
+                TelemetryValue::Histogram(_) => self.stats.ignored_histogram += 1,
+                _ => self.stats.ignored_binary += 1,
+            },
             Class::Metric => {
                 let path = metric_entity_path(&producer, &point, &self.index);
                 // Sampler first, rate converter after: a sub-sampled counter
@@ -220,8 +226,10 @@ impl SinkWorker {
                             self.publish_metric(&point, &raw_path, v as f64);
                         }
                     }
-                    // classify() never routes Text/Binary here.
-                    TelemetryValue::Text(_) | TelemetryValue::Binary(_) => {}
+                    // classify() never routes Text/Binary/Histogram here.
+                    TelemetryValue::Text(_)
+                    | TelemetryValue::Binary(_)
+                    | TelemetryValue::Histogram(_) => {}
                 }
             }
             Class::Event(kind) => {

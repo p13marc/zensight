@@ -283,6 +283,7 @@ fn format_value(value: &TelemetryValue) -> String {
         TelemetryValue::Text(s) => s.clone(),
         TelemetryValue::Boolean(b) => if *b { "true" } else { "false" }.to_string(),
         TelemetryValue::Binary(data) => format!("<{} bytes>", data.len()),
+        TelemetryValue::Histogram(h) => h.summary(None),
     }
 }
 

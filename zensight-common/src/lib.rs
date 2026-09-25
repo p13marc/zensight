@@ -32,6 +32,7 @@ pub mod evidence;
 pub mod exposition;
 pub mod gpu;
 pub mod health;
+pub mod histogram;
 pub mod history;
 pub mod hostspec;
 pub mod impact;
@@ -110,6 +111,7 @@ pub use health::{
     CgroupSelf, DeviceLiveness, DeviceStatus, ErrorReport, ErrorType, HealthSnapshot, HealthStatus,
     LadderEviction, LadderState, SelfStats, SensorInfo, TableStats,
 };
+pub use histogram::HistogramValue;
 pub use interfaces::{IfStatus, InterfaceCounters, InterfaceEntry, InterfaceRates, InterfaceTable};
 pub use keyexpr::{
     alias_key, all_alerts_wildcard, all_alias_wildcard, all_assertion_wildcard,

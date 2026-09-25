@@ -125,6 +125,12 @@ pub enum TelemetryValue {
     /// Binary data.
     #[serde(rename = "binary")]
     Binary(Vec<u8>),
+
+    /// A fixed-bucket distribution, cumulative since the producer started
+    /// (#1151; RFC 08 §2 v1.36 `kind = "histogram"`). Its `buckets` equal the
+    /// subject's declared ones — see [`crate::HistogramValue`].
+    #[serde(rename = "histogram")]
+    Histogram(crate::HistogramValue),
 }
 
 impl From<u64> for TelemetryValue {
