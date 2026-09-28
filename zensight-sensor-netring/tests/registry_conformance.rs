@@ -44,6 +44,12 @@ fn every_registered_family_has_an_emitter() {
     push!(map::flow_by_l4_points("h", 900, 5, 80, 3, 20, 1));
     push!(map::tcp_closed_points("h", 4, 2, 1));
     push!(map::tcp_reset_points("h", 3, 1));
+    push!(map::stream_loss_points("h", 2, 1_460));
+    push!(map::parser_health_points(
+        "h",
+        &[(("tls", "parse_error"), 1)],
+        &[(("tls", "stream_gap"), 1)],
+    ));
 
     // Both capture backends: AF_PACKET keeps only a freeze count distinct,
     // AF_XDP keeps every drop cause — different families, not different values.
@@ -54,6 +60,7 @@ fn every_registered_family_has_an_emitter() {
         3,
         0.003,
         &CaptureDrops::AfPacket { freezes: 2 },
+        Some(4),
     ));
     push!(map::capture_points(
         "h",
@@ -69,6 +76,7 @@ fn every_registered_family_has_an_emitter() {
             tx_invalid_descs: 1,
             tx_ring_empty_descs: 1,
         },
+        None,
     ));
     // Both shed policies: the leaf name is chosen by policy, so one call only
     // ever covers one of the two families.

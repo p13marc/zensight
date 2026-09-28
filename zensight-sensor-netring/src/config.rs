@@ -1,5 +1,7 @@
 //! Configuration for the netring sensor.
 
+use std::time::Duration;
+
 use serde::{Deserialize, Serialize};
 use zensight_sensor_core::{LoggingConfig, SensorConfig, ZenohConfig};
 
@@ -61,6 +63,12 @@ pub struct NetringConfig {
     /// the choice; explicit values force it. `pcap` always overrides (replay).
     #[serde(default)]
     pub backend: BackendKind,
+    /// Duplicate-frame filtering before anything else sees a frame (netring
+    /// 0.31.1). `auto` (default) arms the loopback profile when an interface is
+    /// `lo` — the kernel hands a capture on `lo` every packet twice, doubling
+    /// packet/byte counts and faking retransmits — and nothing otherwise.
+    #[serde(default)]
+    pub dedup: DedupMode,
     /// Replay an offline pcap instead of live capture (no privileges needed).
     #[serde(default)]
     pub pcap: Option<String>,
@@ -530,6 +538,46 @@ pub enum BackendKind {
     AfXdp,
 }
 
+/// Duplicate-frame filtering (netring 0.31.1 `MonitorBuilder::dedup`). The
+/// filter is a template: every capture source gets its own ring and counters.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DedupMode {
+    /// `loopback` when a configured interface is `lo`, `off` otherwise
+    /// (including pcap replay: a file's duplicates are the file's content).
+    #[default]
+    Auto,
+    /// No filtering.
+    Off,
+    /// The `lo` profile: 1 ms window, direction-aware — drops the outgoing /
+    /// incoming twin the kernel delivers on loopback and nothing else, so it is
+    /// harmless on a NIC. Inert where frames carry no direction (legacy pcap
+    /// replay): use `content` there.
+    Loopback,
+    /// Direction-agnostic content hash over a 5 ms window: for SPAN ports and
+    /// bridges that deliver a frame twice, and for replaying such a capture.
+    Content,
+}
+
+impl DedupMode {
+    /// The window `content` dedups over: longer than a SPAN/bridge duplicate
+    /// gap, far shorter than any TCP retransmission timeout.
+    pub const CONTENT_WINDOW: Duration = Duration::from_millis(5);
+    /// Ring entries `content` remembers per source.
+    pub const CONTENT_RING: usize = 1024;
+
+    /// What `auto` means for this config: the mode actually armed.
+    pub fn resolve(self, interfaces: &[String], pcap: Option<&str>) -> DedupMode {
+        match self {
+            DedupMode::Auto if pcap.is_none() && interfaces.iter().any(|i| i == "lo") => {
+                DedupMode::Loopback
+            }
+            DedupMode::Auto => DedupMode::Off,
+            explicit => explicit,
+        }
+    }
+}
+
 /// Capture-overload detection config (netring 0.27). Drives an
 /// `OverloadDetector` off the windowed drop-rate with Suricata-style hysteresis
 /// (enter high, recover low after N calm windows) so it doesn't flap.
@@ -992,6 +1040,32 @@ impl SensorConfig for NetringSensorConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `auto` arms the loopback profile exactly when a live interface is `lo`:
+    /// never on a NIC-only config, never on replay (a file's duplicates are
+    /// its content), and an explicit mode is never second-guessed.
+    #[test]
+    fn dedup_auto_resolves_to_loopback_only_on_live_lo() {
+        let ifs = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let auto = DedupMode::Auto;
+        assert_eq!(auto.resolve(&ifs(&["lo"]), None), DedupMode::Loopback);
+        assert_eq!(
+            auto.resolve(&ifs(&["eth0", "lo"]), None),
+            DedupMode::Loopback
+        );
+        assert_eq!(auto.resolve(&ifs(&["eth0"]), None), DedupMode::Off);
+        assert_eq!(auto.resolve(&ifs(&["lo"]), Some("x.pcap")), DedupMode::Off);
+        assert_eq!(auto.resolve(&[], None), DedupMode::Off);
+        assert_eq!(DedupMode::Off.resolve(&ifs(&["lo"]), None), DedupMode::Off);
+        assert_eq!(
+            DedupMode::Content.resolve(&[], Some("x.pcap")),
+            DedupMode::Content
+        );
+        // Absent key → auto; the JSON spelling is lowercase.
+        let m: DedupMode = serde_json::from_str("\"content\"").unwrap();
+        assert_eq!(m, DedupMode::Content);
+        assert_eq!(DedupMode::default(), DedupMode::Auto);
+    }
 
     /// The shipped example config must physically spell out the opt-in detectors.
     ///

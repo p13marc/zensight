@@ -8,7 +8,7 @@ use zensight_common::Format;
 use zensight_sensor_core::{AdvancedPublisherConfig, AdvancedPublisherRegistry, AlertReporter};
 
 use crate::map;
-use crate::monitor::{MonitorChannels, dns_snapshot, to_view};
+use crate::monitor::{MonitorChannels, StreamHealth, dns_snapshot, to_view};
 
 /// Drain telemetry points and publish them. Also emits periodic flow aggregates
 /// from the shared counters.
@@ -53,6 +53,7 @@ pub async fn run_drains(
     let tls_inventory = channels.tls_inventory.clone();
     let enc_dns = channels.enc_dns.clone();
     let l4 = channels.l4.clone();
+    let stream = channels.stream.clone();
     let icmp = channels.icmp.clone();
     let dns = channels.dns.clone();
     let http = channels.http.clone();
@@ -131,6 +132,17 @@ pub async fn run_drains(
                 l4.closed_fin.load(Ordering::Relaxed),
                 l4.closed_rst.load(Ordering::Relaxed),
                 l4.closed_idle.load(Ordering::Relaxed),
+            ))
+            // Stream loss + L7 parser stops (netring 0.31 / flowscope 0.25).
+            .chain(map::stream_loss_points(
+                sensor_id,
+                stream.reassembly_gaps.load(Ordering::Relaxed),
+                stream.reassembly_gap_bytes.load(Ordering::Relaxed),
+            ))
+            .chain(map::parser_health_points(
+                sensor_id,
+                &StreamHealth::snapshot(&stream.parser_closed),
+                &StreamHealth::snapshot(&stream.parser_side_stopped),
             ))
             .collect();
 

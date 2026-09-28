@@ -31,14 +31,26 @@ Collector gating is noted per family — a family is only published when its
 | `flow/bytes_total` | Counter | bytes across completed flows |
 | `flow/packets_total` | Counter | packets across completed flows |
 | `flow/retransmits_total` | Counter | retransmits across completed flows |
+| `flow/reassembly_gaps_total` | Counter | holes the reassembler skipped in TCP byte streams, across completed flows |
+| `flow/reassembly_gap_bytes_total` | Counter | bytes those holes were missing |
+
+The two `reassembly_*` counters (flowscope 0.25) are capture loss *inside the
+streams the L7 parsers read*: a packet the tap never delivered, an asymmetric
+route, a hole that never filled. They only move on TCP flows a reassembling
+parser reads (HTTP, DNS-over-TCP, TLS, SSH, and the `lateral` parsers). Kernel
+ring loss is `capture/<source>/drops`; this is what reached the ring incomplete.
 
 ### Flow RED (from netring `red()`)
 
 | Metric | Type | Notes |
 |---|---|---|
 | `flow/red/rate` | Gauge | request rate (flows/sec) |
-| `flow/red/error_ratio` | Gauge | reset + parse-error share |
+| `flow/red/error_ratio` | Gauge | RST share of ended flows |
 | `flow/red/p50_ms` `p95_ms` `p99_ms` | Gauge | flow-lifetime percentiles |
+
+netring's RED also counts flows that ended with `parse_error` — which no flow has
+done since flowscope 0.25: a parser that gives up is closed and the flow goes on.
+The ratio is the reset share; parser failures are under [Parser health](#parser-health).
 
 Percentiles are **omitted** when the window held no flows (the cached gauge keeps
 its last meaningful value instead of being clobbered to zero). This replaced the
@@ -53,7 +65,11 @@ pre-#369 bespoke `flow/duration_p*` gauges.
 | `flow/by_l4/icmp/bytes_total`, `flow/by_l4/icmp/flows_total` | Counter | ICMP split |
 | `tcp/closed_fin_total` | Counter | clean FIN close |
 | `tcp/closed_rst_total` | Counter | RST abort/refused (a high share = firewall/IDS drops or instability) |
-| `tcp/closed_idle_total` | Counter | idle timeout / other (evicted, buffer_overflow, parse_error fold here) |
+| `tcp/closed_idle_total` | Counter | idle timeout / other (`evicted` and `force_closed` fold here) |
+
+Since netring 0.31 the Monitor sweeps its flow table on a timer (live) and on
+packet time (replay), so an idle flow ends — and is counted here — about one
+idle timeout after its last packet, not at eviction or shutdown.
 
 ## TCP resets (`collect.tcp_resets`)
 
@@ -147,6 +163,27 @@ Per-asset detail (MAC/IPs/hostname/vendor/platform/role/fingerprints/seen-via)
 rides `@rpc/netring/assets`. Discovery sources: ARP / NDP / LLDP (+ CDP via
 `collect.asset_cdp`).
 
+## Parser health
+
+An L7 parser that stops on a flow that goes on (netring 0.31 / flowscope 0.25).
+Before, a parser that gave up was silently fed forever, or ended its flow and
+re-created it mid-stream; neither was visible here.
+
+| Metric | Type | Notes |
+|---|---|---|
+| `parser/<parser>/<reason>/closed_total` | Counter | the parser closed early; `<reason>` is `parse_error` (malformed input), `parser_done` (finished), `stream_gap` (a hole it could not bridge) or `buffer_overflow` (both sides hit their cap) |
+| `parser/<parser>/<reason>/side_stopped_total` | Counter | the parser stopped reading one side (`stream_gap` or `buffer_overflow`) and kept parsing the other |
+
+`<parser>` is flowscope's parser slug (`tls`, `ssh`, `dns-udp`, `kerberos`, …);
+one that is not a plain key chunk is slugged per RFC 03 — `http/1` is
+`x-http_x2f1`. Only pairs that happened are published. A close at the flow's
+own end is not counted: every parser of every flow gets one, and it would only
+mirror `flow/ended_total`.
+
+A rising `stream_gap` next to flat `capture/<source>/drops` points at the tap
+(asymmetric routing, a SPAN port shedding), not the sensor. A rising
+`parse_error` on one parser is malformed or evasive traffic for that protocol.
+
 ## Per-detector anomaly counters (#254)
 
 | Metric | Type | Notes |
@@ -170,6 +207,7 @@ drops are the honest "the sensor's *other* telemetry is incomplete" signal.
 | `capture/<source>/drop_rate` | Gauge | windowed drop fraction |
 | `capture/<source>/freezes` | Counter | AF_PACKET (TPACKET_v3) ring freezes |
 | `capture/<source>/xdp/<cause>` | Counter | AF_XDP per-cause drops: `rx_dropped`, `rx_invalid_descs`, `rx_ring_full`, `rx_fill_ring_empty_descs`, `tx_invalid_descs`, `tx_ring_empty_descs` |
+| `capture/<source>/dedup_dropped` | Counter | duplicate frames the `dedup` filter dropped before anything counted them — absent when no filter is armed (see [configuration](configuration.md)) |
 | `capture/backend` | Text | resolved backend (or `pcap-replay`) — #227 |
 
 The windowed drop-rate feeds the `capture-overload` SensorHealth alert (hysteresis
