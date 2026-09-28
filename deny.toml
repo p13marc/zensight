@@ -7,8 +7,8 @@ all-features = true
 [advisories]
 version = 2
 # Transitive and unactionable here — dated, with the pin that traps each one.
-# Re-check on every zenoh / iced / netring bump (last: 2026-09-09, #1098 —
-# netring 0.29 -> 0.30, zenoh 1.10.0 -> 1.10.1, rerun 0.36 -> 0.37).
+# Re-check on every zenoh / iced / netring bump (last: 2026-09-28, #1326 —
+# netring 0.30 -> 0.31.1, flowscope 0.24 -> 0.25.1; previous 2026-09-09, #1098).
 ignore = [
     "RUSTSEC-2023-0071", # rsa: Marvin timing sidechannel — no fixed release exists (zenoh tree)
     "RUSTSEC-2023-0089", # atomic-polyfill unmaintained (via heapless, zenoh tree)
@@ -31,6 +31,8 @@ ignore = [
     # Neither advisory has a 45.x patched range (0222: >=24.0.12, >=36.0.13,
     # >=46.0.2, >=47.0.3; 0269: >=24.0.13, >=36.0.14, >=46.0.3, >=47.0.4), so
     # there is still no version of this chain that resolves them.
+    # RE-CHECKED 2026-09-28 on the netring 0.31.1 bump (#1326): still yara-x
+    # 1.20 -> wasmtime 45.0.3, unchanged.
     # wasmtime here runs yara-x's own compiled rules — operator-authored, no
     # untrusted wasm, no WASI preopens — so both advisories' exposure is nil in
     # this use. Re-check when yara-x moves to a wasmtime 46/47; the weekly

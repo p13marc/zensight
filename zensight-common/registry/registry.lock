@@ -503,6 +503,7 @@ subject	netring	capture/disk/triggers	telemetry	TelemetryPoint
 subject	netring	capture/events	telemetry	TelemetryPoint
 subject	netring	capture/focus/bytes	telemetry	TelemetryPoint
 subject	netring	capture/focus/packets	telemetry	TelemetryPoint
+subject	netring	capture/{source}/dedup_dropped	telemetry	TelemetryPoint
 subject	netring	capture/{source}/drop_rate	telemetry	TelemetryPoint
 subject	netring	capture/{source}/drops	telemetry	TelemetryPoint
 subject	netring	capture/{source}/freezes	telemetry	TelemetryPoint
@@ -537,6 +538,8 @@ subject	netring	flow/by_l4/{proto}/flows_total	telemetry	TelemetryPoint
 subject	netring	flow/bytes_total	telemetry	TelemetryPoint
 subject	netring	flow/ended_total	telemetry	TelemetryPoint
 subject	netring	flow/packets_total	telemetry	TelemetryPoint
+subject	netring	flow/reassembly_gap_bytes_total	telemetry	TelemetryPoint
+subject	netring	flow/reassembly_gaps_total	telemetry	TelemetryPoint
 subject	netring	flow/red/{quantile}	telemetry	TelemetryPoint
 subject	netring	flow/retransmits_total	telemetry	TelemetryPoint
 subject	netring	flow/started_total	telemetry	TelemetryPoint
@@ -553,6 +556,8 @@ subject	netring	icmp/by_kind/{kind}	telemetry	TelemetryPoint
 subject	netring	icmp/mtu_signal_total	telemetry	TelemetryPoint
 subject	netring	icmp/time_exceeded_total	telemetry	TelemetryPoint
 subject	netring	icmp/unreachable_total	telemetry	TelemetryPoint
+subject	netring	parser/{parser}/{reason}/closed_total	telemetry	TelemetryPoint
+subject	netring	parser/{parser}/{reason}/side_stopped_total	telemetry	TelemetryPoint
 subject	netring	quic/distinct_sni	telemetry	TelemetryPoint
 subject	netring	sensor	state	SensorInfo
 subject	netring	ssh/distinct_hassh	telemetry	TelemetryPoint

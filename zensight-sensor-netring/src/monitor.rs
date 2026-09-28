@@ -382,6 +382,53 @@ pub struct L4State {
     pub closed_idle: AtomicU64,
 }
 
+/// Byte-stream and L7-parser health (netring 0.31 / flowscope 0.25): what the
+/// session engine could not do. Capture loss inside a reassembled TCP stream
+/// and parsers that gave up used to be silent; flowscope 0.25 reports both.
+#[derive(Default)]
+pub struct StreamHealth {
+    /// Holes skipped in reassembled byte streams, summed over ended TCP flows.
+    pub reassembly_gaps: AtomicU64,
+    /// Bytes those holes were missing.
+    pub reassembly_gap_bytes: AtomicU64,
+    /// Early parser closes by (parser slug, reason slug). Bounded: flowscope's
+    /// parser kinds × its four parser-level reasons.
+    pub parser_closed: Mutex<HashMap<(&'static str, &'static str), u64>>,
+    /// One-side parser stops, same key.
+    pub parser_side_stopped: Mutex<HashMap<(&'static str, &'static str), u64>>,
+}
+
+impl StreamHealth {
+    /// Count a `ParserClosed`: only a parser-level reason is an early stop; a
+    /// close at the flow's own end (transport reason) fires for every parser
+    /// of every flow and would just mirror `flow/ended_total`.
+    fn parser_closed(&self, parser: &'static str, reason: flowscope::EndReason) {
+        if reason.is_parser()
+            && let Ok(mut m) = self.parser_closed.lock()
+        {
+            *m.entry((parser, reason.as_str())).or_default() += 1;
+        }
+    }
+
+    fn parser_side_stopped(&self, parser: &'static str, reason: flowscope::EndReason) {
+        if let Ok(mut m) = self.parser_side_stopped.lock() {
+            *m.entry((parser, reason.as_str())).or_default() += 1;
+        }
+    }
+
+    /// Snapshot a counter map, sorted so the published order is stable.
+    pub fn snapshot(
+        map: &Mutex<HashMap<(&'static str, &'static str), u64>>,
+    ) -> Vec<((&'static str, &'static str), u64)> {
+        let mut v: Vec<_> = map
+            .lock()
+            .map(|m| m.iter().map(|(k, n)| (*k, *n)).collect())
+            .unwrap_or_default();
+        v.sort_unstable();
+        v
+    }
+}
+
 /// ICMP error accumulators (issue #15).
 #[derive(Default)]
 pub struct IcmpState {
@@ -426,6 +473,8 @@ pub struct MonitorChannels {
     pub enc_dns: Arc<EncDnsState>,
     /// Per-L4 + connection-state breakdown (issue #16).
     pub l4: Arc<L4State>,
+    /// Reassembly loss + L7 parser stops (netring 0.31).
+    pub stream: Arc<StreamHealth>,
     /// ICMP error accumulators (issue #15).
     pub icmp: Arc<IcmpState>,
     /// DNS RED accumulators (issue #19).
@@ -854,6 +903,7 @@ pub fn build(
     )));
     let enc_dns = Arc::new(EncDnsState::with_cap(fp_quarter));
     let l4 = Arc::new(L4State::default());
+    let stream = Arc::new(StreamHealth::default());
     let icmp = Arc::new(IcmpState::default());
     let dns = Arc::new(DnsState::with_cap(tables.dns_max_bytes));
     let http = Arc::new(HttpState::with_cap(tables.http_max_bytes));
@@ -921,6 +971,28 @@ pub fn build(
         }
     };
     tracing::info!(backend = %backend_label, "netring capture backend resolved");
+
+    // Duplicate-frame filter (netring 0.31.1): first in the per-frame chain, so
+    // a dropped twin reaches no counter, parser, detector or disk tap. Without
+    // it a capture on `lo` counts every packet twice and fakes retransmits.
+    let dedup_mode = cfg.dedup.resolve(&cfg.interfaces, cfg.pcap.as_deref());
+    match dedup_mode {
+        crate::config::DedupMode::Loopback => b = b.dedup_loopback(),
+        crate::config::DedupMode::Content => {
+            b = b.dedup(netring::Dedup::content(
+                crate::config::DedupMode::CONTENT_WINDOW,
+                crate::config::DedupMode::CONTENT_RING,
+            ));
+        }
+        crate::config::DedupMode::Off | crate::config::DedupMode::Auto => {}
+    }
+    let dedup_armed = !matches!(
+        dedup_mode,
+        crate::config::DedupMode::Off | crate::config::DedupMode::Auto
+    );
+    if dedup_armed {
+        tracing::info!(mode = ?dedup_mode, "netring duplicate-frame filter armed");
+    }
     // Publish the resolved backend as a `capture/backend` info point for the
     // GUI Sensors view (#227/#228). Re-emitted on a slow tick (telemetry isn't
     // retained) so a late-joining frontend reliably sees it; the first tick
@@ -978,6 +1050,7 @@ pub fn build(
         let retransmits = flow_retransmits.clone();
         let records = flow_records.clone();
         let l4_h = l4.clone();
+        let stream_h = stream.clone();
         let elephants_h = elephants.clone();
         let collect_talkers = cfg.collect.talkers;
         // Data-exfiltration (#123) now rides the flowscope `DataExfilDetector` in
@@ -1017,6 +1090,7 @@ pub fn build(
                 &retransmits,
                 &records,
                 &l4_h,
+                &stream_h,
                 &elephants_h,
                 collect_talkers,
                 nm_flow.as_ref(),
@@ -1046,6 +1120,35 @@ pub fn build(
             }
             Ok(())
         });
+    }
+
+    // L7 parser health (netring 0.31): a parser that poisoned, finished, or hit
+    // a gap it could not bridge stops — for one side or the whole flow — while
+    // the flow goes on. The transport markers see every parser on their
+    // transport. Handlers only fire on parser events, so this costs nothing on
+    // a flow whose parsers never stop.
+    {
+        use netring::protocol::event_typed::ParserSideStopped;
+        macro_rules! parser_health {
+            ($t:ty) => {{
+                let h = stream.clone();
+                b = b.on_ctx::<ParserClosed<$t>>(
+                    move |e: &ParserClosed<$t>, _ctx: &mut Ctx<'_>| {
+                        h.parser_closed(e.parser_kind.as_str(), e.reason);
+                        Ok(())
+                    },
+                );
+                let h = stream.clone();
+                b = b.on_ctx::<ParserSideStopped<$t>>(
+                    move |e: &ParserSideStopped<$t>, _ctx: &mut Ctx<'_>| {
+                        h.parser_side_stopped(e.parser_kind.as_str(), e.reason);
+                        Ok(())
+                    },
+                );
+            }};
+        }
+        parser_health!(Tcp);
+        parser_health!(Udp);
     }
 
     // Rolling traffic aggregate (#369): netring's `aggregate()` maintains 60 s
@@ -1789,6 +1892,8 @@ pub fn build(
                     t.drops,
                     t.drop_rate,
                     &drop_breakdown_view(&t.detail),
+                    // Absent when no filter runs — "not measured", never zero.
+                    dedup_armed.then_some(t.dedup_dropped),
                 ) {
                     let _ = tx.send(p);
                 }
@@ -2235,6 +2340,7 @@ pub fn build(
             tls_inventory,
             enc_dns,
             l4,
+            stream,
             icmp,
             dns,
             http,
@@ -2273,6 +2379,7 @@ fn on_flow_ended(
     retransmits: &AtomicU64,
     records: &FlowRing,
     l4: &L4State,
+    stream: &StreamHealth,
     elephants: &ElephantRing,
     collect_talkers: bool,
     name_map: Option<&SharedNameMap>,
@@ -2283,6 +2390,16 @@ fn on_flow_ended(
     bytes.fetch_add(total_bytes, Ordering::Relaxed);
     packets.fetch_add(total_packets, Ordering::Relaxed);
     retransmits.fetch_add(e.stats.total_retransmits(), Ordering::Relaxed);
+    // Capture loss the reassembler had to skip (flowscope 0.25): non-zero only
+    // on flows a reassembling L7 parser read.
+    stream.reassembly_gaps.fetch_add(
+        e.stats.reassembly_gaps_initiator + e.stats.reassembly_gaps_responder,
+        Ordering::Relaxed,
+    );
+    stream.reassembly_gap_bytes.fetch_add(
+        e.stats.reassembly_gap_bytes_initiator + e.stats.reassembly_gap_bytes_responder,
+        Ordering::Relaxed,
+    );
     let duration_ms = e.stats.duration().as_millis() as u64;
 
     // Per-L4 (TCP) composition + connection-state bucketing.

@@ -57,6 +57,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **netring: duplicate-frame filtering, parser health and stream loss** (#1326)
+  — three things netring 0.31.1 / flowscope 0.25.1 can say that the sensor
+  could not.
+
+  A capture on `lo` receives every packet twice, and so did everything
+  downstream of it: packet and byte counts doubled, and each duplicated TCP
+  segment counted as a retransmission. The new `netring.dedup` setting
+  (`auto` | `off` | `loopback` | `content`) filters twins before anything
+  sees a frame. `auto` arms the loopback profile exactly when `interfaces`
+  lists `lo`. `content` covers SPAN ports and bridges, and replays of captures
+  taken on them. Frames dropped: `capture/<source>/dedup_dropped`. The new
+  `tests/dedup_replay.rs` replays the passive-DNS fixture with every record
+  doubled. Without the filter it counts 32 packets and 16 phantom retransmits
+  for 16 packets; with `content` it matches the original exactly.
+
+  Parser failures had no metric. `parser/<parser>/<reason>/closed_total` counts
+  an L7 parser that stopped early (`parse_error`, `parser_done`, `stream_gap`,
+  `buffer_overflow`) on a flow that went on. `…/side_stopped_total` counts one
+  that stopped reading one side and kept parsing the other. A close at the
+  flow's own end is not counted.
+
+  `flow/reassembly_gaps_total` and `flow/reassembly_gap_bytes_total` count
+  capture loss *inside* the byte streams the parsers read: holes the
+  reassembler skipped. Before, a hole of this kind was invisible.
+
+  Registry `netring` 1.4 → 1.5, five additive subjects; `registry.lock`
+  follows.
+
 - **A histogram value type on the bus, end to end** (#1151; #381 folded in).
   zenkey 0.9 (RFC 08 §2 v1.36) ratified `kind = "histogram"` with declared
   `buckets` and left the payload shape to this profile; this is that shape and
@@ -464,6 +492,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `zensight/docs/testing.md`, "The one system-view test".
 
 ### Changed
+
+- **netring `0.30` → `0.31.1`, flowscope `0.24` → `0.25.1`** (#1326). This is
+  upstream's session-engine redesign. The sensor uses only the `MonitorBuilder`
+  callback API, so it compiled unchanged. The behaviour changes are fixes, and
+  some of them are visible in telemetry:
+
+  - The Monitor now sweeps its flow table (it never did). An idle flow ends
+    about one idle timeout after its last packet, not at eviction or shutdown,
+    so `flow/ended_total` and `tcp/closed_idle_total` move sooner, and the flow
+    detectors (RITA, exfil) see flow ends promptly. On replay the sweep runs on
+    packet time.
+  - A flow's L7 messages arrive before its `FlowEnded`.
+  - A parser that gives up no longer ends its flow (or re-creates it mid-stream
+    on the next packet). As a result, `tcp/closed_idle_total` no longer absorbs
+    `buffer_overflow` / `parse_error`: only `evicted` and `force_closed` fold
+    into it. `flow/red/error_ratio` is now the RST share. `tcp_close_class`
+    and `docs/telemetry.md` are updated to match.
+  - Replay decodes Linux cooked (`tcpdump -i any`), raw-IP and BSD-loopback
+    captures, which were previously read as Ethernet and matched nothing. It
+    also honours pcapng timestamp resolution.
+  - ICMP parsers no longer see UDP payloads.
+
+  Not adopted, deliberately: the `MultiSource` fan-ins (the sensor runs the
+  Monitor, not the streams), AF_XDP (not compiled here), and `AnyFlowAnomaly`
+  (per-flow reassembly anomalies would flood the alert path; the aggregate
+  counters above carry the signal). `deny.toml` re-checked: yara-x 1.20 →
+  wasmtime 45.0.3 is unchanged.
 
 - **zenkey 0.9, zenkey-build 0.9, zenkey-fleet 0.14** (zenkey release 0.10.0,
   RFC v1.36). The one break in this tree was the GUI family model's match

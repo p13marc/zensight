@@ -80,6 +80,14 @@
     interfaces: ["eth0"],
     // pcap: "/path/to/capture.pcap",
 
+    // Duplicate-frame filter (netring 0.31.1), applied per capture source before
+    // anything counts a frame. "auto" (default) = "loopback" when `interfaces`
+    // lists `lo` (the kernel delivers every loopback packet twice), else "off".
+    // "content" = 5 ms content hash, for SPAN ports / bridges that duplicate
+    // frames, and for replaying a capture taken on one. Frames dropped are
+    // published as `capture/{source}/dedup_dropped`.
+    dedup: "auto",
+
     collect: {
       bandwidth: true,   // per-application bytes/sec
       flows: true,       // flow lifecycle aggregates

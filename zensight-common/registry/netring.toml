@@ -4,7 +4,7 @@
 # Source: src/map.rs (every metric name).
 
 [registry]
-version = "1.4"
+version = "1.5"
 app = "zensight"
 convention = 1
 
@@ -53,6 +53,21 @@ class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
 description = "retransmits across flows"
+
+[[subject]]
+path = "flow/reassembly_gaps_total"
+class = "telemetry"
+type = "TelemetryPoint"
+since = "1.5"
+description = "holes skipped in reassembled TCP byte streams across ended flows (capture loss the parsers saw); only flows with a reassembling L7 parser count"
+
+[[subject]]
+path = "flow/reassembly_gap_bytes_total"
+class = "telemetry"
+type = "TelemetryPoint"
+unit = "By"
+since = "1.5"
+description = "bytes missing from reassembled TCP byte streams across ended flows; only flows with a reassembling L7 parser count"
 
 [[subject]]
 path = "flow/by_l4/{proto}/bytes_total"
@@ -136,6 +151,14 @@ type = "TelemetryPoint"
 cardinality = 32
 since = "1.1"
 description = "AF_PACKET ring freezes"
+
+[[subject]]
+path = "capture/{source}/dedup_dropped"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 32
+since = "1.5"
+description = "duplicate frames the source's dedup filter dropped before anything counted them; absent when no filter is armed"
 
 [[subject]]
 path = "capture/{source}/xdp/rx_dropped"
@@ -514,6 +537,22 @@ type = "TelemetryPoint"
 cardinality = 64
 since = "1.1"
 description = "detector firings by kind; {kind} is the detector slug from the netring crate + enabled feature detectors"
+
+[[subject]]
+path = "parser/{parser}/{reason}/closed_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 128
+since = "1.5"
+description = "L7 parsers that stopped early on a flow that went on: {parser} is the flowscope parser slug, {reason} parse_error|parser_done|stream_gap|buffer_overflow; closes at the flow's own end are not counted"
+
+[[subject]]
+path = "parser/{parser}/{reason}/side_stopped_total"
+class = "telemetry"
+type = "TelemetryPoint"
+cardinality = 64
+since = "1.5"
+description = "L7 parsers that stopped reading one side of a flow (a gap they could not bridge, or the side's buffer cap) and kept parsing the other"
 
 [[subject]]
 path = "flow/red/{quantile}"

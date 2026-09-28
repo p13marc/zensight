@@ -25,6 +25,7 @@ netring: {
   backend: "auto",                  // "auto" | "afpacket" | "afxdp"
   interfaces: ["eth0"],             // live capture NICs (needs CAP_NET_RAW)
   // pcap: "/path/to/capture.pcap", // replay instead (no privileges); always overrides `interfaces`
+  dedup: "auto",                    // "auto" | "off" | "loopback" | "content"
 }
 ```
 
@@ -36,6 +37,26 @@ netring: {
 - Multiple `interfaces` are each captured per-NIC under AF_PACKET. A
   `capture-leg-asymmetry` alert fires if a flow's two directions arrive on
   mismatched capture legs (tap miswire).
+- **`dedup`** (netring 0.31.1): a duplicate-frame filter that runs first on
+  every frame, before any counter, parser, detector or the disk tap sees it.
+  Each capture source gets its own filter state.
+  - `auto` (default): `loopback` when `interfaces` lists `lo`, otherwise `off`.
+    A capture on `lo` receives every packet twice. Unfiltered, packet and byte
+    counts double and each duplicated TCP segment counts as a retransmission.
+  - `loopback`: 1 ms window, direction-aware. It drops only the
+    outgoing/incoming twin, so it does no harm on a NIC. It has no effect on a
+    replay without recorded direction (classic pcap); use `content` there.
+  - `content`: a 5 ms content hash that ignores direction. Use it for SPAN
+    ports and bridges that deliver a frame twice, and for replaying a capture
+    taken on one. Genuine TCP retransmissions are far slower than 5 ms and are
+    kept.
+  - Dropped frames are published as `capture/<source>/dedup_dropped` (live
+    only, like the other capture self-health points).
+- **Replay** (`pcap`): classic pcap and pcapng. Since netring 0.31, Linux
+  cooked captures (`tcpdump -i any`: SLL/SLL2), raw-IP and BSD-loopback files
+  are decoded; earlier versions read them as Ethernet and matched nothing.
+  pcapng timestamp resolution is honoured, and idle flows end at the point in
+  the file where they went idle, not at EOF.
 
 ## `collect.*` — collectors
 

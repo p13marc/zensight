@@ -658,8 +658,41 @@ pub fn flow_volume_points(
     ]
 }
 
+/// Stream loss across ended flows (flowscope 0.25): holes the reassembler
+/// skipped and the bytes they were missing. The honest "is my tap lossy"
+/// signal *inside* the streams the L7 parsers read — capture drops only count
+/// what the kernel ring lost.
+pub fn stream_loss_points(sensor_id: &str, gaps_total: u64, gap_bytes_total: u64) -> Vec<Built> {
+    let c = |subject: Subject, v: u64| point(sensor_id, subject, TelemetryValue::Counter(v));
+    vec![
+        c(Subject::FlowReassemblyGapsTotal, gaps_total),
+        c(Subject::FlowReassemblyGapBytesTotal, gap_bytes_total),
+    ]
+}
+
+/// L7 parser health (netring 0.31): early closes and one-side stops, one
+/// counter per (parser slug, reason slug). Only pairs that happened are
+/// published — an absent series means "never", as for `anomaly/{kind}/total`.
+pub fn parser_health_points(
+    sensor_id: &str,
+    closed: &[((&str, &str), u64)],
+    side_stopped: &[((&str, &str), u64)],
+) -> Vec<Built> {
+    let c = |subject: Subject, v: u64| point(sensor_id, subject, TelemetryValue::Counter(v));
+    closed
+        .iter()
+        .map(|&((parser, reason), n)| c(Subject::parser_closed_total(parser, reason), n))
+        .chain(
+            side_stopped.iter().map(|&((parser, reason), n)| {
+                c(Subject::parser_side_stopped_total(parser, reason), n)
+            }),
+        )
+        .collect()
+}
+
 /// Flow RED points (#369) from netring's `red()` per-flow state: request rate
-/// (flows/sec), error ratio (reset+parse-error share) and the p50/p95/p99 flow
+/// (flows/sec), error ratio (the RST share — no flow ends with `parse_error`
+/// since flowscope 0.25) and the p50/p95/p99 flow
 /// lifetime percentiles. Replaces the old `flow/duration_p*` gauges (which came
 /// from a bespoke DDSketch of flow durations); the RED sketch is netring's now.
 ///
@@ -723,6 +756,7 @@ pub fn capture_points(
     drops: u64,
     drop_rate: f64,
     detail: &CaptureDrops,
+    dedup_dropped: Option<u64>,
 ) -> Vec<Built> {
     // The capture source index is the `{source}` chunk of every
     // `capture/{source}/*` family; a decimal is already a legal chunk.
@@ -771,6 +805,11 @@ pub fn capture_points(
                 tx_ring_empty_descs,
             ));
         }
+    }
+    // Duplicate frames the source's dedup filter dropped (netring 0.31.1) —
+    // only when a filter is armed, so absent means "not filtering".
+    if let Some(n) = dedup_dropped {
+        points.push(c(Subject::capture_dedup_dropped(&src), n));
     }
     points
 }
@@ -1176,9 +1215,12 @@ pub fn flow_by_l4_points(
 }
 
 /// Bucket a flowscope `EndReason` slug into one of the three TCP close classes we
-/// track: `fin` (clean), `rst` (abort/refused), `idle` (timeout). Everything else
-/// (evicted/buffer_overflow/parse_error/...) folds into `idle` — they're all
-/// "the flow stopped without an explicit close" from an operator's view.
+/// track: `fin` (clean), `rst` (abort/refused), `idle` (timeout). The other flow
+/// end reasons, `evicted` and `force_closed`, fold into `idle` — "the flow
+/// stopped without an explicit close" from an operator's view. Since flowscope
+/// 0.25 a flow never ends with a parser reason (`parse_error`, `parser_done`,
+/// `buffer_overflow`, `stream_gap`): those stop the parser, not the flow, and
+/// are counted under `parser/{parser}/{reason}/*` instead.
 pub fn tcp_close_class(reason: &str) -> &'static str {
     match reason {
         "fin" => "fin",
@@ -2022,6 +2064,7 @@ mod tests {
             42,
             0.004,
             &CaptureDrops::AfPacket { freezes: 1 },
+            None,
         );
         let find = |m: &str| pts.iter().find(|p| p.1.metric == m).map(|p| &p.1).unwrap();
         assert_eq!(
@@ -2156,10 +2199,68 @@ mod tests {
         assert_eq!(tcp_close_class("fin"), "fin");
         assert_eq!(tcp_close_class("rst"), "rst");
         assert_eq!(tcp_close_class("idle"), "idle");
-        // Everything non-fin/rst folds into idle.
+        // The remaining flow end reasons fold into idle.
         assert_eq!(tcp_close_class("evicted"), "idle");
-        assert_eq!(tcp_close_class("buffer_overflow"), "idle");
-        assert_eq!(tcp_close_class("parse_error"), "idle");
+        assert_eq!(tcp_close_class("force_closed"), "idle");
+    }
+
+    #[test]
+    fn stream_loss_points_shape() {
+        let pts = stream_loss_points("s", 3, 4_096);
+        assert_eq!(pts[0].1.metric, "flow/reassembly_gaps_total");
+        assert_eq!(pts[0].1.value, TelemetryValue::Counter(3));
+        assert_eq!(pts[1].1.metric, "flow/reassembly_gap_bytes_total");
+        assert_eq!(pts[1].1.value, TelemetryValue::Counter(4_096));
+    }
+
+    /// Only the (parser, reason) pairs that happened are published, and a
+    /// parser slug that is not a legal chunk (`http/1`) is slugged, not
+    /// rejected.
+    #[test]
+    fn parser_health_points_shape() {
+        assert!(parser_health_points("s", &[], &[]).is_empty());
+        let pts = parser_health_points(
+            "s",
+            &[(("tls", "parse_error"), 2), (("http/1", "stream_gap"), 1)],
+            &[(("tls", "stream_gap"), 5)],
+        );
+        assert_eq!(pts.len(), 3);
+        assert_eq!(pts[0].1.metric, "parser/tls/parse_error/closed_total");
+        assert_eq!(pts[0].1.value, TelemetryValue::Counter(2));
+        assert!(pts[1].1.metric.starts_with("parser/"));
+        assert!(pts[1].1.metric.ends_with("/stream_gap/closed_total"));
+        assert_eq!(
+            pts[1].1.metric.matches('/').count(),
+            3,
+            "{}",
+            pts[1].1.metric
+        );
+        assert_eq!(pts[2].1.metric, "parser/tls/stream_gap/side_stopped_total");
+        assert_eq!(pts[2].1.value, TelemetryValue::Counter(5));
+    }
+
+    /// The dedup count is published only when a filter is armed: absent means
+    /// "not filtering", never "filtered nothing".
+    #[test]
+    fn capture_points_dedup_only_when_armed() {
+        let has_dedup = |pts: &[Built]| pts.iter().any(|p| p.1.metric == "capture/0/dedup_dropped");
+        let drops = CaptureDrops::AfPacket { freezes: 0 };
+        assert!(!has_dedup(&capture_points("s", 0, 1, 0, 0.0, &drops, None)));
+        let pts = capture_points("s", 0, 1, 0, 0.0, &drops, Some(7));
+        let p = pts
+            .iter()
+            .find(|p| p.1.metric == "capture/0/dedup_dropped")
+            .unwrap();
+        assert_eq!(p.1.value, TelemetryValue::Counter(7));
+        assert!(has_dedup(&capture_points(
+            "s",
+            0,
+            1,
+            0,
+            0.0,
+            &drops,
+            Some(0)
+        )));
     }
 
     #[test]
@@ -2459,6 +2560,7 @@ mod tests {
             5,
             0.01,
             &CaptureDrops::AfPacket { freezes: 3 },
+            None,
         );
         let names: Vec<_> = pts.iter().map(|p| p.1.metric.as_str()).collect();
         assert!(names.contains(&"capture/0/packets"));
@@ -2485,6 +2587,7 @@ mod tests {
                 tx_invalid_descs: 5,
                 tx_ring_empty_descs: 6,
             },
+            None,
         );
         let names: Vec<_> = pts.iter().map(|p| p.1.metric.as_str()).collect();
         assert!(names.contains(&"capture/1/xdp/rx_ring_full"));
@@ -2537,7 +2640,8 @@ mod tests {
                 1,
                 1,
                 0.1,
-                &CaptureDrops::AfPacket { freezes: 1 }
+                &CaptureDrops::AfPacket { freezes: 1 },
+                None
             )),
             [
                 "capture/1/packets",
