@@ -124,6 +124,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The conformance gate runs every producer's registry as a test suite**
+  (zenkey-fleet 0.16's `run_conform`, RFC 13 §3). After the doctor,
+  `zensight-conformance` runs one `check conform` suite per rostered producer.
+  Each suite calls `introspect` and every declared `read` procedure, and each
+  declared surface is an assertion. A violated suite fails the CI
+  `conformance` job. An unproven one never does (RFC 13 §3). The doctor never
+  *calls* a read procedure, so "declared and mute" and "answers `error/gated`
+  without declaring `when`" were invisible to the gate until now. Its first
+  run against the CI deployment failed on four procedures of the second kind
+  (`logs filter`; systemd `action`, `actions`, `unit/file`). The `when`
+  declarations above are the fix, and the gate now reports them as exempt:
+  conditional, and said so.
+  New flags: `--conform`, `--no-conform` and `--junit-dir`.
+
 - **netring: duplicate-frame filtering, parser health and stream loss** (#1326)
   — three things netring 0.31.1 / flowscope 0.25.1 can say that the sensor
   could not.

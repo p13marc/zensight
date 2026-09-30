@@ -13,6 +13,15 @@
 //! zengui doctor panel call, so a finding here is a finding there — and folds
 //! the report into one RFC 13 judgement through [`gate`].
 //!
+//! Then it runs zenkey-fleet's **`check conform` suite** per producer
+//! ([`zenkey_fleet::run_conform`], RFC 13 §3 — the library behind `zenctl check
+//! conform`): every rostered origin is called on `introspect` and on each
+//! `read` procedure with a concrete path, and each declared surface is an
+//! assertion that is met, not met, or unknowable. The doctor never *calls* a
+//! read procedure; the suite does, so "declared and mute" is a finding here
+//! and nowhere else. A violated suite fails the run; an unproven one never
+//! does (see [`gate::fold_conform`]).
+//!
 //! `scripts/conformance-verify.sh` is what stands a deployment up in front of
 //! it; the CI job is `conformance` in `.forgejo/workflows/ci.yml`. Pointed at
 //! `--connect` for a real bus it judges that instead, unchanged.
@@ -34,10 +43,16 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
-use zenkey_fleet::report::{Asked, CheckId, DoctorFinding, DoctorReport, DoctorSeverity};
-use zenkey_fleet::{DoctorSpec, Fleet, Judgement, SliceSet, judgement_exit_code, run_doctor};
+use zenkey_fleet::report::{
+    Asked, AssertionState, CheckId, ConformReport, ConformVerdict, DoctorFinding, DoctorReport,
+    DoctorSeverity,
+};
+use zenkey_fleet::{
+    ConformSpec, DoctorSpec, Fleet, Judgement, SliceSet, SliceSource, judgement_exit_code,
+    run_conform, run_doctor,
+};
 
-use gate::{DEFAULT_EXCLUDED, FailOn, Gate, Verdict};
+use gate::{DEFAULT_EXCLUDED, FailOn, Gate, SuiteOutcome, Verdict};
 
 /// Where the registry TOMLs live, relative to this crate. Only a default: the
 /// harness and CI pass `--registry` explicitly, and a binary copied out of the
@@ -138,6 +153,23 @@ struct Args {
     #[arg(long, default_value_t = 0, value_name = "N")]
     record_max: u64,
 
+    /// Run the `check conform` suite for this producer (repeatable). Without
+    /// the flag, every producer on the liveliness roster that the registry
+    /// declares is run — so a producer joining the deployment joins the suite
+    /// with no change here.
+    #[arg(long = "conform", value_name = "PRODUCER")]
+    conform: Vec<String>,
+
+    /// Skip the per-producer `check conform` suites; judge with the doctor
+    /// alone.
+    #[arg(long)]
+    no_conform: bool,
+
+    /// Write each suite's JUnit XML to `DIR/<producer>.xml` — unknowable
+    /// assertions are `<skipped>`, never failures (RFC 13 §3).
+    #[arg(long, value_name = "DIR")]
+    junit_dir: Option<PathBuf>,
+
     /// Emit the whole doctor report as JSON (plus the gate's verdict) instead
     /// of the human summary.
     #[arg(long)]
@@ -200,13 +232,47 @@ async fn main() -> Result<()> {
     let report = run_doctor(&fleet, Some(&slices), &spec)
         .await
         .context("the doctor run itself failed")?;
-    let verdict = gate::judge(&report, &gate);
+    let mut verdict = gate::judge(&report, &gate);
+
+    let suites = if args.no_conform {
+        Vec::new()
+    } else {
+        run_suites(&args, &fleet, &slices, spec.timeout).await?
+    };
+    let outcomes: Vec<(String, SuiteOutcome)> = suites
+        .iter()
+        .map(|(p, r)| {
+            let outcome = match r {
+                Ok(r) => SuiteOutcome::Ran(r.verdict),
+                Err(why) => SuiteOutcome::NotRun(why.clone()),
+            };
+            (p.clone(), outcome)
+        })
+        .collect();
+    verdict.judgement = gate::fold_conform(verdict.judgement, &outcomes);
+    if let Some(dir) = &args.junit_dir {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("could not create {}", dir.display()))?;
+        for report in suites.iter().filter_map(|(_, r)| r.as_ref().ok()) {
+            let path = dir.join(format!("{}.xml", report.producer));
+            std::fs::write(&path, report.junit())
+                .with_context(|| format!("could not write {}", path.display()))?;
+        }
+    }
 
     if args.json {
+        let conform: Vec<serde_json::Value> = suites
+            .iter()
+            .map(|(producer, r)| match r {
+                Ok(report) => serde_json::json!({ "producer": producer, "report": report }),
+                Err(why) => serde_json::json!({ "producer": producer, "not_run": why }),
+            })
+            .collect();
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "report": report,
+                "conform": conform,
                 "verdict": {
                     "judgement": verdict.judgement,
                     "gated": verdict.gated,
@@ -216,7 +282,7 @@ async fn main() -> Result<()> {
             }))?
         );
     } else {
-        print_summary(&report, &verdict, &gate);
+        print_summary(&report, &verdict, &gate, &suites);
     }
 
     // The session is closed rather than dropped: an observer that vanishes
@@ -229,6 +295,52 @@ async fn main() -> Result<()> {
     // thing that happens and it goes through the upstream projection rather
     // than a hand-rolled match.
     std::process::exit(judgement_exit_code(&verdict.judgement));
+}
+
+/// One `check conform` suite per producer in scope (see `Args::conform`).
+///
+/// The suites run shallow and without a listen window: the doctor run just
+/// before them already listened and ran the deep checks fleet-wide, and what
+/// only a suite does is *call* the declared reads. Each suite's own scoped
+/// doctor pass is the price of its surface projection, and it is cheap without
+/// `--deep`.
+async fn run_suites(
+    args: &Args,
+    fleet: &Fleet<'_>,
+    slices: &SliceSet,
+    timeout: Duration,
+) -> Result<Vec<(String, std::result::Result<ConformReport, String>)>> {
+    let producers: Vec<String> = if args.conform.is_empty() {
+        let roster = zenkey_fleet::roster(fleet, timeout)
+            .await
+            .context("could not read the liveliness roster for the conformance suites")?;
+        roster
+            .values()
+            .flatten()
+            .filter(|p| slices.get(p).is_some())
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    } else {
+        args.conform.clone()
+    };
+    let mut out = Vec::with_capacity(producers.len());
+    for producer in producers {
+        let spec = ConformSpec {
+            producer: producer.clone(),
+            origin: None,
+            listen: None,
+            deep: false,
+            timeout,
+            source: SliceSource::Dirs,
+        };
+        let result = run_conform(fleet, slices, &spec)
+            .await
+            .map_err(|e| e.to_string());
+        out.push((producer, result));
+    }
+    Ok(out)
 }
 
 /// Record mode (#747): a passive capture of whatever rides the given
@@ -364,7 +476,12 @@ fn registry_dirs(args: &Args) -> Result<Vec<PathBuf>> {
     )
 }
 
-fn print_summary(report: &DoctorReport, verdict: &Verdict, gate: &Gate) {
+fn print_summary(
+    report: &DoctorReport,
+    verdict: &Verdict,
+    gate: &Gate,
+    suites: &[(String, std::result::Result<ConformReport, String>)],
+) {
     println!("== zensight-conformance ==");
     println!(
         "producers: {} live, {} answered introspect, {} serve describe ({} do not)",
@@ -433,17 +550,69 @@ fn print_summary(report: &DoctorReport, verdict: &Verdict, gate: &Gate) {
         summarize(&verdict.excluded);
     }
 
+    print_suites(suites);
+
+    let violated = suites
+        .iter()
+        .filter(|(_, r)| matches!(r, Ok(r) if r.verdict == ConformVerdict::Violates))
+        .count();
     println!();
     match &verdict.judgement {
         Judgement::NotEstablished { reason } => println!("PASS — no gated findings. {reason}"),
         Judgement::Established => println!(
-            "FAIL — {} gated finding(s); the deployment does not conform.",
-            verdict.gated.len()
+            "FAIL — {} gated finding(s), {} violated suite(s); the deployment does not conform.",
+            verdict.gated.len(),
+            violated,
         ),
         Judgement::Unobservable { reason } => {
             println!("UNOBSERVABLE — the run cannot carry a verdict. {reason}")
         }
         Judgement::NotAsked => println!("NOT ASKED — the checks never ran."),
+    }
+}
+
+/// The `check conform` section: one line per suite, then every assertion that
+/// was not met and every one that could not be established — the second with
+/// its reason, because "unknowable" without one is the silence RFC 13 §3 O4
+/// forbids.
+fn print_suites(suites: &[(String, std::result::Result<ConformReport, String>)]) {
+    if suites.is_empty() {
+        return;
+    }
+    println!("\n-- check conform ({} suite(s)) --", suites.len());
+    for (producer, result) in suites {
+        let report = match result {
+            Ok(report) => report,
+            Err(why) => {
+                println!("  {producer}: NOT RUN — {why}");
+                continue;
+            }
+        };
+        let s = &report.summary;
+        println!(
+            "  {producer}: {} — {} met, {} not met, {} unknowable, {} exempt; {} origin(s) called",
+            match report.verdict {
+                ConformVerdict::Conforms => "conforms",
+                ConformVerdict::Violates => "VIOLATES",
+                ConformVerdict::Unproven => "unproven",
+            },
+            s.met,
+            s.not_met,
+            s.unknowable,
+            s.exempt,
+            report.origins_asked.len(),
+        );
+        for a in &report.assertions {
+            match &a.state {
+                AssertionState::NotMet => {
+                    println!("      ✗ {} · {}: {}", a.id, a.subject, a.evidence)
+                }
+                AssertionState::Unknowable { reason } => {
+                    println!("      ? {} · {}: {reason}", a.id, a.subject)
+                }
+                _ => {}
+            }
+        }
     }
 }
 

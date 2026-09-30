@@ -36,7 +36,7 @@ use zenkey_fleet::Judgement;
 // zenkey-fleet's lib.rs: only the documents the verbs **return** are lifted).
 // `zenkey_fleet::report::CheckId` is therefore the root-sanctioned spelling,
 // not a reach into a private module path.
-use zenkey_fleet::report::{CheckId, DoctorFinding, DoctorReport, DoctorSeverity};
+use zenkey_fleet::report::{CheckId, ConformVerdict, DoctorFinding, DoctorReport, DoctorSeverity};
 
 /// Which severities the gate is willing to fail on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -207,6 +207,59 @@ pub fn judge(report: &DoctorReport, gate: &Gate) -> Verdict {
         gated,
         excluded,
         below_floor,
+    }
+}
+
+/// One producer's `check conform` outcome, as the gate sees it: the verdict,
+/// or why the suite could not be run at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuiteOutcome {
+    Ran(ConformVerdict),
+    /// `run_conform` refused or failed — a suite that was asked for and did
+    /// not run.
+    NotRun(String),
+}
+
+/// Fold the per-producer `check conform` suites (RFC 13 §3, zenkey-fleet
+/// 0.16) into the doctor's judgement.
+///
+/// * A `Violates` is a finding: a declared read that did not answer, an
+///   `introspect` that could not be read. It fails the run, whatever the
+///   doctor said.
+/// * `Unproven` **never** fails it. RFC 13 §3: a build MUST NOT go red on an
+///   unknowable assertion — `zenctl check conform` exits 2 on one, which is
+///   right for a script asking one question and wrong for a merge gate asking
+///   the whole deployment. The unknowable assertions are printed.
+/// * A suite that could not run leaves a clean doctor run `Unobservable`: a
+///   pass that skipped a question it was told to put is not a pass (O4). It
+///   does not mask a finding — `Established` stays `Established`.
+pub fn fold_conform(doctor: Judgement, suites: &[(String, SuiteOutcome)]) -> Judgement {
+    if suites
+        .iter()
+        .any(|(_, o)| *o == SuiteOutcome::Ran(ConformVerdict::Violates))
+    {
+        return Judgement::Established;
+    }
+    if !matches!(doctor, Judgement::NotEstablished { .. }) {
+        return doctor;
+    }
+    let not_run: Vec<String> = suites
+        .iter()
+        .filter_map(|(p, o)| match o {
+            SuiteOutcome::NotRun(why) => Some(format!("{p}: {why}")),
+            SuiteOutcome::Ran(_) => None,
+        })
+        .collect();
+    if not_run.is_empty() {
+        doctor
+    } else {
+        Judgement::Unobservable {
+            reason: format!(
+                "the conformance suite could not run for {} producer(s): {}",
+                not_run.len(),
+                not_run.join("; ")
+            ),
+        }
     }
 }
 
@@ -463,5 +516,60 @@ mod tests {
             ..Gate::default()
         };
         assert_eq!(judgement_exit_code(&judge(&bounded, &strict).judgement), 0);
+    }
+
+    fn clean() -> Judgement {
+        Judgement::NotEstablished {
+            reason: "clean".into(),
+        }
+    }
+
+    fn ran(p: &str, v: ConformVerdict) -> (String, SuiteOutcome) {
+        (p.to_string(), SuiteOutcome::Ran(v))
+    }
+
+    /// A violated suite fails a run the doctor passed: the doctor never calls
+    /// a read procedure, the suite does, and a mute one is a finding.
+    #[test]
+    fn a_violated_suite_fails_a_clean_doctor_run() {
+        let j = fold_conform(
+            clean(),
+            &[
+                ran("sysinfo", ConformVerdict::Conforms),
+                ran("logs", ConformVerdict::Violates),
+            ],
+        );
+        assert_eq!(judgement_exit_code(&j), 1);
+    }
+
+    /// Unproven never turns the gate red (RFC 13 §3), and conforming suites
+    /// leave the doctor's verdict as it was.
+    #[test]
+    fn unproven_and_conforming_suites_keep_a_pass() {
+        let j = fold_conform(
+            clean(),
+            &[
+                ran("sysinfo", ConformVerdict::Conforms),
+                ran("historian", ConformVerdict::Unproven),
+            ],
+        );
+        assert_eq!(judgement_exit_code(&j), 0);
+    }
+
+    /// A suite that could not run is not a pass (O4) — and not a mask over
+    /// the doctor's own finding either.
+    #[test]
+    fn a_suite_that_did_not_run_is_unobservable_but_never_hides_a_finding() {
+        let suites = [(
+            "ghost".to_string(),
+            SuiteOutcome::NotRun("no loaded registry slice declares it".into()),
+        )];
+        let j = fold_conform(clean(), &suites);
+        assert_eq!(judgement_exit_code(&j), 2);
+        assert!(matches!(&j, Judgement::Unobservable { reason } if reason.contains("ghost")));
+        assert_eq!(
+            judgement_exit_code(&fold_conform(Judgement::Established, &suites)),
+            1
+        );
     }
 }
