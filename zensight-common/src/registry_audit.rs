@@ -143,37 +143,44 @@ pub fn uncovered_families<S: AsRef<str>>(
         .collect()
 }
 
-/// The RFC 08 §6.1 conditional-subject ledger for `producer`, as
+/// The subjects `producer` declares conditional (RFC 08 §2, `when`), as
 /// `(subject path, why this build may never emit it)` pairs in file order.
 ///
-/// The ledger is `zensight-common/registry/conditional.lock`, compiled in with
-/// `include_str!`. It used to be a `CONDITIONAL_FAMILIES` const in each
-/// sensor's `tests/registry_conformance.rs`, because the registry TOML has no
-/// `feature`/`when` field to say so in the slice itself — zenkey 0.7 added the
-/// ledger for exactly that, and it is now the single source of truth.
+/// The reason is the entry's `gate_note`, else its predicates. This read the
+/// zensight-only `conditional.lock` ledger until zenkey 0.11; the condition
+/// now lives on the entry it conditions, is served by `introspect`, shown by
+/// `zenctl topic info`, and judged by `check conform` — so an unseen
+/// conditional subject is exempt fleet-wide for the same reason it is exempt
+/// here, and a stale one cannot outlive its entry.
 ///
-/// **`zenkey-build` validates it at build time**, in the direction it can see:
-/// a line naming no live registry subject fails the build, so an excuse cannot
-/// outlive the entry it excuses. That is strictly better than the test-time
-/// staleness check it replaces — a build error rather than a test failure, and
-/// it fires even for a producer with no conformance test.
+/// Only gauges with no honest reading take a `when` on a *subject*. A gated
+/// procedure declares one too, but it still answers — `error/unsupported`
+/// for a `feature:` predicate, `error/gated` for a `config:` or
+/// `capability:` one (§6.1) — so it is never silent.
 ///
-/// Read the lock file's header for why it is only two lines long; the short
-/// version is that a gated *procedure* is declared unconditionally and answers
-/// `error/gated` or `error/unsupported`, so it needs no exemption. Only a
-/// gauge with no honest reading does.
+/// # Panics
+///
+/// When `producer` has no compiled slice, or it does not parse: an empty
+/// answer would excuse nothing and read as "unconditional", which is the one
+/// answer that must not come from a lookup failure.
 #[must_use]
-pub fn conditional_families(producer: &str) -> Vec<(&'static str, &'static str)> {
-    const LEDGER: &str = include_str!("../registry/conditional.lock");
-    LEDGER
-        .lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .filter_map(|l| {
-            let mut f = l.splitn(3, '\t');
-            match (f.next(), f.next(), f.next()) {
-                (Some(p), Some(path), Some(condition)) if p == producer => Some((path, condition)),
-                _ => None,
-            }
+pub fn conditional_families(producer: &str) -> Vec<(String, String)> {
+    let src = crate::registry::registry_source(producer)
+        .unwrap_or_else(|| panic!("no registry slice compiled in for `{producer}`"));
+    let slice = zenkey::parse_slice(src)
+        .unwrap_or_else(|e| panic!("the `{producer}` registry slice does not parse: {e}"));
+    slice
+        .subjects
+        .iter()
+        .filter_map(|s| {
+            let when = s.when.as_ref()?;
+            let why = s.gate_note.clone().unwrap_or_else(|| {
+                when.iter()
+                    .map(zenkey::slice::Predicate::token)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            });
+            Some((s.path.clone(), why))
         })
         .collect()
 }
@@ -181,7 +188,8 @@ pub fn conditional_families(producer: &str) -> Vec<(&'static str, &'static str)>
 /// Assert every registered telemetry family is either emitted by `emitted` or
 /// listed in `conditional` with a reason.
 ///
-/// `conditional` is a **ledger**, not a suppression list: entries are
+/// `conditional` — normally [`conditional_families`], the entries that declare
+/// `when` — is a **ledger**, not a suppression list: entries are
 /// `(registry pattern, why this build may never emit it)`, and they are
 /// themselves checked. Three ways to fail, all deliberate:
 ///
@@ -199,11 +207,11 @@ pub fn conditional_families(producer: &str) -> Vec<(&'static str, &'static str)>
 ///
 /// Also panics for a catch-all producer, rather than passing vacuously.
 #[track_caller]
-pub fn assert_families_covered<S: AsRef<str>>(
+pub fn assert_families_covered<S: AsRef<str>, P: AsRef<str>, R>(
     producer: &str,
     emitted: impl IntoIterator<Item = S>,
     pattern_of: impl Fn(&str) -> Option<&'static str>,
-    conditional: &[(&str, &str)],
+    conditional: &[(P, R)],
 ) {
     assert!(
         !has_catchall_telemetry(producer),
@@ -227,7 +235,7 @@ pub fn assert_families_covered<S: AsRef<str>>(
         .collect();
     let covered: BTreeSet<&'static str> = emitted.iter().filter_map(|m| pattern_of(m)).collect();
 
-    let excused: BTreeSet<&str> = conditional.iter().map(|(p, _)| *p).collect();
+    let excused: BTreeSet<&str> = conditional.iter().map(|(p, _)| p.as_ref()).collect();
 
     // (3) the ledger cites a family the registry no longer declares.
     let stale: Vec<&str> = excused
@@ -262,11 +270,12 @@ pub fn assert_families_covered<S: AsRef<str>>(
     assert!(
         missing.is_empty(),
         "`{producer}` registers {} telemetry families this build never emits, and the \
-         conditional ledger does not excuse them:\n  {}\n\n\
+         registry declares none of them conditional:\n  {}\n\n\
          `introspect` advertises each of these to the fleet as a subject this build \
          publishes (RFC 08 §6.1). Either emit them, or remove them from \
          zensight-common/registry/{producer}.toml, or — if they are genuinely \
-         host-conditional — add them to the ledger WITH the condition that gates them.",
+         host-conditional — declare `when = [\"feature:…\", \"config:…\", \"capability:…\"]` \
+         on the entry, with a `gate_note` (RFC 08 §2).",
         missing.len(),
         missing.join("\n  ")
     );
@@ -317,7 +326,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "family coverage is vacuous")]
     fn a_catchall_producer_is_refused_not_passed() {
-        assert_families_covered("snmp", ["anything"], |_| None, &[]);
+        assert_families_covered("snmp", ["anything"], |_| None, &[] as &[(&str, &str)]);
     }
 
     #[test]
@@ -345,6 +354,11 @@ mod tests {
     #[test]
     #[should_panic(expected = "never emits")]
     fn an_unexcused_unemitted_family_fails() {
-        assert_families_covered("netlink", Vec::<String>::new(), |_| None, &[]);
+        assert_families_covered(
+            "netlink",
+            Vec::<String>::new(),
+            |_| None,
+            &[] as &[(&str, &str)],
+        );
     }
 }

@@ -180,6 +180,14 @@ verb — so the reply carries `needs_daemon_reload: true` and the operator decid
   replies `reply_err` with the namespaced `error/gated` name (bad payloads get
   `error/invalid-args`).
 
+  The registry declares the three action procedures `when =
+  ["config:actions.enabled", "capability:system-bus"]` (RFC 08 §2), and both
+  halves answer `error/gated` while they are false. Actions switched off is
+  the stock case. Actions switched on, on a host whose system bus or systemd
+  Manager cannot be reached, is the other case. It used to leave the three
+  procedures neither served nor refused, so `introspect` advertised surfaces
+  that nothing answered.
+
   **The write blocks until the outcome is known** — for job verbs, until
   `JobRemoved` arrives or `actions.job_timeout_secs` elapses. A caller's own
   query timeout must therefore exceed `job_timeout_secs`, or every slow restart

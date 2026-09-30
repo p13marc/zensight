@@ -82,6 +82,12 @@ async fn main() -> Result<()> {
                 });
                 std::mem::forget(bpf);
                 ebpf_state = Some(state);
+                // The registry's `when` names `capability:CAP_BPF` for the
+                // eBPF surfaces; the programs attached, so it holds here
+                // (RFC 04 §5 — claimed on success, never on configuration).
+                runner
+                    .capabilities()
+                    .claim(zensight_sensor_core::capabilities::PRODUCER, "CAP_BPF");
             }
             Err(e) => {
                 // `{e:#}` walks the whole anyhow chain. `%e` is Display, which
@@ -241,11 +247,13 @@ async fn main() -> Result<()> {
         #[cfg(not(feature = "ebpf"))]
         let q_ebpf = None;
         let top_k = netlink_config.ebpf.retransmit_top_k;
+        let collect_ebpf = netlink_config.collect.ebpf;
         runner.spawn(async move {
             zensight_sensor_netlink::query::run_ebpf_queries(
                 q_session,
                 "netlink".to_string(),
                 q_ebpf,
+                collect_ebpf,
                 top_k,
             )
             .await;

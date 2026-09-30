@@ -661,6 +661,8 @@ request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
 description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/cancel"
@@ -669,6 +671,8 @@ fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-ou
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/status"
@@ -677,6 +681,8 @@ reply = "ArtifactStatus"
 idempotent = true
 since = "1.0"
 description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 [[procedure]]
 path = "capture_disk"
 kind = "read"
@@ -684,6 +690,8 @@ reply = "CaptureDiskStatus"
 idempotent = true
 since = "1.0"
 description = "capture-to-disk status (mode, ring occupancy, retention, last event)"
+when = ["config:capture.to_disk.mode"]
+gate_note = "`capture.to_disk.mode` other than \"off\""
 
 [[procedure]]
 path = "capture_disk/set"
@@ -693,6 +701,8 @@ request = "CaptureDiskCommand"
 reply = "Ack"
 since = "1.0"
 description = "capture-to-disk control: capture_now / set_capture mode hot-switch"
+when = ["config:capture.to_disk.mode"]
+gate_note = "`capture.to_disk.mode` other than \"off\""
 [[procedure]]
 path = "detectors"
 kind = "read"
@@ -716,6 +726,7 @@ reply = "TopicStatus"
 idempotent = true
 since = "1.0"
 description = "current capture_filter configuration (reloadable packet-tier BPF filter)"
+when = ["config:capture_focus.enabled"]
 
 [[procedure]]
 path = "capture_filter/set"
@@ -725,6 +736,7 @@ request = "FilterConfig"
 reply = "Ack"
 since = "1.0"
 description = "apply capture_filter configuration (reloadable packet-tier BPF filter)"
+when = ["config:capture_focus.enabled"]
 [[procedure]]
 path = "threat_intel"
 kind = "read"
@@ -732,6 +744,8 @@ reply = "TopicStatus"
 idempotent = true
 since = "1.0"
 description = "current threat_intel configuration (IOC/YARA hot-reload)"
+when = ["config:threat"]
+gate_note = "any of `threat.reload`, startup `threat.ioc` indicators, or `threat.yara.file`"
 
 [[procedure]]
 path = "threat_intel/set"
@@ -741,6 +755,8 @@ request = "ThreatIntelConfig"
 reply = "Ack"
 since = "1.0"
 description = "apply threat_intel configuration (IOC/YARA hot-reload)"
+when = ["config:threat"]
+gate_note = "any of `threat.reload`, startup `threat.ioc` indicators, or `threat.yara.file`"
 [[procedure]]
 path = "flows"
 kind = "read"
@@ -764,6 +780,7 @@ reply = "Vec<TalkerRecord>"
 idempotent = true
 since = "1.0"
 description = "per-source rolling rate (?top=N)"
+when = ["config:collect.talkers"]
 
 [[procedure]]
 path = "matrix"
@@ -772,6 +789,7 @@ reply = "Vec<MatrixRecord>"
 idempotent = true
 since = "1.0"
 description = "src/dst rolling rate matrix (?top=N)"
+when = ["config:collect.talkers"]
 
 [[procedure]]
 path = "elephant_flows"
@@ -780,6 +798,7 @@ reply = "Vec<FlowRecord>"
 idempotent = true
 since = "1.0"
 description = "elephant flow ring"
+when = ["config:collect.talkers"]
 
 [[procedure]]
 path = "dns"
@@ -788,6 +807,7 @@ reply = "Vec<DnsRecord>"
 idempotent = true
 since = "1.0"
 description = "DNS ring (?top=N)"
+when = ["config:collect.dns"]
 
 [[procedure]]
 path = "http"
@@ -796,6 +816,7 @@ reply = "Vec<HttpRecord>"
 idempotent = true
 since = "1.0"
 description = "HTTP ring (?top=N)"
+when = ["config:collect.http"]
 
 [[procedure]]
 path = "quic"
@@ -804,6 +825,7 @@ reply = "Vec<QuicRecord>"
 idempotent = true
 since = "1.0"
 description = "QUIC ring"
+when = ["config:collect.quic"]
 
 [[procedure]]
 path = "ssh"
@@ -812,6 +834,7 @@ reply = "Vec<SshRecord>"
 idempotent = true
 since = "1.0"
 description = "SSH/HASSH ring"
+when = ["config:collect.ssh"]
 
 [[procedure]]
 path = "encrypted_dns"
@@ -820,6 +843,7 @@ reply = "Vec<EncryptedDnsRecord>"
 idempotent = true
 since = "1.0"
 description = "DoH/DoT detections"
+when = ["config:collect.encrypted_dns"]
 
 [[procedure]]
 path = "ja4h"
@@ -828,6 +852,8 @@ reply = "Vec<Ja4hRecord>"
 idempotent = true
 since = "1.0"
 description = "JA4H fingerprints (feature ja4plus, ?top=N)"
+when = ["feature:ja4plus", "config:collect.http_fp"]
+gate_note = "JA4H is FoxIO-licensed (not OSI), so the default build leaves it out"
 
 [[procedure]]
 path = "assets"
@@ -836,6 +862,7 @@ reply = "Vec<AssetRecord>"
 idempotent = true
 since = "1.0"
 description = "observed asset inventory"
+when = ["config:collect.assets"]
 
 [[procedure]]
 path = "ipfix"
@@ -844,6 +871,7 @@ reply = "Vec<IpfixRecord>"
 idempotent = true
 since = "1.0"
 description = "recent IPFIX/Netflow-style flow records (feature `ipfix`; ?max=)"
+when = ["feature:ipfix", "config:collect.ipfix"]
 
 [[procedure]]
 path = "captures"
@@ -852,6 +880,8 @@ reply = "Vec<CaptureRecord>"
 idempotent = true
 since = "1.0"
 description = "capture-to-disk file index"
+when = ["config:capture.to_disk.mode"]
+gate_note = "`capture.to_disk.mode` other than \"off\""
 
 [[procedure]]
 path = "bandwidth"
@@ -860,6 +890,7 @@ reply = "Vec<BandwidthRecord>"
 idempotent = true
 since = "1.0"
 description = "wire-level bandwidth-by-process (?top=N)"
+when = ["config:bandwidth_attribution"]
 
 # The `@blob` plane (RFC 07 §2, RFC 08 §2 v1.8): every artifact-capable
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2

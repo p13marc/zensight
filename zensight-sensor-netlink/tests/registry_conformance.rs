@@ -8,12 +8,12 @@ use zensight_sensor_netlink::route_history::RouteHistory;
 
 /// Registered netlink telemetry families this build can never emit, and why.
 ///
-/// The list itself lives in `zensight-common/registry/conditional.lock` — the
-/// RFC 08 §6.1 conditional-subject ledger, which zenkey 0.7 added and which
-/// zenkey-build validates at build time. It used to be a const here, because
-/// the registry TOML has no `feature`/`when` field to say so in the slice
-/// itself; the ledger is that field's stand-in, and it is now the one place
-/// the fact is written.
+/// The condition is declared on the entries themselves since zenkey 0.11 —
+/// `when = ["feature:ebpf", "config:collect.ebpf", "capability:CAP_BPF"]`
+/// (RFC 08 §2) — and read back through `registry_audit::conditional_families`.
+/// It was a const here, then a line in the zensight-only `conditional.lock`;
+/// now it rides `introspect`, where `zenctl topic info` shows it and `check
+/// conform` exempts it for the same reason this test does.
 ///
 /// The connect-latency percentiles are the workspace's only entries and its
 /// canonical build-conditional *subjects*: `map::connlat_points` compiles
@@ -24,14 +24,14 @@ use zensight_sensor_netlink::route_history::RouteHistory;
 /// consumer downstream, and publishing nothing is indistinguishable from a
 /// quiet host.
 #[cfg(not(feature = "ebpf"))]
-fn conditional_families() -> Vec<(&'static str, &'static str)> {
+fn conditional_families() -> Vec<(String, String)> {
     let ledger = registry_audit::conditional_families("netlink");
     assert_eq!(
         ledger.len(),
         2,
-        "conditional.lock lost netlink's connect-latency entries — a default \
-         build cannot emit them, so dropping the excuse turns the coverage \
-         check into a false failure"
+        "the netlink registry no longer declares `when` on connect-latency entries — a \
+         default build cannot emit them, so dropping the condition turns the \
+         coverage check into a false failure"
     );
     ledger
 }
@@ -42,7 +42,7 @@ fn conditional_families() -> Vec<(&'static str, &'static str)> {
 /// ledger's condition is real: if the gate stopped being what makes the
 /// difference, this build would fail here.
 #[cfg(feature = "ebpf")]
-fn conditional_families() -> Vec<(&'static str, &'static str)> {
+fn conditional_families() -> Vec<(String, String)> {
     Vec::new()
 }
 

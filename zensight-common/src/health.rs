@@ -344,6 +344,12 @@ pub struct SensorInfo {
     pub metadata: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub macs: Vec<String>,
+    /// Which `capability:` predicates of the registry's `when` entries hold
+    /// here, per device chunk, with the producer's own under `"*"` (RFC 04
+    /// §5, v1.41). Omitted when nothing was claimed — which means *not
+    /// asked*, never "no capability holds".
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub capabilities: std::collections::BTreeMap<String, Vec<String>>,
     /// Unix epoch millis of the latest re-emission.
     pub last_updated: i64,
 }

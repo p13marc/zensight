@@ -217,12 +217,12 @@ async fn main() -> Result<()> {
     // Two things were wrong with that:
     //
     //   1. `@rpc/logs/rules` and `rules/set` are declared **unconditionally**
-    //      in the registry and carry no `conditional.lock` line, but were
+    //      in the registry and declare no `when`, but were
     //      served only when this gate was open. A caller asking a host that
     //      had configured no rules got **silence** — which RFC 04 §5's
     //      `alive ⇒ callable` forbids, and which is emitted equally by a shut
     //      gate, an offline host and an older build. That is precisely the
-    //      case `conditional.lock`'s own header says must not exist.
+    //      case RFC 08 §6.1 says must not exist.
     //   2. `@desired` (#849) publishes a ruleset to a host that by definition
     //      has none yet. A sentinel that only appears once the local file
     //      already declared rules cannot receive a fleet ruleset, which is the

@@ -227,10 +227,11 @@ jobs:
       # executes it, here or anywhere. That is the deal the feature was
       # accepted on, and this step is the half of it CI can keep.
       #
-      # It also proves the conditional ledger's condition is real: with the
-      # feature on, `conditional.lock`'s four sysinfo entries stop being
-      # excuses and the families must actually be emitted, so the coverage
-      # check fails if the gate ever stops being what makes the difference.
+      # It also proves the `when` condition is real: with the feature on, the
+      # four sysinfo NVML entries that declare `when = ["feature:nvml", …]`
+      # stop being excused and the families must actually be emitted, so the
+      # coverage check fails if the gate ever stops being what makes the
+      # difference.
       - name: sysinfo --features nvml
         run: cargo clippy -p zensight-sensor-sysinfo --features nvml --all-targets --locked -- -D warnings
       - name: sysinfo --features nvml (tests)

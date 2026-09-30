@@ -373,6 +373,8 @@ request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
 description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/cancel"
@@ -381,6 +383,8 @@ fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-ou
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/status"
@@ -389,6 +393,8 @@ reply = "ArtifactStatus"
 idempotent = true
 since = "1.0"
 description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 [[procedure]]
 path = "expectations"
 kind = "read"
@@ -396,6 +402,8 @@ reply = "TopicStatus"
 idempotent = true
 since = "1.0"
 description = "current expectations configuration (sentinel expectations hot-swap)"
+when = ["config:alerts.enabled", "capability:system-bus"]
+gate_note = "the sentinel runs with `alerts.enabled` or an `expectations` block, on a host with a system bus"
 
 [[subject]]
 path = "applied/{topic}"
@@ -414,6 +422,8 @@ request = "ExpectationsConfig"
 reply = "Ack"
 since = "1.0"
 description = "apply expectations configuration (sentinel expectations hot-swap)"
+when = ["config:alerts.enabled", "capability:system-bus"]
+gate_note = "the sentinel runs with `alerts.enabled` or an `expectations` block, on a host with a system bus"
 [[procedure]]
 path = "action"
 kind = "read"
@@ -421,6 +431,8 @@ reply = "ActionStatus"
 idempotent = true
 since = "1.0"
 description = "the most recent action outcome, or null if none has run"
+when = ["config:actions.enabled", "capability:system-bus"]
+gate_note = "service control is off by default; `action/capability` says why per host"
 [[procedure]]
 path = "action/capability"
 kind = "read"
@@ -435,6 +447,8 @@ reply = "Vec<ActionStatus>"
 idempotent = true
 since = "1.4"
 description = "bounded ring of recent action outcomes (operator audit timeline)"
+when = ["config:actions.enabled", "capability:system-bus"]
+gate_note = "service control is off by default; `action/capability` says why per host"
 [[procedure]]
 path = "action/set"
 kind = "write"
@@ -446,6 +460,8 @@ reply = "ActionStatus"
 idempotent = false
 since = "1.0"
 description = "gated service control {verb,unit} — default OFF, allowlist + polkit; blocks until the job completes or actions.job_timeout_secs elapses; refuses with error/gated"
+when = ["config:actions.enabled", "capability:system-bus"]
+gate_note = "service control is off by default; `action/capability` says why per host"
 [[procedure]]
 path = "units"
 kind = "read"
@@ -477,6 +493,8 @@ reply = "UnitFile"
 idempotent = true
 since = "1.4"
 description = "one unit's fragment + drop-in contents (?name=<u>) — opt-in (actions.expose_unit_files), secret-looking assignments redacted, size-capped"
+when = ["config:actions.expose_unit_files"]
+gate_note = "unit files routinely carry credentials, so serving them is opt-in"
 
 [[procedure]]
 path = "timers"

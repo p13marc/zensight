@@ -9,6 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — BREAKING
 
+- **Conditional surfaces are declared on their entries: `when` replaces
+  `conditional.lock`** (zenkey 0.11, RFC 08 §2 v1.35/v1.41).
+  - **Subjects.** The seven conditional subjects (netlink connect latency,
+    container `image_behind_upstream`, sysinfo's four NVML families) carry
+    `when = ["feature:…", "config:…", "capability:…"]` and a `gate_note`.
+    The zensight-only ledger is deleted.
+  - **Procedures.** The 67 procedures that answer `error/gated` or
+    `error/unsupported` now declare the condition too:
+    - the artifact channel in every producer;
+    - netring's collectors and capture surfaces;
+    - systemd actions, expectations and `unit/file`;
+    - snmp `action/set`;
+    - logs `filter`;
+    - netlink's eBPF reads;
+    - the six catalog writes;
+    - `desired override/set`.
+  - **Where the gates show.** They ride `introspect`, so `zenctl topic info`
+    shows them and `check conform` judges them. A gated reply from a
+    procedure with no `when`, or an error that does not match its predicate
+    kinds, is a violation there.
+  - **API.** `registry_audit::conditional_families` now reads the slice and
+    returns owned pairs. `assert_families_covered` takes any string pair.
+  - **Two honesty fixes** came with it:
+    - netlink `retransmits`/`connections` now answer `error/gated` (with
+      `refused_by: "collect.ebpf"`) when eBPF is switched off, and
+      `error/gated` when the load failed. `error/unsupported` is kept for a
+      build without the feature. Before, all three answered `unsupported`.
+    - systemd's three action procedures are declared and answer `error/gated`
+      when actions are enabled but the system bus is unreachable. They used
+      to be neither served nor refused.
+- **The sensor document carries `capabilities`** (RFC 04 §5, v1.41): which
+  `capability:` predicates hold here, per device, with `"*"` for the
+  producer. `SensorRunner::capabilities()` hands out a shared
+  `CapabilityClaims`. It is omitted when nothing is claimed, which means *not
+  asked*. New member on `SensorInfo`: struct literals must add it.
 - **A broadcast write is refused at the server** (zenkey 0.11, RFC 05 §2.1
   v1.38). The audited write seam answers a query that is not its own concrete
   key `error/fanout-forbidden` — recorded in the audit trail as a refusal —

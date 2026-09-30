@@ -150,6 +150,20 @@ cargo build -p zensight-sensor-netlink --release --features ebpf
 Off / missing caps / unsupported kernel → one warning and the unprivileged
 baseline is unchanged.
 
+The two eBPF read procedures, `retransmits` and `connections`, stay declared
+either way and say which condition is missing. The registry declares
+`when = ["feature:ebpf", "config:collect.ebpf", "capability:CAP_BPF"]`, and the
+reply is the error for the first false predicate (RFC 08 §6.1):
+
+| cause | reply |
+|---|---|
+| built without `--features ebpf` | `error/unsupported` (rebuild) |
+| `collect.ebpf: false` | `error/gated`, `refused_by: "collect.ebpf"` (reconfigure) |
+| the load failed (capabilities, `perf_event_paranoid`) | `error/gated` (fix the host; the startup log has the verifier/attach error) |
+
+Before zenkey 0.11 all three answered `error/unsupported`, which told an
+operator to rebuild when the fix was one config line.
+
 The capabilities are necessary and **not sufficient** on Debian and Ubuntu,
 which ship `kernel.perf_event_paranoid = 3` — a patched level above upstream's
 maximum of 2 that restricts `perf_event_open` beyond what `CAP_PERFMON` relaxes.

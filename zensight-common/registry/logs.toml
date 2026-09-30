@@ -282,6 +282,8 @@ request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
 description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/cancel"
@@ -290,6 +292,8 @@ fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-ou
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/status"
@@ -298,6 +302,8 @@ reply = "ArtifactStatus"
 idempotent = true
 since = "1.0"
 description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 [[procedure]]
 path = "events"
 kind = "read"
@@ -319,6 +325,7 @@ reply = "TopicStatus"
 idempotent = true
 since = "1.0"
 description = "current filter configuration (dynamic message filters)"
+when = ["config:enable_dynamic_filters"]
 
 [[procedure]]
 path = "filter/set"
@@ -328,6 +335,7 @@ request = "TopicConfig"
 reply = "Ack"
 since = "1.0"
 description = "apply filter configuration (dynamic message filters)"
+when = ["config:enable_dynamic_filters"]
 
 [[procedure]]
 path = "rules"

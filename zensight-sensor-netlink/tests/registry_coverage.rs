@@ -42,6 +42,7 @@ async fn ebpf_procedures_are_declared_without_the_module() {
         session.clone(),
         "netlink".to_string(),
         None,
+        false,
         10,
     ));
 

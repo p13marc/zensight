@@ -75,6 +75,8 @@ reply = "OperatorAssertion"
 idempotent = true
 since = "1.1"
 description = "assert two origins are one host (?old=...;new=...); gated (RFC 06 §5.4)"
+when = ["config:allow_operator_assertions"]
+gate_note = "operator assertions are off unless the correlator allows them"
 
 [[procedure]]
 path = "unlink"
@@ -83,6 +85,8 @@ reply = "OperatorAssertion"
 idempotent = true
 since = "1.1"
 description = "assert two origins are NOT one host, retiring any link (?old=...;new=...); gated"
+when = ["config:allow_operator_assertions"]
+gate_note = "operator assertions are off unless the correlator allows them"
 
 [[procedure]]
 path = "names"
@@ -154,6 +158,8 @@ reply = "AlertAck"
 idempotent = true
 since = "1.5"
 description = "acknowledge a firing alert (?ref=<origin>.<producer>.<alert_key>;note=...); gated by the same switch as link/unlink. Refuses with error/catalog/not-firing when nothing is firing for that ref — an ack for a problem nobody has is a suppression waiting to happen"
+when = ["config:allow_operator_assertions"]
+gate_note = "operator assertions are off unless the correlator allows them"
 
 [[procedure]]
 path = "unack"
@@ -162,6 +168,8 @@ reply = "AlertAck"
 idempotent = true
 since = "1.5"
 description = "retire an acknowledgement (?ref=...); gated. Idempotent: unacking what is not acked is a no-op, not an error"
+when = ["config:allow_operator_assertions"]
+gate_note = "operator assertions are off unless the correlator allows them"
 
 [[procedure]]
 path = "silence"
@@ -170,6 +178,8 @@ request = "Silence"
 reply = "Silence"
 since = "1.5"
 description = "open a suppression window; gated. Validated before it applies (at least one matcher, ends_at after starts_at, every regex compiles) — an empty matcher set would otherwise mute the fleet"
+when = ["config:allow_operator_assertions"]
+gate_note = "operator assertions are off unless the correlator allows them"
 
 [[procedure]]
 path = "unsilence"
@@ -178,3 +188,5 @@ reply = "Silence"
 idempotent = true
 since = "1.5"
 description = "close a suppression window early (?id=<ulid>); gated"
+when = ["config:allow_operator_assertions"]
+gate_note = "operator assertions are off unless the correlator allows them"

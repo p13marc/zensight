@@ -38,10 +38,13 @@
 //! full picture — which of the four checks covers what, and which producers
 //! are still uncovered (#648).
 //!
-//! **Conditional surfaces.** A registry entry cannot say "only in builds with
-//! feature X" — the TOML schema is owned by the external `zenkey` crate. Until
-//! it can, a conditional procedure must be declared anyway and answer
-//! [`serve_unavailable`], never left undeclared.
+//! **Conditional surfaces.** Since zenkey 0.11 a registry entry says "only
+//! when …" itself: `when = ["feature:…", "config:…", "capability:…"]` (RFC 08
+//! §2). A conditional procedure is still declared, and answers the error its
+//! false predicate binds — `error/unsupported` for `feature:`, `error/gated`
+//! for `config:`/`capability:` — through [`serve_unavailable`] or its own
+//! handler, never left undeclared. `check conform` holds every such reply to
+//! the entry's `when` (RFC 13 §3).
 
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
