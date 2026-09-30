@@ -39,6 +39,14 @@ ignore = [
     # deny-fresh run resurfaces these so they cannot rot silently.
     "RUSTSEC-2026-0222", # type-index mixup
     "RUSTSEC-2026-0269", # fs sandbox escape on trailing-slash paths (2026-08-31)
+    # RUSTSEC-2026-0316 (published after the 2026-09-28 re-check): dynamic
+    # record lifting can allocate past the hostcall fuel limit. Same chain,
+    # same verdict — patched only at >=36.0.16 <37, >=48.0.3 <49, >=49.0.1,
+    # with no 45.x release, and yara-x 1.21 (the latest, 2026-09-30) still
+    # requires wasmtime ^45.0.3. It concerns component-model hostcalls fed by
+    # untrusted wasm; yara-x runs only its own compiled rules. Re-check with
+    # the other two when yara-x leaves the 45 line.
+    "RUSTSEC-2026-0316", # record lifting past the hostcall fuel limit (2026-09-30)
     # smartstring, via rhai (the GUI's view-script engine, #1259, 2026-09-21).
     # Unmaintained (archived 2026-05-03), not a vulnerability; rhai 1.26.1 —
     # the latest — still depends on it and offers no feature to drop it. The
