@@ -15,13 +15,29 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Convention-reserved error names (RFC 05 §3).
+/// Convention-reserved error names (RFC 05 §3). Named here for the call
+/// sites; the list itself is `zenkey::rpc_error::RESERVED`, and a test pins
+/// the two to each other so a name zenkey reserves cannot go missing here.
 pub const ERR_INVALID_ARGS: &str = "error/invalid-args";
 pub const ERR_UNAUTHORIZED: &str = "error/unauthorized";
 pub const ERR_NOT_FOUND: &str = "error/not-found";
 pub const ERR_UNSUPPORTED: &str = "error/unsupported";
 pub const ERR_BUSY: &str = "error/busy";
 pub const ERR_GATED: &str = "error/gated";
+/// A write procedure was asked through a wildcard key (RFC 05 §2.1, v1.38):
+/// refused by the server, before the handler runs.
+pub const ERR_FANOUT_FORBIDDEN: &str = "error/fanout-forbidden";
+
+/// Every reserved name above, in the RFC's order.
+pub const RESERVED: [&str; 7] = [
+    ERR_INVALID_ARGS,
+    ERR_UNAUTHORIZED,
+    ERR_NOT_FOUND,
+    ERR_UNSUPPORTED,
+    ERR_BUSY,
+    ERR_GATED,
+    ERR_FANOUT_FORBIDDEN,
+];
 
 /// Reserved selector parameters every write procedure understands (#957).
 ///
@@ -88,9 +104,14 @@ impl RpcError {
         Self::new(ERR_BUSY, message)
     }
 
+    /// A write refused because the query carried a wildcard (RFC v1.38).
+    pub fn fanout_forbidden(message: impl Into<String>) -> Self {
+        Self::new(ERR_FANOUT_FORBIDDEN, message)
+    }
+
     /// A producer-specific failure: `error/<producer>/<slug>`.
     pub fn producer(producer: &str, slug: &str, message: impl Into<String>) -> Self {
-        Self::new(format!("error/{producer}/{slug}"), message)
+        Self::new(zenkey::rpc_error::producer_error(producer, slug), message)
     }
 }
 
@@ -251,6 +272,14 @@ pub type RpcResult = std::result::Result<Vec<u8>, RpcError>;
 
 #[cfg(test)]
 mod tests {
+
+    /// The reserved names are zenkey's, in zenkey's order: a name the
+    /// convention reserves in a later release fails here, not in a caller
+    /// that treats it as a producer's own.
+    #[test]
+    fn reserved_names_are_zenkeys() {
+        assert_eq!(super::RESERVED, zenkey::rpc_error::RESERVED);
+    }
 
     /// The encoder and the decoder are inverses, and a malformed escape
     /// survives (#1122).

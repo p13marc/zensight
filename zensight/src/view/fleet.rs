@@ -99,7 +99,25 @@ pub enum Action {
 pub struct FleetReply {
     pub origin: String,
     pub producer: String,
-    pub toml: String,
+    /// The served registry file, verbatim — TOML or KDL (RFC 08 §5.1) — or
+    /// why the reply carries none: an error reply, a body that is not text.
+    /// Either way the host *answered*, and the second is a row, not a skip
+    /// (#491's class: an answer we cannot read is not no answer).
+    pub source: Result<String, String>,
+    /// The `Encoding` the reply declared. `None` is the pre-v1.44 wire, which
+    /// RFC 08 §6 reads as TOML.
+    pub encoding: Option<String>,
+}
+
+impl FleetReply {
+    /// The slice this reply served, read in the spelling it declared
+    /// (`zenkey::slice::parse_served`, RFC 08 §6) — or the sentence that says
+    /// why it cannot be.
+    pub fn slice(&self) -> Result<zenkey::RegistrySlice, String> {
+        let src = self.source.as_deref().map_err(|why| why.to_string())?;
+        zenkey::slice::parse_served(self.encoding.as_deref(), src)
+            .map_err(|e| format!("the served slice did not parse: {e}"))
+    }
 }
 
 /// One `introspect` sweep, whole: what came back **and what the bound refused**.
@@ -318,9 +336,9 @@ pub fn build_rows(sweep: &FleetSweep, alive: &[AliveProducer]) -> Vec<FleetRow> 
     for reply in &sweep.replies {
         // A slice we cannot parse is itself a finding — not a reason to drop
         // the host from the inventory.
-        match zenkey::slice::parse_slice(&reply.toml) {
+        match reply.slice() {
             Ok(slice) => served.entry(&reply.origin).or_default().push(slice),
-            Err(e) => unreadable.push((&reply.origin, &reply.producer, e.to_string())),
+            Err(why) => unreadable.push((&reply.origin, &reply.producer, why)),
         }
     }
 
@@ -366,8 +384,7 @@ pub fn build_rows(sweep: &FleetSweep, alive: &[AliveProducer]) -> Vec<FleetRow> 
     // It answered, and we cannot read the answer. `Unobservable`, not `drift`:
     // drift is a claim about the *content* of a slice we managed to parse, and
     // this is the case where we did not (RFC 09 §5.1 O6).
-    for (origin, producer, why) in unreadable {
-        let reason = format!("the served slice did not parse: {why}");
+    for (origin, producer, reason) in unreadable {
         rows.push(FleetRow {
             origin: origin.to_string(),
             host: name_of(origin, producer),
@@ -701,7 +718,8 @@ mod tests {
             &sweep(vec![FleetReply {
                 origin: "h-aaaaaaaaaaaa".into(),
                 producer: "sysinfo".into(),
-                toml: compiled("sysinfo"),
+                source: Ok(compiled("sysinfo")),
+                encoding: None,
             }]),
             &[],
         );
@@ -719,7 +737,8 @@ mod tests {
             &sweep(vec![FleetReply {
                 origin: "h-bbbbbbbbbbbb".into(),
                 producer: "sysinfo".into(),
-                toml: slice_toml("sysinfo", "9.9", Some("cpu/usage")),
+                source: Ok(slice_toml("sysinfo", "9.9", Some("cpu/usage"))),
+                encoding: None,
             }]),
             &[],
         );
@@ -743,7 +762,8 @@ mod tests {
             &sweep(vec![FleetReply {
                 origin: "h-dddddddddddd".into(),
                 producer: "sysinfo".into(),
-                toml: slice_toml("sysinfo", &version, Some("cpu/invented")),
+                source: Ok(slice_toml("sysinfo", &version, Some("cpu/invented"))),
+                encoding: None,
             }]),
             &[],
         );
@@ -764,7 +784,8 @@ mod tests {
             &sweep(vec![FleetReply {
                 origin: "h-eeeeeeeeeeee".into(),
                 producer: "invented".into(),
-                toml: slice_toml("invented", "1.0", Some("thing/count")),
+                source: Ok(slice_toml("invented", "1.0", Some("thing/count"))),
+                encoding: None,
             }]),
             &[],
         );
@@ -777,6 +798,71 @@ mod tests {
             "{:?}",
             rows[0].findings
         );
+    }
+
+    /// A host serving our own build's slice **as KDL**, declared, is in sync:
+    /// the spelling is not the content (RFC 08 §5.1, v1.44). Read by the
+    /// reply's declared encoding, not by guessing.
+    #[test]
+    fn a_kdl_slice_declared_as_kdl_is_in_sync() {
+        let raw = zenkey::registry_doc::parse_raw(&compiled("sysinfo"), zenkey::SliceFormat::Toml)
+            .expect("the compiled slice is TOML");
+        let kdl = zenkey::registry_doc::write_kdl(&raw).expect("respelled");
+        let rows = build_rows(
+            &sweep(vec![FleetReply {
+                origin: "h-aaaaaaaaaaaa".into(),
+                producer: "sysinfo".into(),
+                source: Ok(kdl),
+                encoding: Some("application/kdl".into()),
+            }]),
+            &[],
+        );
+        assert_eq!(
+            rows[0].status,
+            FleetStatus::InSync,
+            "{:?}",
+            rows[0].findings
+        );
+    }
+
+    /// A declared spelling this build cannot read is `unreadable`, and says
+    /// which — not a TOML parse error about a document that never was TOML.
+    #[test]
+    fn an_unknown_declared_encoding_is_unreadable() {
+        let rows = build_rows(
+            &sweep(vec![FleetReply {
+                origin: "h-aaaaaaaaaaaa".into(),
+                producer: "sysinfo".into(),
+                source: Ok(compiled("sysinfo")),
+                encoding: Some("application/yaml".into()),
+            }]),
+            &[],
+        );
+        assert_eq!(rows[0].status, FleetStatus::Unreadable);
+        assert!(
+            rows[0].reason.contains("application/yaml"),
+            "{}",
+            rows[0].reason
+        );
+    }
+
+    /// **#491's class.** An `introspect` that answered an error is a host that
+    /// answered: one `unreadable` row naming the error — never the `no answer`
+    /// row the liveliness join would otherwise add for an alive producer.
+    #[test]
+    fn an_error_reply_is_unreadable_not_no_answer() {
+        let rows = build_rows(
+            &sweep(vec![FleetReply {
+                origin: "h-cccccccccccc".into(),
+                producer: "netring".into(),
+                source: Err("introspect answered error/busy: try later".into()),
+                encoding: None,
+            }]),
+            &alive_edge01(),
+        );
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].status, FleetStatus::Unreadable);
+        assert!(rows[0].reason.contains("error/busy"), "{}", rows[0].reason);
     }
 
     fn alive_edge01() -> Vec<AliveProducer> {
@@ -917,17 +1003,20 @@ mod tests {
                     FleetReply {
                         origin: "h-aaaaaaaaaaaa".into(),
                         producer: "sysinfo".into(),
-                        toml: compiled("sysinfo"),
+                        source: Ok(compiled("sysinfo")),
+                        encoding: None,
                     },
                     FleetReply {
                         origin: "h-bbbbbbbbbbbb".into(),
                         producer: "sysinfo".into(),
-                        toml: slice_toml("sysinfo", "0.1", None),
+                        source: Ok(slice_toml("sysinfo", "0.1", None)),
+                        encoding: None,
                     },
                     FleetReply {
                         origin: "h-cccccccccccc".into(),
                         producer: "sysinfo".into(),
-                        toml: "not toml at all {{{".into(),
+                        source: Ok("not toml at all {{{".into()),
+                        encoding: None,
                     },
                 ],
                 elided: 2,
@@ -949,7 +1038,8 @@ mod tests {
             &sweep(vec![FleetReply {
                 origin: "h-bbbbbbbbbbbb".into(),
                 producer: "sysinfo".into(),
-                toml: "not toml at all {{{".into(),
+                source: Ok("not toml at all {{{".into()),
+                encoding: None,
             }]),
             &[],
         );
@@ -966,12 +1056,14 @@ mod tests {
                 FleetReply {
                     origin: "h-aaaaaaaaaaaa".into(),
                     producer: "sysinfo".into(),
-                    toml: compiled("sysinfo"),
+                    source: Ok(compiled("sysinfo")),
+                    encoding: None,
                 },
                 FleetReply {
                     origin: "h-bbbbbbbbbbbb".into(),
                     producer: "sysinfo".into(),
-                    toml: "not toml at all {{{".into(),
+                    source: Ok("not toml at all {{{".into()),
+                    encoding: None,
                 },
             ]),
             &[],
@@ -1038,12 +1130,14 @@ mod tests {
                 FleetReply {
                     origin: "h-aaaaaaaaaaaa".into(),
                     producer: "sysinfo".into(),
-                    toml: compiled("sysinfo"),
+                    source: Ok(compiled("sysinfo")),
+                    encoding: None,
                 },
                 FleetReply {
                     origin: "h-bbbbbbbbbbbb".into(),
                     producer: "sysinfo".into(),
-                    toml: slice_toml("sysinfo", "0.1", None),
+                    source: Ok(slice_toml("sysinfo", "0.1", None)),
+                    encoding: None,
                 },
             ]),
             &[],
@@ -1062,7 +1156,8 @@ mod tests {
             Ok(sweep(vec![FleetReply {
                 origin: "h-aaaaaaaaaaaa".into(),
                 producer: "sysinfo".into(),
-                toml: compiled("sysinfo"),
+                source: Ok(compiled("sysinfo")),
+                encoding: None,
             }])),
             &[("h-aaaaaaaaaaaa".into(), "sysinfo".into(), "server01".into())],
         );
@@ -1081,7 +1176,8 @@ mod tests {
                 replies: vec![FleetReply {
                     origin: "h-aaaaaaaaaaaa".into(),
                     producer: "sysinfo".into(),
-                    toml: compiled("sysinfo"),
+                    source: Ok(compiled("sysinfo")),
+                    encoding: None,
                 }],
                 elided: 7,
                 bound: 1,

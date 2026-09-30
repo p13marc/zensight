@@ -311,7 +311,7 @@ mod tests {
                 !set.panel.is_empty(),
                 "registry/views/{name}.toml declares no panel"
             );
-            let slice = crate::registry::registry_toml(name)
+            let slice = crate::registry::registry_source(name)
                 .unwrap_or_else(|| panic!("registry/views/{name}.toml: no registry for {name}"));
             assert!(
                 slice.contains("path = \"views\""),

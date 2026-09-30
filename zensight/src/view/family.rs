@@ -316,7 +316,7 @@ impl FamilyModel {
 
     /// The compiled-in slice for a producer this build knows, when it has one.
     pub fn for_producer(producer: &str) -> Option<Self> {
-        let toml = zensight_common::registry::registry_toml(producer)?;
+        let toml = zensight_common::registry::registry_source(producer)?;
         let slice = zenkey::slice::parse_slice(toml).ok()?;
         Some(Self::from_slice(&slice))
     }

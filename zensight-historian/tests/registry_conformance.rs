@@ -7,7 +7,7 @@
 /// mistake would be a telemetry family appearing in this slice.
 #[test]
 fn the_slice_declares_no_telemetry() {
-    let toml = zensight_common::registry::historian::REGISTRY_TOML;
+    let toml = zensight_common::registry::historian::REGISTRY_SOURCE;
     assert!(
         !toml.contains(r#"class = "telemetry""#),
         "the historian declared a telemetry subject. It ingests everyone else's \
@@ -23,7 +23,7 @@ fn the_slice_declares_no_telemetry() {
 /// that with no other visible sign.
 #[test]
 fn the_slice_declares_no_write_surface() {
-    let toml = zensight_common::registry::historian::REGISTRY_TOML;
+    let toml = zensight_common::registry::historian::REGISTRY_SOURCE;
     assert!(
         !toml.contains(r#"kind = "write""#),
         "the historian declared a write procedure. It is a read-only service \
@@ -44,7 +44,7 @@ fn the_slice_declares_no_write_surface() {
 /// that was never there.
 #[test]
 fn every_declared_procedure_is_served() {
-    let toml = zensight_common::registry::historian::REGISTRY_TOML;
+    let toml = zensight_common::registry::historian::REGISTRY_SOURCE;
     // `introspect` and `describe` come from the framework; the rest are this
     // crate's. If the registry grows a seventh, this fails until someone says
     // where it is served.

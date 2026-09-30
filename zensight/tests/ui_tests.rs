@@ -7123,12 +7123,14 @@ fn fleet_view_surfaces_a_skewed_host_above_the_healthy_ones() {
                 FleetReply {
                     origin: "h-aaaaaaaaaaaa".into(),
                     producer: "sysinfo".into(),
-                    toml: sysinfo_slice,
+                    source: Ok(sysinfo_slice),
+                    encoding: None,
                 },
                 FleetReply {
                     origin: "h-bbbbbbbbbbbb".into(),
                     producer: "sysinfo".into(),
-                    toml: skewed,
+                    source: Ok(skewed),
+                    encoding: None,
                 },
             ],
             ..FleetSweep::default()

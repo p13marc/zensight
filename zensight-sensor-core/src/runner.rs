@@ -548,8 +548,12 @@ impl<C: SensorConfig> SensorRunner<C> {
         {
             let ctx = self.publisher.v1().clone();
             let producer_name = ctx.producer().name().to_string();
-            if let Some(toml) = zensight_common::registry::registry_toml(&producer_name) {
-                match crate::rpc::serve_introspect(self.session.clone(), &ctx, toml).await {
+            let slice = zensight_common::registry::registry_source(&producer_name)
+                .zip(zensight_common::registry::registry_encoding(&producer_name));
+            if let Some((source, encoding)) = slice {
+                match crate::rpc::serve_introspect(self.session.clone(), &ctx, source, encoding)
+                    .await
+                {
                     Ok(task) => self.adopt_named("introspect", task),
                     Err(e) => tracing::warn!(error = %e, "failed to serve introspect"),
                 }
