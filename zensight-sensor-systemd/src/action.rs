@@ -396,7 +396,7 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
                         Err(e) => {
                             tracing::warn!(error = %e, "action: serialize outcome failed");
                             let err = zensight_sensor_core::rpc::RpcError::new(
-                                "error/systemd/serialize",
+                                zensight_common::registry::systemd::error::SERIALIZE,
                                 e.to_string(),
                             );
                             let _ = query.refused(&err, Some(&cmd.unit)).await;

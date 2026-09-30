@@ -46,7 +46,20 @@ zensight/v1/@desired/state/<host>/<producer>/<topic>     fleet desired state (#8
 - Presence = liveliness tokens at `…/state/<producer>/alive` (+
   `…/state/<producer>/device/<device>/alive`,
   `…/@catalog/state/alive`). Alive ⇒ callable: RPC queryables are declared
-  before the token.
+  before the token. Device tokens come from snmp, modbus, container and
+  parallax, where the device is the subject key's first chunk. A device token
+  **cycles** (DELETE then PUT) when the counters under that device reset while
+  the producer keeps running: an snmp `sysUpTime` rewind, or a container
+  restart or recreate. That is the discontinuity RFC 08 §2 (v1.39) sanctions
+  for a counter under a device to go backwards.
+- **Producer errors are registered** (RFC 08 §2 `[[error]]`, v1.40): every
+  `error/<producer>/<name>` a procedure can answer is declared in the slice
+  with the procedures that answer it. The name is pinned in `registry.lock`,
+  served by `introspect`, and spelled in code through the generated
+  `registry::<producer>::error::*` constants. That gives 25 names across 18
+  slices, including `serialize` on every producer that serves `thresholds`,
+  which a test enforces. The reserved names (`error/gated`,
+  `error/fanout-forbidden`, …) are zenkey's, never re-registered.
 - **Telemetry history is pulled, not seeded.** A telemetry key carries the
   current sample and nothing before it; asking "what did this do yesterday" is
   a GET on `…/@rpc/historian/range` (#898), never a wider subscription or a

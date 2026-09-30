@@ -140,3 +140,29 @@ reply = "HistorianStats"
 idempotent = true
 since = "1.0"
 description = "store metrics: series count, rows per tier, database bytes, dropped samples, last prune duration. The measurement surface #911 reads to say whether the retention defaults survive a real fleet"
+
+# Producer error names (RFC 08 §2 `[[error]]`, v1.40): `error/historian/<name>` on the
+# wire, linted, pinned in registry.lock and served by `introspect`.
+[[error]]
+name = "stats"
+procedures = ["stats"]
+since = "1.0"
+description = "the store could not answer the statistics query, or its reply could not be encoded"
+
+[[error]]
+name = "range"
+procedures = ["range"]
+since = "1.0"
+description = "the store read for the range failed, or its reply could not be encoded"
+
+[[error]]
+name = "series"
+procedures = ["series"]
+since = "1.0"
+description = "the series listing could not be encoded"
+
+[[error]]
+name = "timeline"
+procedures = ["timeline"]
+since = "1.0"
+description = "the store read for the timeline failed, or its reply could not be encoded"

@@ -686,7 +686,7 @@ async fn handle_ack(
         // `fired_at`. Refusing here is refusing a suppression nobody asked for.
         let firing = state.lock().unwrap().firing_alert(&r).ok_or_else(|| {
             RpcError::new(
-                "error/catalog/not-firing",
+                zensight_common::registry::catalog::error::NOT_FIRING,
                 format!(
                     "no firing alert for {r}. An acknowledgement names an occurrence \
                      someone looked at; there is nothing here to have looked at."
@@ -715,7 +715,10 @@ async fn handle_ack(
                 .apply(EvidenceMsg::Ack(Box::new(ack.clone())));
             if let Err(e) = crate::publisher::publish_ack(session, format, &ack).await {
                 warn!(error = %e, "publishing the ack failed");
-                let err = RpcError::new("error/catalog/publish", e.to_string());
+                let err = RpcError::new(
+                    zensight_common::registry::catalog::error::PUBLISH,
+                    e.to_string(),
+                );
                 let _ = query.refused(&err, target.as_deref()).await;
                 return;
             }
@@ -795,7 +798,10 @@ async fn handle_silence(
                 .apply(EvidenceMsg::Silence(Box::new(silence.clone())));
             if let Err(e) = crate::publisher::publish_silence(session, format, &silence).await {
                 warn!(error = %e, "publishing the silence failed");
-                let err = RpcError::new("error/catalog/publish", e.to_string());
+                let err = RpcError::new(
+                    zensight_common::registry::catalog::error::PUBLISH,
+                    e.to_string(),
+                );
                 let _ = query.refused(&err, Some(&target)).await;
                 return;
             }
@@ -922,7 +928,10 @@ async fn reply_doc<T: serde::Serialize>(
         }
         Err(e) => {
             warn!(error = %e, "serialize reply failed");
-            let err = RpcError::new("error/catalog/serialize", e.to_string());
+            let err = RpcError::new(
+                zensight_common::registry::catalog::error::SERIALIZE,
+                e.to_string(),
+            );
             let _ = query.refused(&err, target).await;
         }
     }
@@ -972,7 +981,10 @@ async fn handle_assertion(
 
             if let Err(e) = crate::publisher::publish_assertion(session, format, &assertion).await {
                 warn!(error = %e, "publishing the assertion failed");
-                let err = RpcError::new("error/catalog/publish", e.to_string());
+                let err = RpcError::new(
+                    zensight_common::registry::catalog::error::PUBLISH,
+                    e.to_string(),
+                );
                 if let Err(e) = query.refused(&err, target.as_deref()).await {
                     warn!(error = %e, "assertion reply_err failed");
                 }
@@ -986,7 +998,10 @@ async fn handle_assertion(
                 }
                 Err(e) => {
                     warn!(error = %e, "serialize assertion failed");
-                    let err = RpcError::new("error/catalog/serialize", e.to_string());
+                    let err = RpcError::new(
+                        zensight_common::registry::catalog::error::SERIALIZE,
+                        e.to_string(),
+                    );
                     if let Err(e) = query.refused(&err, target.as_deref()).await {
                         warn!(error = %e, "assertion reply_err failed");
                     }

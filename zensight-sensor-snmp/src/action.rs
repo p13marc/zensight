@@ -497,8 +497,10 @@ async fn handle_set(ctx: &Ctx<'_>, query: WriteQuery, reply_key: &str) {
         }
         Err(e) => {
             tracing::warn!(error = %e, "snmp: serialize outcome failed");
-            let err =
-                zensight_sensor_core::rpc::RpcError::new("error/snmp/serialize", e.to_string());
+            let err = zensight_sensor_core::rpc::RpcError::new(
+                zensight_common::registry::snmp::error::SERIALIZE,
+                e.to_string(),
+            );
             let _ = query.refused(&err, Some(&cmd.target())).await;
         }
     }

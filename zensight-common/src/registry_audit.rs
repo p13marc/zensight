@@ -285,6 +285,35 @@ pub fn assert_families_covered<S: AsRef<str>, P: AsRef<str>, R>(
 mod tests {
     use super::*;
 
+    /// `sensor_core::threshold::adopt` serves `thresholds` for every producer
+    /// and answers `error/<producer>/serialize` when the rule set cannot be
+    /// encoded — a name the producer does not spell itself, so nothing at the
+    /// call site reminds anyone to register it. Every slice that declares
+    /// `thresholds` must declare that `[[error]]` covering it (RFC 08 §2,
+    /// v1.40), or `introspect` under-describes what the procedure answers.
+    #[test]
+    fn every_thresholds_producer_registers_the_serialize_error() {
+        let mut checked = 0;
+        for (name, src) in crate::registry::REGISTRIES {
+            let slice = zenkey::parse_slice(src).expect("compiled slices parse");
+            if !slice.procedures.iter().any(|p| p.path == "thresholds") {
+                continue;
+            }
+            checked += 1;
+            assert!(
+                slice.errors.iter().any(
+                    |e| e.name == "serialize" && e.procedures.iter().any(|p| p == "thresholds")
+                ),
+                "`{name}` serves `thresholds` but registers no `[[error]] name = \"serialize\"` \
+                 covering it"
+            );
+        }
+        assert!(
+            checked >= 15,
+            "only {checked} producers declare `thresholds` — wrong source?"
+        );
+    }
+
     #[test]
     fn catchall_producers_are_recognised() {
         // snmp's telemetry tree is `{device}/{metric...}` — device-defined.

@@ -188,9 +188,8 @@ async fn main() -> Result<()> {
                 let set = status_set.clone();
                 async move {
                     serde_json::to_vec(&targets_to_wire(&set.snapshot())).map_err(|e| {
-                        zensight_sensor_core::rpc::RpcError::producer(
-                            "probe",
-                            "serialize",
+                        zensight_sensor_core::rpc::RpcError::new(
+                            zensight_common::registry::probe::error::SERIALIZE,
                             e.to_string(),
                         )
                     })

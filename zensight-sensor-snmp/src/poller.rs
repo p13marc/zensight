@@ -389,6 +389,13 @@ impl SnmpPoller {
                 device = %self.device.name,
                 "sysUpTime went backwards — device rebooted; suppressing rates this cycle"
             );
+            // The device's counters restarted from zero under a poller that
+            // did not: cycle its `device/<name>/alive` token so the reset is
+            // on the wire (RFC 04 §5, v1.39) — the one discontinuity RFC 08 §2
+            // lets a counter under this device go backwards across.
+            if let Some(health) = &self.health {
+                health.cycle_device_async(&self.device.name).await;
+            }
         }
         let mut seen_counters = std::collections::HashSet::new();
 
@@ -595,7 +602,7 @@ impl SnmpPoller {
                 Err(e) => {
                     tracing::warn!(device = %self.device.name, error = %e, "SNMP client build failed; backing off");
                     self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-                    self.record_health(false, "client build failed");
+                    self.record_health(false, "client build failed").await;
                     return CycleKind::Probe { ok: false };
                 }
             }
@@ -615,7 +622,7 @@ impl SnmpPoller {
             } else {
                 self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
             }
-            self.record_health(ok, "probe failed");
+            self.record_health(ok, "probe failed").await;
             CycleKind::Probe { ok }
         } else {
             match self.poll_once().await {
@@ -628,13 +635,14 @@ impl SnmpPoller {
                     self.record_health(
                         !outcome.all_transport_failed(),
                         "all requests failed (transport)",
-                    );
+                    )
+                    .await;
                     CycleKind::Full(outcome)
                 }
                 Err(e) => {
                     tracing::warn!(device = %self.device.name, error = %e, "SNMP poll failed");
                     self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-                    self.record_health(false, "poll cycle error");
+                    self.record_health(false, "poll cycle error").await;
                     CycleKind::Probe { ok: false }
                 }
             }
@@ -645,12 +653,16 @@ impl SnmpPoller {
         kind
     }
 
-    fn record_health(&self, ok: bool, error: &str) {
+    /// Also declares and withdraws the device's `device/<name>/alive` token
+    /// (RFC 04 §5) once the runner has attached the liveliness manager.
+    async fn record_health(&self, ok: bool, error: &str) {
         if let Some(health) = &self.health {
             if ok {
-                health.record_device_success(&self.device.name);
+                health.record_device_success_async(&self.device.name).await;
             } else {
-                health.record_device_failure(&self.device.name, error);
+                health
+                    .record_device_failure_async(&self.device.name, error)
+                    .await;
             }
         }
     }

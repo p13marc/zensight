@@ -100,8 +100,18 @@ async fn answer(req: &RpcRequest, store: &SharedStore, historian: String) -> Rpc
         )
     })
     .await
-    .map_err(|e| RpcError::new("error/historian/timeline", format!("task failed: {e}")))?
-    .map_err(|e| RpcError::new("error/historian/timeline", format!("read failed: {e}")))?;
+    .map_err(|e| {
+        RpcError::new(
+            zensight_common::registry::historian::error::TIMELINE,
+            format!("task failed: {e}"),
+        )
+    })?
+    .map_err(|e| {
+        RpcError::new(
+            zensight_common::registry::historian::error::TIMELINE,
+            format!("read failed: {e}"),
+        )
+    })?;
 
     // A full page means there may be more; a short one is the end. The cursor
     // is the last (oldest) uid returned, which is what the caller passes back
@@ -130,8 +140,12 @@ async fn answer(req: &RpcRequest, store: &SharedStore, historian: String) -> Rpc
 }
 
 fn encode(reply: TimelineReply) -> RpcResult {
-    serde_json::to_vec(&reply)
-        .map_err(|e| RpcError::new("error/historian/timeline", format!("encode failed: {e}")))
+    serde_json::to_vec(&reply).map_err(|e| {
+        RpcError::new(
+            zensight_common::registry::historian::error::TIMELINE,
+            format!("encode failed: {e}"),
+        )
+    })
 }
 
 #[cfg(test)]

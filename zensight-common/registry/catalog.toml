@@ -190,3 +190,23 @@ since = "1.5"
 description = "close a suppression window early (?id=<ulid>); gated"
 when = ["config:allow_operator_assertions"]
 gate_note = "operator assertions are off unless the correlator allows them"
+
+# Producer error names (RFC 08 §2 `[[error]]`, v1.40): `error/catalog/<name>` on the
+# wire, linted, pinned in registry.lock and served by `introspect`.
+[[error]]
+name = "not-firing"
+procedures = ["ack"]
+since = "1.5"
+description = "no firing alert matches the reference: an acknowledgement names an occurrence someone looked at, and there is none to have looked at"
+
+[[error]]
+name = "publish"
+procedures = ["ack", "link", "silence", "unlink"]
+since = "1.5"
+description = "the change was applied locally but its document could not be published to the bus; the caller should retry"
+
+[[error]]
+name = "serialize"
+procedures = ["ack", "link", "silence", "unlink"]
+since = "1.5"
+description = "the reply could not be encoded — a defect in this build, never in the request"

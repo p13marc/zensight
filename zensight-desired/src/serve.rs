@@ -173,7 +173,8 @@ async fn handle_set(
                     // disk is one that vanishes at the next restart, and the
                     // operator would have been told it landed.
                     tracing::error!(error = %e, "could not write the overrides file");
-                    let err = RpcError::new("error/desired/not-durable", e);
+                    let err =
+                        RpcError::new(zensight_common::registry::desired::error::NOT_DURABLE, e);
                     let _ = query.refused(&err, None).await;
                     return;
                 }

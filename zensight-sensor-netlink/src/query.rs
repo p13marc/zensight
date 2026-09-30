@@ -120,9 +120,8 @@ pub async fn serve_without_route(session: Arc<zenoh::Session>, producer: &str, w
     zensight_common::served::serve_unavailable(
         session,
         keys,
-        zensight_common::rpc::RpcError::producer(
-            producer,
-            "no-route-socket",
+        zensight_common::rpc::RpcError::new(
+            zensight_common::registry::netlink::error::NO_ROUTE_SOCKET,
             format!("the netlink sensor could not open an RTNETLINK socket: {why}"),
         ),
     )

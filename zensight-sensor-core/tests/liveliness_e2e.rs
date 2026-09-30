@@ -114,3 +114,68 @@ async fn token_delete_reaches_frontend_pattern_on_session_close() {
     assert_eq!(sample.kind(), SampleKind::Delete);
     assert_eq!(sample.key_expr().as_str(), expected_key);
 }
+
+/// A device whose counters reset under a running producer cycles its token
+/// (RFC 04 §5, v1.39): another peer sees the device's `alive` go away and
+/// come back — the DELETE then PUT that the doctor's `kind` judge reads as
+/// the one sanctioned counter reset under that device.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_device_cycle_is_a_delete_then_a_put_across_the_wire() {
+    let (observer, port) = {
+        let mut opened = None;
+        for attempt in 0..8 {
+            let port = candidate_port(attempt + 40);
+            if let Ok(s) = zenoh::open(listen_config(port)).await {
+                opened = Some((s, port));
+                break;
+            }
+        }
+        opened.expect("open listening observer session")
+    };
+    let sensor = Arc::new(
+        zenoh::open(connect_config(port))
+            .await
+            .expect("open sensor session"),
+    );
+    let ctx = zensight_sensor_core::v1::for_producer("testproto");
+    let device_key = ctx.device_alive_key("pdu-1").to_string();
+    let sub = observer
+        .liveliness()
+        .declare_subscriber(device_key.as_str())
+        .await
+        .expect("liveliness subscriber");
+
+    let manager = LivelinessManager::new(sensor.clone(), ctx)
+        .await
+        .expect("declare sensor token");
+    let health = zensight_sensor_core::SensorHealth::new("testproto");
+    health.attach_liveliness(Arc::new(manager));
+
+    let next = || async {
+        tokio::time::timeout(Duration::from_secs(10), sub.recv_async())
+            .await
+            .expect("timed out waiting for a device token sample")
+            .expect("subscriber closed")
+    };
+
+    health.record_device_success_async("pdu-1").await;
+    assert_eq!(
+        next().await.kind(),
+        SampleKind::Put,
+        "first success declares"
+    );
+
+    health.cycle_device_async("pdu-1").await;
+    let gone = next().await;
+    assert_eq!(gone.kind(), SampleKind::Delete, "the cycle withdraws first");
+    assert_eq!(gone.key_expr().as_str(), device_key);
+    assert_eq!(next().await.kind(), SampleKind::Put, "…then declares again");
+
+    health.device_gone_async("pdu-1").await;
+    assert_eq!(
+        next().await.kind(),
+        SampleKind::Delete,
+        "a gone device is withdrawn"
+    );
+    sensor.close().await.ok();
+}

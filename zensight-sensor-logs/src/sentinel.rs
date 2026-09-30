@@ -660,8 +660,12 @@ pub async fn serve_rules(session: Arc<zenoh::Session>, producer: String, handle:
         move || {
             let h = handle.clone();
             async move {
-                serde_json::to_vec(&h.snapshot())
-                    .map_err(|e| RpcError::new("error/logs/serialize", e.to_string()))
+                serde_json::to_vec(&h.snapshot()).map_err(|e| {
+                    RpcError::new(
+                        zensight_common::registry::logs::error::SERIALIZE,
+                        e.to_string(),
+                    )
+                })
             }
         },
     )

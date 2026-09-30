@@ -315,3 +315,11 @@ reply = "SchemaSet"
 idempotent = true
 since = "1.6"
 description = "payload self-description: the SchemaSet JSON for every type this slice references (RFC 08 §7)"
+
+# Producer error names (RFC 08 §2 `[[error]]`, v1.40): `error/desired/<name>` on the
+# wire, linted, pinned in registry.lock and served by `introspect`.
+[[error]]
+name = "not-durable"
+procedures = ["override/set"]
+since = "1.6"
+description = "the override could not be written to the overrides file, so it would vanish at the next restart — refused rather than acknowledged"

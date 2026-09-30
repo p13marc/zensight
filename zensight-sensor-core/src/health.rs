@@ -143,8 +143,11 @@ pub struct SensorHealth {
     source: Option<String>,
     /// Publisher for health metrics.
     publisher: Option<Publisher>,
-    /// Liveliness manager for Zenoh presence tokens.
-    liveliness_manager: Option<Arc<LivelinessManager>>,
+    /// Liveliness manager for the per-device presence tokens. Attached by the
+    /// runner when it declares the sensor's own `alive` token
+    /// ([`Self::attach_liveliness`]). Until then the async device calls
+    /// update state only: a device token must not precede the producer's.
+    liveliness_manager: std::sync::OnceLock<Arc<LivelinessManager>>,
     /// Declared memory budget, bytes (#811); 0 = undeclared. Carried into
     /// `self_stats.budget_bytes` and graded by the runner's budget rule —
     /// never enforced here (#812 is the enforcement).
@@ -346,7 +349,7 @@ impl SensorHealth {
             host_id: RwLock::new(None),
             source: None,
             publisher: None,
-            liveliness_manager: None,
+            liveliness_manager: std::sync::OnceLock::new(),
             budget_bytes: AtomicU64::new(0),
             publish_counters: None,
             cpu_sampler: Mutex::new(crate::procutil::SelfCpuSampler::default()),
@@ -404,9 +407,47 @@ impl SensorHealth {
     ///
     /// When set, device success/failure will automatically declare/undeclare
     /// liveliness tokens for instant presence detection by the frontend.
-    pub fn with_liveliness(mut self, liveliness: Arc<LivelinessManager>) -> Self {
-        self.liveliness_manager = Some(liveliness);
+    pub fn with_liveliness(self, liveliness: Arc<LivelinessManager>) -> Self {
+        self.attach_liveliness(liveliness);
         self
+    }
+
+    /// Attach the liveliness manager to a tracker already shared, which is
+    /// what the runner does once the sensor's `alive` token is declared. The
+    /// first attachment wins, and a second is ignored.
+    pub fn attach_liveliness(&self, liveliness: Arc<LivelinessManager>) {
+        let _ = self.liveliness_manager.set(liveliness);
+    }
+
+    /// Cycle `device_id`'s presence token because the counters under it reset
+    /// while this producer kept running (RFC 04 §5, v1.39). See
+    /// [`LivelinessManager::cycle_device`]. Without an attached manager this
+    /// does nothing, because there is no token to cycle.
+    pub async fn cycle_device_async(&self, device_id: &str) {
+        if let Some(liveliness) = self.liveliness_manager.get()
+            && let Err(e) = liveliness.cycle_device(device_id).await
+        {
+            tracing::warn!(device = %device_id, error = %e, "Failed to cycle device liveliness token");
+        }
+    }
+
+    /// The device is gone for good: a container was removed, a target was
+    /// dropped from the config. Forget its state and undeclare its token.
+    /// A token left behind would claim a device that no longer exists, and
+    /// that claim is well-formed and wrong.
+    pub async fn device_gone_async(&self, device_id: &str) {
+        let removed = self
+            .device_liveness
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(device_id)
+            .is_some();
+        if removed {
+            self.update_device_counters();
+        }
+        if let Some(liveliness) = self.liveliness_manager.get() {
+            liveliness.undeclare_device(device_id).await;
+        }
     }
 
     /// Set the total number of devices.
@@ -455,7 +496,7 @@ impl SensorHealth {
         self.record_device_success(device_id);
 
         // Declare liveliness token if configured
-        if let Some(ref liveliness) = self.liveliness_manager
+        if let Some(liveliness) = self.liveliness_manager.get()
             && let Err(e) = liveliness.declare_device_alive(device_id).await
         {
             tracing::warn!(
@@ -535,7 +576,7 @@ impl SensorHealth {
         // Undeclare liveliness token if device just went offline
         if was_online
             && is_now_offline
-            && let Some(ref liveliness) = self.liveliness_manager
+            && let Some(liveliness) = self.liveliness_manager.get()
         {
             liveliness.undeclare_device(device_id).await;
         }

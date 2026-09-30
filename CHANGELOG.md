@@ -124,6 +124,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Producer errors are registered** (zenkey 0.11 `[[error]]`, RFC 08 §2
+  v1.40). The 25 `error/<producer>/<name>` replies the tree answers are
+  declared in 18 slices, with the procedures that answer them. They are
+  pinned in `registry.lock`, served by `introspect`, and spelled through the
+  generated `registry::<producer>::error::*` constants instead of string
+  literals: catalog `not-firing`/`publish`/`serialize`, desired
+  `not-durable`, historian `stats`/`range`/`series`/`timeline`, netlink
+  `no-route-socket`, systemd `no-system-bus`, and `serialize` on every
+  producer that serves `thresholds`. `threshold::adopt` answers that last one
+  generically, so a test keeps the fifteen slices honest.
+- **Device tokens, and they cycle on a counter reset** (RFC 04 §5 / 08 §2,
+  v1.39). `SensorHealth`'s async device calls were no-ops, because nothing
+  attached a liveliness manager. The runner now attaches its manager when it
+  declares `alive`, and snmp, modbus and container publish
+  `state/<producer>/device/<device>/alive`. A token cycles (DELETE then PUT)
+  when the counters under that device reset while the producer keeps
+  running:
+  - an snmp device whose `sysUpTime` went backwards;
+  - a container with a new `started_at` or `id`.
+  The doctor's `kind` judge then excuses that reset instead of reporting a
+  counter that went backwards. A removed container's token is withdrawn. New
+  API: `SensorHealth::{attach_liveliness, cycle_device_async,
+  device_gone_async}` and `LivelinessManager::cycle_device`.
+
 - **The conformance gate runs every producer's registry as a test suite**
   (zenkey-fleet 0.16's `run_conform`, RFC 13 §3). After the doctor,
   `zensight-conformance` runs one `check conform` suite per rostered producer.

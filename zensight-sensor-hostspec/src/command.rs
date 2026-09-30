@@ -59,8 +59,12 @@ pub async fn run(
             let h = status_handle.clone();
             async move {
                 let snapshot = h.snapshot().await;
-                serde_json::to_vec(&snapshot)
-                    .map_err(|e| RpcError::new("error/hostspec/serialize", e.to_string()))
+                serde_json::to_vec(&snapshot).map_err(|e| {
+                    RpcError::new(
+                        zensight_common::registry::hostspec::error::SERIALIZE,
+                        e.to_string(),
+                    )
+                })
             }
         },
     )
@@ -75,8 +79,12 @@ pub async fn run(
         let h = spec_handle.clone();
         async move {
             let eval = h.evaluation().await;
-            serde_json::to_vec(&eval)
-                .map_err(|e| RpcError::new("error/hostspec/serialize", e.to_string()))
+            serde_json::to_vec(&eval).map_err(|e| {
+                RpcError::new(
+                    zensight_common::registry::hostspec::error::SERIALIZE,
+                    e.to_string(),
+                )
+            })
         }
     })
     .await
