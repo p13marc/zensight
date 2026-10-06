@@ -96,6 +96,8 @@ request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
 description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/cancel"
@@ -104,6 +106,8 @@ fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-ou
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/status"
@@ -112,6 +116,8 @@ reply = "ArtifactStatus"
 idempotent = true
 since = "1.0"
 description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 # The `@blob` plane (RFC 07 §2, RFC 08 §2 v1.8): every artifact-capable
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2

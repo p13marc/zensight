@@ -270,6 +270,8 @@ path = "sockets/tcp/connlat_us_p50"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
+when = ["feature:ebpf", "config:collect.ebpf", "capability:CAP_BPF"]
+gate_note = "eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)"
 description = "connect latency p50 (us) — feature `ebpf`"
 
 [[subject]]
@@ -277,6 +279,8 @@ path = "sockets/tcp/connlat_us_p95"
 class = "telemetry"
 type = "TelemetryPoint"
 since = "1.1"
+when = ["feature:ebpf", "config:collect.ebpf", "capability:CAP_BPF"]
+gate_note = "eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)"
 description = "connect latency p95 (us) — feature `ebpf`"
 
 [[subject]]
@@ -914,6 +918,8 @@ request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
 description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/cancel"
@@ -922,6 +928,8 @@ fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-ou
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/status"
@@ -930,6 +938,8 @@ reply = "ArtifactStatus"
 idempotent = true
 since = "1.0"
 description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 [[procedure]]
 path = "expectations"
 kind = "read"
@@ -1048,6 +1058,8 @@ reply = "Vec<RetransmitRecord>"
 idempotent = true
 since = "1.0"
 description = "top-K per-peer TCP retransmit counts, cumulative since load (feature ebpf)"
+when = ["feature:ebpf", "config:collect.ebpf", "capability:CAP_BPF"]
+gate_note = "eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)"
 
 [[procedure]]
 path = "connections"
@@ -1056,6 +1068,8 @@ reply = "Vec<ConnectionRecord>"
 idempotent = true
 since = "1.0"
 description = "tcplife connection-lifecycle records: pid/comm/peer/duration (feature ebpf) — NOT conntrack"
+when = ["feature:ebpf", "config:collect.ebpf", "capability:CAP_BPF"]
+gate_note = "eBPF: needs `--features ebpf` + `collect.ebpf` + CAP_BPF/CAP_PERFMON (#114)"
 
 # The `@blob` plane (RFC 07 §2, RFC 08 §2 v1.8): every artifact-capable
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2

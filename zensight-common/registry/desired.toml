@@ -297,6 +297,7 @@ request = "DesiredOverride"
 reply = "Ack"
 since = "1.6"
 description = "record a per-host override ({host, producer, topic, doc}) in the controller's overrides file and re-plan; gated by `allow_overrides`. Never edits the hand-written policy — a serde round trip would strip its comments and reorder its classes, and class order is overlay order"
+when = ["config:allow_overrides"]
 
 [[procedure]]
 path = "introspect"

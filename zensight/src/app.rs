@@ -9476,6 +9476,7 @@ mod sensor_liveliness_tests {
                 ips: Vec::new(),
                 macs: Vec::new(),
                 metadata: None,
+                capabilities: Default::default(),
                 last_updated: 0,
             }
         }
@@ -9981,6 +9982,7 @@ mod expectation_host_tests {
             ips: Vec::new(),
             macs: Vec::new(),
             metadata: None,
+            capabilities: Default::default(),
             last_updated: 0,
         }
     }

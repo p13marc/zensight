@@ -4,7 +4,12 @@
 # path) is refused — retire through [[deprecated]] and add a sibling
 # instead (RFC 08 §3). A subject line's optional sixth column is its
 # declared `kind` (RFC 08 §2, v1.32): adding one is additive,
-# changing or removing one is incompatible.
+# changing or removing one is incompatible. An `error` line pins a
+# declared error name (RFC 08 §2, v1.40), which retires like a subject.
+# A `when-subject` / `when-procedure` line pins an entry's gate (v1.35):
+# a gate is not a shape, so its every change is stale, never incompatible.
+# An `exposure-*` or `sensitive-procedure` line pins a marker (v1.43),
+# stale on every change for the same reason.
 procedure	bmc	describe	read	-	SchemaSet
 procedure	bmc	introspect	read	-	RegistrySlice
 procedure	bmc	thresholds	read	-	ThresholdsConfig
@@ -1018,3 +1023,77 @@ subject	systemd	units/failed	telemetry	TelemetryPoint
 subject	systemd	units/inactive	telemetry	TelemetryPoint
 subject	systemd	units/loaded	telemetry	TelemetryPoint
 subject	systemd	units/total	telemetry	TelemetryPoint
+when-procedure	catalog	ack	config:allow_operator_assertions
+when-procedure	catalog	link	config:allow_operator_assertions
+when-procedure	catalog	silence	config:allow_operator_assertions
+when-procedure	catalog	unack	config:allow_operator_assertions
+when-procedure	catalog	unlink	config:allow_operator_assertions
+when-procedure	catalog	unsilence	config:allow_operator_assertions
+when-procedure	desired	override/set	config:allow_overrides
+when-procedure	gnmi	artifact/cancel	config:artifacts
+when-procedure	gnmi	artifact/request	config:artifacts
+when-procedure	gnmi	artifact/status	config:artifacts
+when-procedure	logs	artifact/cancel	config:artifacts
+when-procedure	logs	artifact/request	config:artifacts
+when-procedure	logs	artifact/status	config:artifacts
+when-procedure	logs	filter	config:enable_dynamic_filters
+when-procedure	logs	filter/set	config:enable_dynamic_filters
+when-procedure	modbus	artifact/cancel	config:artifacts
+when-procedure	modbus	artifact/request	config:artifacts
+when-procedure	modbus	artifact/status	config:artifacts
+when-procedure	netflow	artifact/cancel	config:artifacts
+when-procedure	netflow	artifact/request	config:artifacts
+when-procedure	netflow	artifact/status	config:artifacts
+when-procedure	netlink	artifact/cancel	config:artifacts
+when-procedure	netlink	artifact/request	config:artifacts
+when-procedure	netlink	artifact/status	config:artifacts
+when-procedure	netlink	connections	capability:CAP_BPF,config:collect.ebpf,feature:ebpf
+when-procedure	netlink	retransmits	capability:CAP_BPF,config:collect.ebpf,feature:ebpf
+when-procedure	netring	artifact/cancel	config:artifacts
+when-procedure	netring	artifact/request	config:artifacts
+when-procedure	netring	artifact/status	config:artifacts
+when-procedure	netring	assets	config:collect.assets
+when-procedure	netring	bandwidth	config:bandwidth_attribution
+when-procedure	netring	capture_disk	config:capture.to_disk.mode
+when-procedure	netring	capture_disk/set	config:capture.to_disk.mode
+when-procedure	netring	capture_filter	config:capture_focus.enabled
+when-procedure	netring	capture_filter/set	config:capture_focus.enabled
+when-procedure	netring	captures	config:capture.to_disk.mode
+when-procedure	netring	dns	config:collect.dns
+when-procedure	netring	elephant_flows	config:collect.talkers
+when-procedure	netring	encrypted_dns	config:collect.encrypted_dns
+when-procedure	netring	http	config:collect.http
+when-procedure	netring	ipfix	config:collect.ipfix,feature:ipfix
+when-procedure	netring	ja4h	config:collect.http_fp,feature:ja4plus
+when-procedure	netring	matrix	config:collect.talkers
+when-procedure	netring	quic	config:collect.quic
+when-procedure	netring	ssh	config:collect.ssh
+when-procedure	netring	talkers	config:collect.talkers
+when-procedure	netring	threat_intel	config:threat
+when-procedure	netring	threat_intel/set	config:threat
+when-procedure	parallax	artifact/cancel	config:artifacts
+when-procedure	parallax	artifact/request	config:artifacts
+when-procedure	parallax	artifact/status	config:artifacts
+when-procedure	snmp	action/set	config:actions.enabled
+when-procedure	snmp	artifact/cancel	config:artifacts
+when-procedure	snmp	artifact/request	config:artifacts
+when-procedure	snmp	artifact/status	config:artifacts
+when-procedure	sysinfo	artifact/cancel	config:artifacts
+when-procedure	sysinfo	artifact/request	config:artifacts
+when-procedure	sysinfo	artifact/status	config:artifacts
+when-procedure	systemd	action	capability:system-bus,config:actions.enabled
+when-procedure	systemd	action/set	capability:system-bus,config:actions.enabled
+when-procedure	systemd	actions	capability:system-bus,config:actions.enabled
+when-procedure	systemd	artifact/cancel	config:artifacts
+when-procedure	systemd	artifact/request	config:artifacts
+when-procedure	systemd	artifact/status	config:artifacts
+when-procedure	systemd	expectations	capability:system-bus,config:alerts.enabled
+when-procedure	systemd	expectations/set	capability:system-bus,config:alerts.enabled
+when-procedure	systemd	unit/file	config:actions.expose_unit_files
+when-subject	container	{name}/image_behind_upstream	config:upstream.enabled
+when-subject	netlink	sockets/tcp/connlat_us_p50	capability:CAP_BPF,config:collect.ebpf,feature:ebpf
+when-subject	netlink	sockets/tcp/connlat_us_p95	capability:CAP_BPF,config:collect.ebpf,feature:ebpf
+when-subject	sysinfo	gpu/{card}/ecc_aggregate_uncorrected	capability:ecc,capability:nvidia-driver,config:collect.gpu,feature:nvml
+when-subject	sysinfo	gpu/{card}/ecc_volatile_uncorrected	capability:ecc,capability:nvidia-driver,config:collect.gpu,feature:nvml
+when-subject	sysinfo	gpu/{card}/memory_utilisation_pct	capability:nvidia-driver,config:collect.gpu,feature:nvml
+when-subject	sysinfo	gpu/{card}/process/{pid}/vram_bytes	capability:nvidia-driver,config:collect.gpu,feature:nvml

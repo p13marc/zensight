@@ -118,6 +118,9 @@ pub struct SensorRunner<C: SensorConfig> {
     /// The artifact channel's handle (#1156), for the wind-down that runs
     /// before anything is aborted.
     artifact: Option<crate::artifact::ArtifactChannel>,
+    /// The registration document's `capabilities` member (RFC 04 §5); see
+    /// [`Self::capabilities`].
+    capabilities: crate::capabilities::CapabilityClaims,
 }
 
 /// How long the artifact channel gets to wind down (#1156): tell every
@@ -285,6 +288,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             supervisors: Vec::new(),
             late_aborts: Vec::new(),
             artifact: None,
+            capabilities: Default::default(),
         })
     }
 
@@ -433,6 +437,15 @@ impl<C: SensorConfig> SensorRunner<C> {
 
     /// Get the shared sensor-health tracker. Sensors may update it (device
     /// counts, poll durations, errors); the runner publishes it periodically.
+    /// The `capabilities` this instance claims on its registration document
+    /// (RFC 04 §5, v1.41): which of the registry's `capability:` predicates
+    /// hold here, per device. A shared handle — claim when the thing that
+    /// needs the capability actually succeeded, withdraw when it stops; the
+    /// document picks it up on its next re-emission.
+    pub fn capabilities(&self) -> crate::capabilities::CapabilityClaims {
+        self.capabilities.clone()
+    }
+
     pub fn health(&self) -> Arc<crate::health::SensorHealth> {
         self.health.clone()
     }
@@ -731,6 +744,7 @@ impl<C: SensorConfig> SensorRunner<C> {
             let health = self.health.clone();
             let identity_cfg = self.config.identity_config();
             let metadata = metadata.clone();
+            let capabilities = self.capabilities.clone();
             let task = tokio::spawn(async move {
                 // Opt-in cloud-metadata probe (#311): one shot before the first
                 // emit — an instance's cloud identity never changes while it
@@ -789,6 +803,7 @@ impl<C: SensorConfig> SensorRunner<C> {
                         ips: id.ips.clone(),
                         macs: id.macs.clone(),
                         metadata: metadata.clone(),
+                        capabilities: capabilities.snapshot(),
                         last_updated: now,
                     };
                     let evidence = self_evidence(&name, &source, id, &facts, now);

@@ -1080,6 +1080,8 @@ class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 16
 since = "1.7"
+when = ["feature:nvml", "config:collect.gpu", "capability:nvidia-driver"]
+gate_note = "NVML only: no kernel driver exposes memory-controller utilisation (#954)"
 description = "percentage of the sample period the GPU MEMORY CONTROLLER was busy (#954). Distinct from VRAM occupancy: this is what separates a memory-bound workload from a compute-bound one. NVML only — `--features nvml`; no kernel driver exposes it"
 
 [[subject]]
@@ -1088,6 +1090,8 @@ class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 16
 since = "1.7"
+when = ["feature:nvml", "config:collect.gpu", "capability:nvidia-driver", "capability:ecc"]
+gate_note = "NVML only, on a card with ECC enabled (#954)"
 description = "uncorrected (double-bit) device-memory ECC errors since the driver loaded (#954). UNCORRECTED, not corrected: a corrected error is the hardware working. NVML only, and absent on a card with ECC disabled"
 
 [[subject]]
@@ -1096,6 +1100,8 @@ class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 16
 since = "1.7"
+when = ["feature:nvml", "config:collect.gpu", "capability:nvidia-driver", "capability:ecc"]
+gate_note = "NVML only, on a card with ECC enabled (#954)"
 description = "uncorrected device-memory ECC errors over the lifetime of the device (#954). NVML only"
 
 [[subject]]
@@ -1104,6 +1110,8 @@ class = "telemetry"
 type = "TelemetryPoint"
 cardinality = 32
 since = "1.7"
+when = ["feature:nvml", "config:collect.gpu", "capability:nvidia-driver"]
+gate_note = "NVML only: per-process attribution has no sysfs equivalent (#954)"
 description = "VRAM held by one process on this card (#954). NVML only. Capped at 32 rows per card, largest first — one key per pid per card is otherwise an unbounded family keyed by something that changes every few seconds"
 
 [[subject]]
@@ -1195,6 +1203,8 @@ request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
 description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/cancel"
@@ -1203,6 +1213,8 @@ fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-ou
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/status"
@@ -1211,6 +1223,8 @@ reply = "ArtifactStatus"
 idempotent = true
 since = "1.0"
 description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 [[procedure]]
 path = "processes"
 kind = "read"

@@ -377,8 +377,13 @@ async fn sample_socket_bytes(conn: &Connection<SockDiag>) -> Vec<(u64, u64, u64)
 /// trips `check_registry_coverage`, which debug-panics — which is exactly what
 /// a stock `cargo run -p zensight-sensor-netlink` used to do (#648).
 ///
-/// With no eBPF module behind them the reply is `error/unsupported`, not an
-/// empty list. That distinction is the whole point: `[]` would conflate "this
+/// With no eBPF module behind them the reply is an error, not an empty list —
+/// and which error says which of the three `when` predicates the registry
+/// declares is false (RFC 08 §6.1): `error/unsupported` for a build without
+/// `--features ebpf`, `error/gated` for `collect.ebpf: false`, and
+/// `error/gated` for a load the host refused (CAP_BPF). One `unsupported` for
+/// all three used to tell an operator to rebuild when the fix was a config
+/// line. That distinction is the whole point: `[]` would conflate "this
 /// build has no eBPF" with "eBPF is running and saw no retransmits", and a
 /// caller that cannot tell those apart is being lied to more quietly than by
 /// the missing declaration. Three outcomes stay distinguishable — no reply at
@@ -392,6 +397,7 @@ pub async fn run_ebpf_queries(
     session: Arc<zenoh::Session>,
     producer: String,
     ebpf: QueryEbpf,
+    collect_ebpf: bool,
     top_k: usize,
 ) {
     let retransmits_key = zensight_common::command::query_key(&producer, "retransmits");
@@ -427,7 +433,7 @@ pub async fn run_ebpf_queries(
                     reply_json(&query, &retransmits_key, &state.top_retransmits(top_k)).await;
                     continue;
                 }
-                reply_no_ebpf(&query, "retransmits").await;
+                reply_no_ebpf(&query, "retransmits", collect_ebpf).await;
             }
             q = connections_q.recv_async() => {
                 let Ok(query) = q else { return };
@@ -436,21 +442,18 @@ pub async fn run_ebpf_queries(
                     reply_json(&query, &connections_key, &state.recent_connections()).await;
                     continue;
                 }
-                reply_no_ebpf(&query, "connections").await;
+                reply_no_ebpf(&query, "connections", collect_ebpf).await;
             }
         }
     }
 }
 
-/// Reply `error/unsupported` (RFC 05 §3) on an eBPF procedure this build or
-/// this run cannot answer. The procedure stays *declared* either way — the
-/// registry advertises it, so the build must serve it (RFC 08 §6.1, #648).
-async fn reply_no_ebpf(query: &zenoh::query::Query, procedure: &str) {
-    let err = zensight_common::rpc::RpcError::unsupported(format!(
-        "`{procedure}` needs the netlink sensor built with `--features ebpf`, run with \
-         `collect.ebpf: true`, and granted CAP_BPF + CAP_PERFMON; this build has no \
-         eBPF module loaded"
-    ));
+/// Reply the error for the `when` predicate that is false (RFC 05 §3, RFC 08
+/// §6.1) on an eBPF procedure this build or this run cannot answer. The
+/// procedure stays *declared* either way — the registry advertises it, so the
+/// build must serve it (#648).
+async fn reply_no_ebpf(query: &zenoh::query::Query, procedure: &str, collect_ebpf: bool) {
+    let err = no_ebpf_error(procedure, cfg!(feature = "ebpf"), collect_ebpf);
     let payload = match serde_json::to_vec(&err) {
         Ok(p) => p,
         Err(e) => {
@@ -460,6 +463,31 @@ async fn reply_no_ebpf(query: &zenoh::query::Query, procedure: &str) {
     };
     if let Err(e) = query.reply_err(payload).await {
         tracing::warn!(procedure = %procedure, error = %e, "query: reply_err failed");
+    }
+}
+
+/// Which predicate of `when = ["feature:ebpf", "config:collect.ebpf",
+/// "capability:CAP_BPF"]` is false, as the error it binds.
+fn no_ebpf_error(
+    procedure: &str,
+    built: bool,
+    collect_ebpf: bool,
+) -> zensight_common::rpc::RpcError {
+    use zensight_common::rpc::RpcError;
+    if !built {
+        RpcError::unsupported(format!(
+            "`{procedure}` needs the netlink sensor built with `--features ebpf`"
+        ))
+    } else if !collect_ebpf {
+        RpcError::gated(format!(
+            "`{procedure}` needs `collect.ebpf: true` in the netlink sensor config"
+        ))
+        .with_refused_by("collect.ebpf")
+    } else {
+        RpcError::gated(format!(
+            "`{procedure}`: the eBPF module did not load on this host — it needs CAP_BPF + \
+             CAP_PERFMON (and CAP_DAC_READ_SEARCH for the tracepoints); see the startup log"
+        ))
     }
 }
 
@@ -1040,6 +1068,23 @@ mod tests {
     use std::path::Path;
 
     use super::*;
+
+    /// Each false `when` predicate answers the error it binds (RFC 08 §6.1):
+    /// a missing build feature is a rebuild, a switch or a capability is not.
+    #[test]
+    fn no_ebpf_names_the_false_predicate() {
+        use zensight_common::rpc::{ERR_GATED, ERR_UNSUPPORTED};
+        assert_eq!(
+            no_ebpf_error("connections", false, true).error,
+            ERR_UNSUPPORTED
+        );
+        let off = no_ebpf_error("connections", true, false);
+        assert_eq!(off.error, ERR_GATED);
+        assert_eq!(off.refused_by.as_deref(), Some("collect.ebpf"));
+        let refused = no_ebpf_error("connections", true, true);
+        assert_eq!(refused.error, ERR_GATED);
+        assert!(refused.message.contains("CAP_BPF"), "{}", refused.message);
+    }
 
     /// Live kernel check (#322): `.with_cc_info()` requests don't error against a
     /// real sockdiag, and a `filter_expr()` lowered from a port selector is applied

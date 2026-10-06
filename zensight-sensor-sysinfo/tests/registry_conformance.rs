@@ -439,11 +439,11 @@ fn overlapping_families_resolve_to_the_right_entry() {
 /// Registered sysinfo telemetry families this build can never emit, and why.
 ///
 /// A standing, reviewed admission that `introspect` advertises something
-/// conditional. The registry TOML has no `feature`/`when` field to say so in
-/// the slice itself (that needs a zenkey schema change — see RFC 08 §6.1), so
-/// the ledger lives here, next to the check that enforces it. Entries are
-/// verified in both directions: one the build *does* emit fails, and one the
-/// registry no longer declares fails. See `zensight_common::registry_audit`.
+/// conditional — declared on the entries themselves since zenkey 0.11,
+/// `when = ["feature:nvml", "config:collect.gpu", "capability:…"]` (RFC 08
+/// §2), and read back here through `registry_audit::conditional_families`.
+/// Entries are verified in both directions: one the build *does* emit fails,
+/// and one the registry no longer declares fails.
 /// On a default build the four NVML families are unreachable: their only
 /// caller is `gpu::nvml::extra_metrics`, fed by a `read()` that returns `None`
 /// without `--features nvml`. Unlike a conditional *procedure*, which is
@@ -453,14 +453,14 @@ fn overlapping_families_resolve_to_the_right_entry() {
 ///
 /// The netlink eBPF entries are the same shape and set the precedent.
 #[cfg(not(feature = "nvml"))]
-fn conditional_families() -> Vec<(&'static str, &'static str)> {
+fn conditional_families() -> Vec<(String, String)> {
     let ledger = zensight_common::registry_audit::conditional_families("sysinfo");
     assert_eq!(
         ledger.len(),
         4,
-        "conditional.lock lost sysinfo's NVML entries — a default build cannot \
-         emit them, so dropping the excuse turns the coverage check into a \
-         false failure"
+        "the sysinfo registry no longer declares `when` on NVML entries — a \
+         default build cannot emit them, so dropping the condition turns the \
+         coverage check into a false failure"
     );
     ledger
 }
@@ -471,7 +471,7 @@ fn conditional_families() -> Vec<(&'static str, &'static str)> {
 /// if the feature stopped being what makes the difference, this build would
 /// fail here.
 #[cfg(feature = "nvml")]
-fn conditional_families() -> Vec<(&'static str, &'static str)> {
+fn conditional_families() -> Vec<(String, String)> {
     Vec::new()
 }
 

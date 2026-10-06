@@ -262,17 +262,38 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, cfg: ActionsCon
         );
     }
 
+    // Enabled, and still unable to act: the host lacks the system bus
+    // (`capability:system-bus` in the registry's `when`). The procedures stay
+    // declared and answer `error/gated` for the same reason the disabled
+    // branch above declares them — returning here used to leave `introspect`
+    // advertising three procedures this run neither served nor refused
+    // (RFC 08 §6.1).
+    let no_bus = |what: &str, e: &dyn std::fmt::Display| {
+        tracing::error!(error = %e, "action: {what}");
+        tokio::spawn(zensight_common::served::serve_unavailable(
+            session.clone(),
+            vec![
+                command_key(&producer, ACTION_TOPIC),
+                status_key(&producer, ACTION_TOPIC),
+                query_key(&producer, ACTIONS_TOPIC),
+            ],
+            zensight_common::rpc::RpcError::gated(format!(
+                "systemd service control is enabled but this host has no usable system bus \
+                 ({what}: {e})"
+            )),
+        ));
+    };
     let conn = match zbus::Connection::system().await {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(error = %e, "action: system bus connect failed");
+            no_bus("system bus connect failed", &e);
             return;
         }
     };
     let manager = match ManagerProxy::new(&conn).await {
         Ok(m) => m,
         Err(e) => {
-            tracing::error!(error = %e, "action: Manager proxy failed");
+            no_bus("Manager proxy failed", &e);
             return;
         }
     };

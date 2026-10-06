@@ -1,14 +1,17 @@
 fn main() {
     zenkey_build::Config::new()
         .registry_dir("registry")
-        // Both ledgers default to `<registry_dir>/<name>.lock` and would be
-        // picked up implicitly. They are named anyway, because their absence
-        // is silent: a missing `conditional.lock` is an *empty* ledger, not an
-        // error, so a rename or a stray `.gitignore` would quietly stop
-        // excusing anything — and the emitted-surface check would then start
-        // failing for a reason that has nothing to do with the code.
+        // The ledger defaults to `<registry_dir>/deprecated.lock` and would be
+        // picked up implicitly; it is named anyway, because a missing one is
+        // an *empty* ledger rather than an error.
+        //
+        // There is no `conditional.lock` any more: a conditional surface says
+        // so in its own entry, `when = ["feature:…", "config:…",
+        // "capability:…"]` (RFC 08 §2, v1.35/v1.41). zenkey-build refuses a
+        // ledger line naming an entry that declares `when` (the one-spelling
+        // lint), so the two cannot drift apart — and there is now one place
+        // to say it.
         .ledger("registry/deprecated.lock")
-        .conditional_ledger("registry/conditional.lock")
         .generate()
         .unwrap();
 

@@ -1242,6 +1242,8 @@ reply = "OutletStatus"
 idempotent = false
 since = "1.12"
 description = "gated PDU outlet cycle {device,outlet} — default OFF, allowlist plus a SEPARATE write credential plus a PDU profile whose control OIDs are verified; refuses with error/gated, and BOTH outcomes reach the host audit trail (#957). There is no polkit here and the bus caller is anonymous: the honest description is anyone who can reach the bus and whose target is on the allowlist"
+when = ["config:actions.enabled"]
+gate_note = "off by default; credentials, the device profile and the outlet allowlist are checked per request (#956)"
 
 [[procedure]]
 path = "action"
@@ -1300,6 +1302,8 @@ request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
 description = "initiate artifact generation; replies { id } immediately (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/cancel"
@@ -1308,6 +1312,8 @@ fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-ou
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 [[procedure]]
 path = "artifact/status"
@@ -1316,6 +1322,8 @@ reply = "ArtifactStatus"
 idempotent = true
 since = "1.0"
 description = "advertised artifact kinds + the in-flight/ready state per kind (RFC 05 §3)"
+when = ["config:artifacts"]
+gate_note = "at least one artifact kind enabled — `artifacts.report`, `artifacts.snapshot`, or the producer's own kind"
 
 # The `@blob` plane (RFC 07 §2, RFC 08 §2 v1.8): every artifact-capable
 # sensor runs the Tier-1 artifact channel (zblob BlobServer) and the Tier-2

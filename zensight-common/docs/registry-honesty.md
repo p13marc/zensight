@@ -116,48 +116,60 @@ A *subject* does not:
 So the subject half is checked at **test time**, against the producer's
 mappers, which is a question about code rather than about this host.
 
-## Conditional surfaces — the actual gap
+## Conditional surfaces — declared on the entry (`when`)
 
-A registry entry still has no way to say *"only in builds with feature X"* —
-the `feature`/`when` field remains deferred upstream (zenkey #171). What zenkey
-0.7 added instead is a **ledger beside** the TOMLs:
-[`registry/conditional.lock`](../registry/conditional.lock), one
-`<producer>\t<path>\t<condition>` line per conditional subject, checked by
-`zenkey-build` at build time (a line naming no live registry subject fails the
-build) and read at test time through
-`registry_audit::conditional_families(producer)`. The ledger *conditions* an
-entry; it does not replace one — the subject is still declared and still served
-through `introspect` unmarked.
+Since zenkey 0.11 (RFC 08 §2, v1.35/v1.41) a registry entry says *"only
+when …"* itself: `when = ["<kind>:<name>", …]`, ANDed, from a closed
+vocabulary of three kinds, with a one-line `gate_note` for the human.
 
-So a build-conditional surface still has exactly two honest options, and
+| kind | what false means | what a gated procedure answers |
+|---|---|---|
+| `feature:` | absent from this build (a cargo feature) → **rebuild** | `error/unsupported` |
+| `config:` | built in, switched off here (a config key, spelled relative to the sensor's own section: `collect.ebpf`, `actions.enabled`) → **reconfigure** | `error/gated` |
+| `capability:` | built in, the host lacks it (a privilege, a driver, a bus) → **fix the host** | `error/gated` |
+
+The condition rides `introspect`, so `zenctl topic info` shows it and
+`zenctl check conform` judges it: a gated reply from a procedure that declares
+no `when` is **not met**, and so is one whose error does not match the
+predicate kinds (`unsupported` needs a `feature:`, `gated` a `config:` or
+`capability:`). The CI conformance gate runs that suite. It replaced the
+zensight-only `registry/conditional.lock` ledger (zenkey 0.7): a ledger line
+beside the TOML conditioned an entry the wire still served unmarked; `when`
+is the entry. zenkey-build refuses a ledger line naming an entry that declares
+`when`, so there is one spelling.
+
+A build-conditional surface still has exactly two honest options, and
 **silence is not one of them** (#648):
 
-**Procedures — declare unconditionally, answer an error.** This is now the rule
-throughout the workspace. Four outcomes stay distinguishable for a caller:
+**Procedures — declare them, with `when`, and answer the error it binds.**
+Four outcomes stay distinguishable for a caller:
 
 | what the caller sees | what it means |
 |---|---|
 | no reply at all | no such producer on the bus |
 | `error/unsupported` | producer present, capability not in this build → **rebuild** |
-| `error/gated` | capability built in, switched off here → **reconfigure** |
+| `error/gated` | capability built in, switched off or unavailable here → **reconfigure** / **fix the host** |
 | an empty value reply | capability live, nothing to report |
 
 Declaring nothing collapses the middle two into the first. `[]` collapses them
 into the fourth. Both are the silence the check exists to prevent.
 
-**Subjects — a reviewed ledger.** A procedure that cannot answer can still
-*reply*; a gauge that has no reading cannot *publish*. A sentinel value
-(`-1`, `NaN`) would corrupt every downstream consumer, and publishing nothing is
-indistinguishable from an idle host. There is no honest wire representation of
-"this gauge does not exist in this build", so such families are listed in
-`registry/conditional.lock` with the condition that gates them.
+**Subjects — `when`, and silence while it is false.** A procedure that cannot
+answer can still *reply*; a gauge that has no reading cannot *publish*. A
+sentinel value (`-1`, `NaN`) would corrupt every downstream consumer, and
+publishing nothing is indistinguishable from an idle host. There is no honest
+wire representation of "this gauge does not exist in this build", so such a
+family declares `when` and MAY be silent while a predicate is false (§6.1).
+Seven entries do: netlink's two connect-latency percentiles (eBPF), container's
+`image_behind_upstream` (the egressing collector) and sysinfo's four NVML
+families.
 
-The ledger is checked in both directions, and since #739 the two halves live in
-two places on purpose: **`zenkey-build` fails the build** when a line names no
-live registry subject (so an excuse cannot outlive its entry, even for a
-producer with no conformance test), and `registry_audit::assert_families_covered`
-fails the test when a ledgered family *is* emitted (so the excuse cannot outlive
-the gate). Neither half lets it decay into a permanent excuse.
+The exemption is checked in both directions:
+`registry_audit::conditional_families(producer)` reads the `when` entries back
+out of the compiled slice, and `registry_audit::assert_families_covered` fails
+the test when an unexempted family is never emitted (the lie) *or* when an
+exempted one is (the gate stopped being what makes the difference — the
+`--features nvml` CI leg is the positive proof for sysinfo's four).
 
 The whole workspace has **two** lines, and that is correct rather than an
 oversight — the lock file's header says why, at length, so the next reader does

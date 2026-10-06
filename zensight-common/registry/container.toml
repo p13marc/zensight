@@ -193,6 +193,8 @@ type = "TelemetryPoint"
 kind = "gauge"
 cardinality = 512
 since = "1.0"
+when = ["config:upstream.enabled"]
+gate_note = "the one collector that leaves the host, off by default (#819)"
 description = "1 when the running digest differs from the tag's current upstream digest — the live gauge that replaces a monthly image-update mail. Only with the explicitly-egressing collector on"
 
 [[subject]]

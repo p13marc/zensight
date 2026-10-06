@@ -36,6 +36,7 @@ mod advanced_publisher;
 mod alert;
 mod args;
 pub mod artifact;
+pub mod capabilities;
 pub mod cloud;
 mod config;
 pub mod container;
@@ -73,6 +74,7 @@ pub use artifact::{
     ArtifactChannel, ArtifactProducer, DeliveryKind, ProduceCtx, Produced, ProgressUpdate,
     ReportProducer, SnapshotProducer,
 };
+pub use capabilities::CapabilityClaims;
 pub use cloud::detect_cloud;
 pub use config::{ResourcesConfig, SensorConfig, resolved_source};
 pub use container::{container_id_from_cgroup, container_id_from_path, detect_self_container_id};
