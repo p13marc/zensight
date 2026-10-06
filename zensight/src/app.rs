@@ -2405,7 +2405,7 @@ impl ZenSight {
                         sweep
                             .replies
                             .iter()
-                            .filter_map(|r| zenkey::slice::parse_slice(&r.toml).ok())
+                            .filter_map(|r| r.slice().ok())
                             .collect(),
                     );
                     self.fleet_swept = true;
@@ -8474,14 +8474,6 @@ impl FleetQueriers {
         let mut replies: Vec<FleetReply> = Vec::new();
         for querier in [&self.wildcard, &self.catalog] {
             for answer in querier.fetch().await? {
-                let zenkey_fleet::Answer::Value(payload) = answer.answer else {
-                    // An error reply is an answer, and RFC 05 §3 says it means
-                    // failure — but it carries no slice, so there is nothing to
-                    // diff. The producer stays in the inventory through the
-                    // liveliness join, which is where "alive and told us
-                    // nothing usable" belongs.
-                    continue;
-                };
                 // The producer chunk comes from the answering key too — the
                 // wildcard sweep asks `@rpc/*/introspect`, so the key is the
                 // only place that says which producer replied.
@@ -8499,13 +8491,24 @@ impl FleetQueriers {
                         zenkey::Origin::Host(_) => continue,
                     },
                 };
-                let Ok(toml) = String::from_utf8(payload.to_bytes().to_vec()) else {
-                    continue;
+                // An error reply, or a body that is not text, is still an
+                // answer: it becomes an `unreadable` row that says what came
+                // back, never a skip that renders as "served no introspect
+                // reply" (#491 — the silence RFC 13 §3 O4 forbids).
+                let source = match answer.answer {
+                    zenkey_fleet::Answer::Value(payload) => {
+                        String::from_utf8(payload.to_bytes().to_vec())
+                            .map_err(|e| format!("the reply is not text: {e}"))
+                    }
+                    zenkey_fleet::Answer::Error { name, message } => {
+                        Err(format!("introspect answered {name}: {message}"))
+                    }
                 };
                 replies.push(FleetReply {
                     origin: answer.origin,
                     producer,
-                    toml,
+                    source,
+                    encoding: answer.encoding,
                 });
             }
         }
@@ -10278,7 +10281,8 @@ mod system_view_tests {
             replies: vec![FleetReply {
                 origin: ORIGIN.into(),
                 producer: PRODUCER.into(),
-                toml: SLICE.into(),
+                source: Ok(SLICE.into()),
+                encoding: None,
             }],
             elided: 0,
             bound: 0,

@@ -65,7 +65,7 @@ fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
     // first run here for exactly that reason. Asking the slice is both
     // stronger and immune to its own documentation. (They have since moved to
     // this shape too, for the same reason.)
-    let toml = zensight_common::registry::bmc::REGISTRY_TOML;
+    let toml = zensight_common::registry::bmc::REGISTRY_SOURCE;
     let slice = zenkey::parse_slice(toml).expect("the shipped bmc slice parses");
     let writes: Vec<&str> = slice
         .procedures

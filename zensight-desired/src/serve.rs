@@ -36,7 +36,7 @@ pub struct OverrideCtx {
 /// were answered by nothing at all"*. A list derived from the slice cannot
 /// drift from it.
 pub fn declared_rpc_keys() -> Vec<String> {
-    let toml = zensight_common::registry::desired::REGISTRY_TOML;
+    let toml = zensight_common::registry::desired::REGISTRY_SOURCE;
     let slice = zenkey::parse_slice(toml).expect("the shipped @desired slice parses");
     let mut keys: Vec<String> = slice
         .procedures
@@ -83,8 +83,14 @@ pub async fn serve(
             }
             q = introspect_q.recv_async() => {
                 let Ok(q) = q else { break };
-                let toml = zensight_common::registry::desired::REGISTRY_TOML;
-                if let Err(e) = q.reply(introspect_key.as_str(), toml.as_bytes()).await {
+                let source = zensight_common::registry::desired::REGISTRY_SOURCE;
+                // The reply MUST declare the slice's spelling (RFC 08 §6, v1.44).
+                let encoding = zensight_common::registry::desired::REGISTRY_ENCODING;
+                if let Err(e) = q
+                    .reply(introspect_key.as_str(), source.as_bytes())
+                    .encoding(zenoh::bytes::Encoding::from(encoding))
+                    .await
+                {
                     tracing::warn!(error = %e, "introspect reply failed");
                 }
             }

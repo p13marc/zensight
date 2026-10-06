@@ -384,7 +384,7 @@ pub fn is_write_procedure(producer: &str, path: &str) -> bool {
         return false;
     };
     let set = cache.entry(producer.to_string()).or_insert_with(|| {
-        crate::registry::registry_toml(producer)
+        crate::registry::registry_source(producer)
             .and_then(|toml| zenkey::parse_slice(toml).ok())
             .map(|slice| {
                 slice
@@ -405,6 +405,41 @@ pub fn is_write_procedure(producer: &str, path: &str) -> bool {
         && !NOT_AUDITED
             .iter()
             .any(|(p, path_, _)| *p == producer && *path_ == path)
+}
+
+/// Whether `producer`'s procedure at `path` is declared `fanout = "allowed"`
+/// — the one case a write answers a wildcard query (RFC 05 §2.1, v1.38).
+///
+/// A write's `fanout` defaults to `forbidden` (RFC 08 §2 G2), so everything
+/// this cannot read — an unknown producer, an unparseable slice, an
+/// undeclared path, an unknown token — answers `false`: the refusal is the
+/// convention's default, and a broadcast write is the case the rule exists
+/// for.
+pub fn is_fanout_allowed(producer: &str, path: &str) -> bool {
+    static ALLOWED: OnceLock<Mutex<HashMap<String, HashSet<String>>>> = OnceLock::new();
+    let cache = ALLOWED.get_or_init(|| Mutex::new(HashMap::new()));
+    let Ok(mut cache) = cache.lock() else {
+        return false;
+    };
+    let set = cache.entry(producer.to_string()).or_insert_with(|| {
+        crate::registry::registry_source(producer)
+            .and_then(|src| zenkey::parse_slice(src).ok())
+            .map(|slice| {
+                slice
+                    .procedures
+                    .iter()
+                    .filter(|p| {
+                        p.fanout
+                            .as_ref()
+                            .and_then(|f| f.known())
+                            .is_some_and(|f| matches!(f, zenkey::slice::Fanout::Allowed))
+                    })
+                    .map(|p| p.path.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    });
+    set.contains(path)
 }
 
 /// Write procedures deliberately kept out of the trail, with the reason.
@@ -880,7 +915,7 @@ mod tests {
     #[test]
     fn every_exemption_still_names_a_live_write_procedure() {
         for (producer, path, reason) in NOT_AUDITED {
-            let toml = crate::registry::registry_toml(producer)
+            let toml = crate::registry::registry_source(producer)
                 .unwrap_or_else(|| panic!("NOT_AUDITED names unknown producer {producer}"));
             let slice = zenkey::parse_slice(toml).expect("slice parses");
             let decl = slice

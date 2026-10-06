@@ -75,6 +75,23 @@ Three checks back that up, in decreasing order of strength:
    pass. Both checks used to return an empty result in that case, so a typo'd
    producer name turned the honesty check into a silent success.
 
+### A broadcast write is refused before the handler, and recorded
+
+Since zenkey 0.11 (RFC 05 §2.1, v1.38) `WriteQueryable::recv_async` also
+enforces the fan-out rule. Unless the procedure's registry entry says
+`fanout = "allowed"`, a query whose key expression is not the queryable's own
+concrete key — `v1/*/@rpc/snmp/targets/set` — is answered
+`error/fanout-forbidden` with `zenkey::ExactKeyError`'s text, **recorded as a
+refusal** (`refused_by="error/fanout-forbidden"`), and never handed to the
+handler; the wait continues. A write the registry does not know (a synthetic
+producer in a test rig) takes the convention's default, forbidden.
+
+The record is the point as much as the refusal. Zenoh ACL denies by
+inclusion, so a wildcard write walks past a per-producer deny rule; the server
+is the one layer that sees the key a query actually carried, and a broadcast
+attempt on a host's target table is exactly the line this trail exists for.
+Pinned by `zensight-common/tests/write_fanout.rs`.
+
 A CI grep guard sits beside the four in `.forgejo/workflows/ci.yml`'s `lint`
 job. It is a tripwire for the branch that never runs a sensor's tests, not the
 enforcement.

@@ -134,8 +134,8 @@ pub use query_detail::{
 };
 pub use relation::{Edge, EndpointClaim, Observer, RelationKind, RelationshipEvidence};
 pub use rpc::{
-    ERR_BUSY, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED, ERR_UNSUPPORTED,
-    RpcError, RpcRequest, RpcResult, percent_decode, percent_encode,
+    ERR_BUSY, ERR_FANOUT_FORBIDDEN, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED,
+    ERR_UNSUPPORTED, RpcError, RpcRequest, RpcResult, percent_decode, percent_encode,
 };
 pub use serialization::{Format, decode, decode_auto, decode_with_encoding, encode};
 pub use session::connect;

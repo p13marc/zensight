@@ -1075,28 +1075,33 @@ pub mod fleet {
             FleetReply {
                 origin: server01.into(),
                 producer: "sysinfo".into(),
-                toml: slice("sysinfo"),
+                source: Ok(slice("sysinfo")),
+                encoding: None,
             },
             FleetReply {
                 origin: server01.into(),
                 producer: "netlink".into(),
-                toml: slice("netlink"),
+                source: Ok(slice("netlink")),
+                encoding: None,
             },
             FleetReply {
                 origin: server01.into(),
                 producer: "netring".into(),
-                toml: slice("netring"),
+                source: Ok(slice("netring")),
+                encoding: None,
             },
             FleetReply {
                 origin: edge01.into(),
                 producer: "sysinfo".into(),
-                toml: slice("sysinfo"),
+                source: Ok(slice("sysinfo")),
+                encoding: None,
             },
             // The odd one out: an older deployment still on registry 1.0.
             FleetReply {
                 origin: edge01.into(),
                 producer: "netlink".into(),
-                toml: skewed("netlink", "1.0"),
+                source: Ok(skewed("netlink", "1.0")),
+                encoding: None,
             },
         ]
     }

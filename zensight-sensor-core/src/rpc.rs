@@ -44,8 +44,8 @@ use crate::v1::V1Context;
 // crate. Re-exported so a sensor's `use zensight_sensor_core::rpc::*` is
 // unchanged.
 pub use zensight_common::rpc::{
-    ERR_BUSY, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED, ERR_UNSUPPORTED,
-    RpcError, RpcRequest, RpcResult,
+    ERR_BUSY, ERR_FANOUT_FORBIDDEN, ERR_GATED, ERR_INVALID_ARGS, ERR_NOT_FOUND, ERR_UNAUTHORIZED,
+    ERR_UNSUPPORTED, RpcError, RpcRequest, RpcResult,
 };
 
 /// Serve one procedure. The returned task runs until the session closes;
@@ -54,6 +54,23 @@ pub async fn serve<H, Fut>(
     session: Arc<Session>,
     ctx: &V1Context,
     procedure: &[&str],
+    handler: H,
+) -> Result<tokio::task::JoinHandle<()>>
+where
+    H: Fn(RpcRequest) -> Fut + Send + Sync + 'static,
+    Fut: Future<Output = RpcResult> + Send + 'static,
+{
+    serve_encoded(session, ctx, procedure, None, handler).await
+}
+
+/// [`serve`], with the `Encoding` every successful read reply declares.
+/// `introspect` is the caller that needs one: its reply MUST name the
+/// registry file's spelling (RFC 08 §6, v1.44).
+async fn serve_encoded<H, Fut>(
+    session: Arc<Session>,
+    ctx: &V1Context,
+    procedure: &[&str],
+    encoding: Option<&'static str>,
     handler: H,
 ) -> Result<tokio::task::JoinHandle<()>>
 where
@@ -120,7 +137,12 @@ where
             match handler(request).await {
                 Ok(bytes) => {
                     // Concrete reply key (RFC 05 §2.1) — never echo the selector.
-                    if let Err(e) = query.reply(key.as_str(), bytes).await {
+                    let reply = query.reply(key.as_str(), bytes);
+                    let reply = match encoding {
+                        Some(e) => reply.encoding(zenoh::bytes::Encoding::from(e)),
+                        None => reply,
+                    };
+                    if let Err(e) = reply.await {
                         tracing::warn!(key = %key, error = %e, "failed to reply");
                     }
                 }
@@ -174,15 +196,21 @@ where
 }
 
 /// Serve `introspect` — the registry slice this build was compiled against
-/// (RFC 08 §6). Pass the producer's generated `REGISTRY_TOML`.
+/// (RFC 08 §6). Pass the producer's generated `REGISTRY_SOURCE` and
+/// `REGISTRY_ENCODING`: the reply MUST declare the file's spelling (v1.44).
 pub async fn serve_introspect(
     session: Arc<Session>,
     ctx: &V1Context,
-    registry_toml: &'static str,
+    source: &'static str,
+    encoding: &'static str,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    serve(session, ctx, &["introspect"], move |_req| async move {
-        Ok(registry_toml.as_bytes().to_vec())
-    })
+    serve_encoded(
+        session,
+        ctx,
+        &["introspect"],
+        Some(encoding),
+        move |_req| async move { Ok(source.as_bytes().to_vec()) },
+    )
     .await
 }
 
@@ -227,6 +255,36 @@ mod tests {
             RpcError::producer("netring", "capture-busy", "x").error,
             "error/netring/capture-busy"
         );
+    }
+
+    /// `introspect` declares the registry file's spelling (RFC 08 §6 MUST,
+    /// v1.44): a consumer reads a reply by what it says it is, and this tree's
+    /// registry is TOML.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn introspect_declares_its_encoding() {
+        let mut config = zenoh::Config::default();
+        config
+            .insert_json5("scouting/multicast/enabled", "false")
+            .unwrap();
+        let session = Arc::new(zenoh::open(config).await.expect("open"));
+        let ctx = crate::v1::for_producer("sysinfo");
+        let source = zensight_common::registry::sysinfo::REGISTRY_SOURCE;
+        let encoding = zensight_common::registry::sysinfo::REGISTRY_ENCODING;
+        assert_eq!(encoding, "application/toml");
+        let task = serve_introspect(session.clone(), &ctx, source, encoding)
+            .await
+            .expect("serve");
+        let key = ctx.rpc_key(&["introspect"]).expect("key");
+        let replies = session
+            .get(key.as_str())
+            .timeout(std::time::Duration::from_secs(3))
+            .await
+            .expect("get");
+        let reply = replies.recv_async().await.expect("a reply");
+        let sample = reply.result().expect("a value reply");
+        assert_eq!(sample.encoding().to_string(), "application/toml");
+        assert_eq!(sample.payload().to_bytes().as_ref(), source.as_bytes());
+        task.abort();
     }
 
     #[test]

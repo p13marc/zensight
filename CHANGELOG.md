@@ -9,6 +9,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed — BREAKING
 
+- **A broadcast write is refused at the server** (zenkey 0.11, RFC 05 §2.1
+  v1.38). The audited write seam answers a query that is not its own concrete
+  key `error/fanout-forbidden` — recorded in the audit trail as a refusal —
+  before the handler runs, unless the registry entry says
+  `fanout = "allowed"`. Zenoh ACL denies by inclusion, so a raw
+  `get v1/*/@rpc/snmp/targets/set` used to reach every host under a permissive
+  router default; now each host refuses it. On the wire this affects about ten
+  writes that never declared fan-out: `snmp`/`probe` `targets/set`,
+  `desired override/set`, `netlink collection/set`, `parallax stream/report`
+  and the six catalog writes. Scripts that pushed one of these fleet-wide must
+  address a host. `artifact/request` and `artifact/cancel` now *declare*
+  `fanout = "allowed"` in every artifact-capable producer: the GUI's
+  aggregated capture has always asked every host under one shared id, and the
+  registry now says so. `zensight_common::ERR_FANOUT_FORBIDDEN` and
+  `RpcError::fanout_forbidden` are new, and the reserved names are pinned to
+  `zenkey::rpc_error::RESERVED` by a test.
+- **`introspect` declares its encoding**, and the Fleet view reads it (RFC 08
+  §6, v1.44). Every producer's `introspect` reply carries `application/toml`.
+  The GUI parses each reply with `zenkey::slice::parse_served`, so a KDL
+  slice from a newer peer reads in sync, and an unknown spelling is
+  `unreadable` with the encoding named. An `introspect` that answered an
+  error, or a body that is not text, is now an `unreadable` row instead of
+  being skipped. Before, such a host rendered as `no answer`, and the fleet
+  table said it had been silent (#491's class).
+  `sensor_core::rpc::serve_introspect` takes the encoding as a fourth
+  argument.
+- **zenkey 0.11, zenkey-build 0.11, zenkey-fleet 0.16** (zenkey releases
+  0.11.0–0.12.0). The generated `REGISTRY_TOML`/`registry_toml()` are
+  deprecated in favour of `REGISTRY_SOURCE`/`registry_source()` and the new
+  `REGISTRY_ENCODING`/`registry_encoding()`; all 26 uses are renamed. `kdl`
+  and `miette` join the build graph (Apache-2.0).
+
 - **`TelemetryPoint` no longer carries `protocol`; the producer is chunk 4 of
   the key** (#1255, gate 1 of #1253). The payload said what the key already
   said — and said it as a *closed enum*, so a producer the GUI was not compiled

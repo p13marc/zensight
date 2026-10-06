@@ -420,7 +420,7 @@ mod tests {
         );
         assert_eq!(config.producer(), crate::PRODUCER);
         assert!(
-            zensight_common::registry::registry_toml(crate::PRODUCER).is_some(),
+            zensight_common::registry::registry_source(crate::PRODUCER).is_some(),
             "{} has no registry slice — the runner would serve no introspect",
             crate::PRODUCER
         );

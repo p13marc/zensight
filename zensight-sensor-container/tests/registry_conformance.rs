@@ -73,7 +73,7 @@ fn every_registered_family_has_an_emitter() {
 #[test]
 fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
     const ALLOWED: &[&str] = &["thresholds/set"];
-    let toml = zensight_common::registry::container::REGISTRY_TOML;
+    let toml = zensight_common::registry::container::REGISTRY_SOURCE;
     let slice = zenkey::parse_slice(toml).expect("the shipped container slice parses");
     let mut writes: Vec<&str> = slice
         .procedures

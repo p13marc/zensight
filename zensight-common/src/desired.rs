@@ -406,7 +406,7 @@ mod topic_table_tests {
     /// notice is the sensor that refuses it, on a host nobody is watching.
     #[test]
     fn every_desired_subject_has_a_validator() {
-        let toml = crate::registry::desired::REGISTRY_TOML;
+        let toml = crate::registry::desired::REGISTRY_SOURCE;
         let table = topics();
 
         // Parsed, not grepped. The first version read every `path = "` line,

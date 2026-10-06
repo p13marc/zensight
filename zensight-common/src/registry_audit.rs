@@ -39,7 +39,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 /// posture [`crate::served::unserved_procedures`] takes, for the same reason: a
 /// missing slice is a build-time error elsewhere, not this check's business.
 pub fn registered_telemetry_patterns(producer: &str) -> Vec<String> {
-    let Some(toml) = crate::registry::registry_toml(producer) else {
+    let Some(toml) = crate::registry::registry_source(producer) else {
         return Vec::new();
     };
     let Ok(slice) = zenkey::parse_slice(toml) else {
@@ -76,7 +76,7 @@ pub fn telemetry_subject_docs(producer: &str, pattern: &str) -> Option<SubjectDo
             Arc::clone(hit)
         } else {
             let mut map = HashMap::new();
-            if let Some(toml) = crate::registry::registry_toml(producer)
+            if let Some(toml) = crate::registry::registry_source(producer)
                 && let Ok(slice) = zenkey::parse_slice(toml)
             {
                 for s in slice

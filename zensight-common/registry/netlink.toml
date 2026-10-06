@@ -909,6 +909,7 @@ description = "payload self-description: the SchemaSet JSON for every type this 
 [[procedure]]
 path = "artifact/request"
 kind = "write"
+fanout = "allowed"  # fleet capture (G2): the GUI's aggregated view asks every host under one id, and judges the round over all of them
 request = "ArtifactRequest"
 reply = "ArtifactAck"
 since = "1.0"
@@ -917,6 +918,7 @@ description = "initiate artifact generation; replies { id } immediately (RFC 05 
 [[procedure]]
 path = "artifact/cancel"
 kind = "write"
+fanout = "allowed"  # fleet cancel (G2): the id is one ULID shared by the fan-out request, so a host without it has nothing to cancel
 reply = "Ack"
 since = "1.0"
 description = "free an in-flight/ready artifact early (?id=<ulid>)"

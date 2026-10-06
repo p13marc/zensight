@@ -86,7 +86,7 @@ fn the_slice_declares_no_write_surface_beyond_its_own_rule_set() {
     // Both buy the #957 audit record for "who changed this". Neither buys
     // permission to act.
     const ALLOWED: &[&str] = &["thresholds/set", "targets/set"];
-    let toml = zensight_common::registry::probe::REGISTRY_TOML;
+    let toml = zensight_common::registry::probe::REGISTRY_SOURCE;
     let slice = zenkey::parse_slice(toml).expect("the shipped probe slice parses");
     let writes: Vec<&str> = slice
         .procedures

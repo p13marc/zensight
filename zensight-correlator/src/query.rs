@@ -1063,8 +1063,10 @@ pub async fn serve_introspect(
     mut shutdown: watch::Receiver<bool>,
 ) -> anyhow::Result<()> {
     let key = catalog_rpc_key("introspect");
-    let slice = zensight_common::registry::registry_toml("catalog")
+    let slice = zensight_common::registry::registry_source("catalog")
         .ok_or_else(|| anyhow::anyhow!("catalog registry slice missing from the build"))?;
+    // The reply MUST declare the slice's spelling (RFC 08 §6, v1.44).
+    let encoding = zensight_common::registry::catalog::REGISTRY_ENCODING;
     let queryable = zensight_common::served::serve_queryable(&session, &key)
         .await
         .map_err(|e| anyhow::anyhow!("declare introspect queryable: {e}"))?;
@@ -1077,7 +1079,11 @@ pub async fn serve_introspect(
             }
             query = queryable.recv_async() => {
                 let Ok(query) = query else { break };
-                if let Err(e) = query.reply(key.as_str(), slice.as_bytes()).await {
+                if let Err(e) = query
+                    .reply(key.as_str(), slice.as_bytes())
+                    .encoding(zenoh::bytes::Encoding::from(encoding))
+                    .await
+                {
                     warn!(error = %e, "introspect reply failed");
                 }
             }

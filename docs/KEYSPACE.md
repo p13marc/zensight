@@ -358,8 +358,16 @@ in a log.
   builders/parsers;
   registry violations are build errors. Sensors serve their compiled slice at
   `…/@rpc/<producer>/introspect` — and the GUI's **Fleet** view calls it, parsing
-  the reply into a `zensight_keyspace::RegistrySlice` and diffing it against the
+  the reply into a `zenkey::RegistrySlice` and diffing it against the
   slice it compiled in. RFC 08 §6: a disagreement is a *finding*, not an ambiguity.
+  Since zenkey 0.11 (RFC v1.44) the reply **declares its spelling**:
+  `application/toml` from every producer here (the generated
+  `REGISTRY_ENCODING`), and the Fleet view reads each reply by what it
+  declares (`zenkey::slice::parse_served`), so a peer serving KDL reads in
+  sync and a spelling this build does not know is `unreadable`, named. An
+  `introspect` that answered an error, or a body that is not text, is an
+  `unreadable` row too — never the `no answer` row, which is for a host that
+  said nothing (#491's class).
   Since zenkey 0.4 the registry also declares the **`@blob` tiers** each producer
   serves (`[[blob]]` entries, RFC 08 §2 v1.8): all ten artifact-capable sensors
   declare `artifact`/`tree`/`store` (blake3), so the slice answers "does this
@@ -462,6 +470,20 @@ in a log.
   [`zensight-sensor-snmp/docs/reference.md`](../zensight-sensor-snmp/docs/reference.md);
   what none of them provides is *attribution*, and that is written down there
   rather than left to be assumed.
+
+  **The refusal is the server's too** (RFC 05 §2.1, v1.38; zenkey 0.11). Zenoh
+  ACL denies by *inclusion*, so `get v1/*/@rpc/snmp/targets/set` walks past a
+  deny rule on one host's write and, under a permissive default, reaches every
+  queryable it intersects. The audited write seam
+  (`served::serve_write_queryable`) therefore answers any query that is not its
+  own concrete key `error/fanout-forbidden` — recorded in the audit trail like
+  every refusal — before the handler runs, unless the entry says
+  `fanout = "allowed"`. The type-level refusal stops *this tree* spelling a
+  broadcast write; this one stops everyone else's. The artifact channel's
+  `artifact/request` and `artifact/cancel` now carry the marker in every
+  artifact-capable producer: a fleet capture under one shared id, judged over
+  every host's state, is what the GUI's aggregated views have always done, and
+  the registry now says so rather than the default saying otherwise.
 - **Bus explorer**: [`zenctl`](https://github.com/p13marc/zenkey/tree/main/zenctl) is the `busctl`/`d-feet`
   equivalent RFC 08 §6 exists to enable — `topic list/info/echo`, `node list`,
   `service list/call`, and `doctor` (fan `introspect` fleet-wide, diff each reply

@@ -136,10 +136,23 @@ pub async fn serve_queryable(
 ///
 /// The record goes out *before* the reply on purpose: a lost reply is a retry,
 /// a lost record is a hole in the trail.
+///
+/// # A broadcast write never reaches the handler (RFC 05 §2.1, v1.38)
+///
+/// Unless the registry declares the procedure `fanout = "allowed"`, a query
+/// whose key expression is not this queryable's own concrete key is refused
+/// `error/fanout-forbidden` inside [`recv_async`](Self::recv_async) — audited
+/// like any refusal — and the wait continues. Zenoh ACL denies by inclusion,
+/// so `get v1/*/@rpc/snmp/targets/set` walks past a deny rule on one
+/// producer's writes and reaches every host; the server is the one layer that
+/// sees the key a query actually carried.
 pub struct WriteQueryable {
     inner: zenoh::query::Queryable<zenoh::handlers::FifoChannelHandler<zenoh::query::Query>>,
     procedure: String,
     key: String,
+    /// The concrete key a query must carry, when the procedure refuses a
+    /// fan-out. `None` for a `fanout = "allowed"` write.
+    exact: Option<zenoh::key_expr::OwnedKeyExpr>,
 }
 
 /// One call on a write procedure. See [`WriteQueryable`].
@@ -185,7 +198,7 @@ pub async fn serve_write_queryable(
     // the same finding as "declared a read", and only the second is a bug.
     let classifiable = route
         .as_ref()
-        .is_some_and(|(p, _)| crate::registry::registry_toml(p).is_some());
+        .is_some_and(|(p, _)| crate::registry::registry_source(p).is_some());
     debug_assert!(
         !classifiable
             || route
@@ -194,6 +207,16 @@ pub async fn serve_write_queryable(
         "serve_write_queryable called with {key}, which the registry does not declare as a \
          write procedure — reads are deliberately not audited (#957)"
     );
+    // A write refuses a wildcard query unless its entry says otherwise; an
+    // unclassifiable one (a synthetic producer) takes the default, forbidden.
+    let fanout_allowed = route
+        .as_ref()
+        .is_some_and(|(p, path)| crate::audit::is_fanout_allowed(p, path));
+    let exact = if fanout_allowed {
+        None
+    } else {
+        Some(zenoh::key_expr::OwnedKeyExpr::try_from(key.to_string())?)
+    };
     let procedure = route
         .map(|(p, path)| format!("{p}/{path}"))
         .unwrap_or_else(|| key.to_string());
@@ -207,6 +230,7 @@ pub async fn serve_write_queryable(
         inner,
         procedure,
         key: key.to_string(),
+        exact,
     })
 }
 
@@ -222,11 +246,32 @@ impl WriteQueryable {
     }
 
     /// Await the next call. `Err` when the session has closed.
+    ///
+    /// A query that fails the fan-out rule never comes out of here: it is
+    /// refused `error/fanout-forbidden` with [`zenkey::ExactKeyError`]'s text,
+    /// recorded, and the wait continues. See the type's docs.
     pub async fn recv_async(&self) -> zenoh::Result<WriteQuery> {
-        self.inner.recv_async().await.map(|inner| WriteQuery {
-            inner: Some(inner),
-            procedure: self.procedure.clone(),
-        })
+        loop {
+            let query = WriteQuery {
+                inner: Some(self.inner.recv_async().await?),
+                procedure: self.procedure.clone(),
+            };
+            let Some(own) = &self.exact else {
+                return Ok(query);
+            };
+            match zenkey::require_exact(query.query().key_expr(), own) {
+                Ok(()) => return Ok(query),
+                Err(e) => {
+                    let err = crate::rpc::RpcError::fanout_forbidden(e.to_string());
+                    // The caller was a broadcast; a refusal that cannot be
+                    // sent has nobody to report to. The record is written
+                    // before the reply either way.
+                    if let Err(e) = query.refused(&err, None).await {
+                        tracing::debug!(key = %self.key, error = %e, "fan-out refusal not sent");
+                    }
+                }
+            }
+        }
     }
 
     /// Stop answering.
@@ -643,7 +688,7 @@ pub fn unserved_procedures(producer: &str) -> Vec<String> {
 /// checks it feeds — because a sensor that cannot read its slice should fail a
 /// test run and still start on a production host.
 fn readable_slice(producer: &str) -> Option<zenkey::slice::RegistrySlice> {
-    let Some(toml) = crate::registry::registry_toml(producer) else {
+    let Some(toml) = crate::registry::registry_source(producer) else {
         debug_assert!(
             false,
             "no registry slice compiled in for `{producer}` — the registry and write-coverage \

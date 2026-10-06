@@ -61,7 +61,7 @@ const ALLOWED_WRITE_PROCEDURES: &[&str] = &[
 
 #[test]
 fn the_slice_declares_no_write_surface_beyond_the_artifact_channel() {
-    let toml = zensight_common::registry::snmp::REGISTRY_TOML;
+    let toml = zensight_common::registry::snmp::REGISTRY_SOURCE;
     let slice = zenkey::parse_slice(toml).expect("the shipped snmp slice parses");
 
     let writes: Vec<&str> = slice
@@ -145,7 +145,7 @@ fn every_shipped_profile_name_is_a_registered_family() {
 /// rest-var catch-all left out — it is what makes every other check on this
 /// producer vacuous.
 fn declared_metric_patterns() -> Vec<String> {
-    let toml = zensight_common::registry::snmp::REGISTRY_TOML;
+    let toml = zensight_common::registry::snmp::REGISTRY_SOURCE;
     let slice = zenkey::parse_slice(toml).expect("the shipped snmp slice parses");
     slice
         .subjects
