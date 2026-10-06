@@ -691,6 +691,41 @@ the token disappears (clean shutdown deletes it; a crash drops the session and
 the DELETE propagates on transport loss or lease expiry). Without a token a
 dead sensor would keep its last reported health forever.
 
+**Device tokens ride the health tracker.** Once `run()` has declared the
+sensor token it attaches the manager to `SensorHealth`
+(`attach_liveliness`). From then on:
+
+- `record_device_success_async` declares `device/<id>/alive`.
+- `record_device_failure_async` withdraws it when the device goes Offline.
+- `device_gone_async` withdraws it and forgets the device.
+- `cycle_device_async` withdraws and redeclares it.
+
+Before zenkey 0.11 nothing attached the manager, so the async variants were
+no-ops and no poller had device tokens. The attachment happens only in `run()`,
+so a device is never alive before its producer.
+
+**Cycle a device whose counters reset** (RFC 04 §5, v1.39). A counter may go
+backwards across its *producer's* `alive` cycle, and since v1.39 also across
+its *device's*. So when a device reboots or a container restarts under a
+poller that kept running, `cycle_device_async` puts the reset on the wire. The
+doctor's `kind` judge then excuses exactly that reset, under exactly that
+device, instead of calling it a counter that went backwards.
+
+The device id must be the **first chunk** of the producer's subject keys
+(RFC 06 §3). That is the chunk the judge keys the cycle by. snmp
+(`{device}/…`, cycled on a `sysUpTime` rewind), modbus (`{device}/…`) and
+container (`{name}/…`, cycled on a new `id` or `started_at`) qualify, and
+parallax already declared its cameras. bmc, pve and probe do not qualify:
+their endpoints and targets are not a key chunk, so a token for one would name
+a device no subject sits under.
+
+**Capabilities.** `SensorRunner::capabilities()` hands out the shared
+`CapabilityClaims` that fills the registration document's `capabilities`
+member (RFC 04 §5, v1.41). It records which `capability:` names from the
+registry's `when` entries hold here, per device, with `"*"` for the producer.
+Claim a name when the thing that needed it succeeded, never because the
+config asked for it.
+
 ## Process identity & scrubbing
 
 - `procutil.rs` — the shared `/proc/<pid>/*` parsers. Process identity across

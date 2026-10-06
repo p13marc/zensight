@@ -948,3 +948,11 @@ request = "ThresholdsConfig"
 reply = "Ack"
 since = "1.4"
 description = "replace the threshold rule set; validated (metric globs, operators, durations, unique names) before apply — refuses with error/invalid-args and the previous set keeps running"
+
+# Producer error names (RFC 08 §2 `[[error]]`, v1.40): `error/netring/<name>` on the
+# wire, linted, pinned in registry.lock and served by `introspect`.
+[[error]]
+name = "serialize"
+procedures = ["thresholds"]
+since = "1.5"
+description = "the reply could not be encoded — a defect in this build, never in the request"

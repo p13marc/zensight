@@ -10,6 +10,31 @@
 # a gate is not a shape, so its every change is stale, never incompatible.
 # An `exposure-*` or `sensitive-procedure` line pins a marker (v1.43),
 # stale on every change for the same reason.
+error	bmc	serialize
+error	catalog	not-firing
+error	catalog	publish
+error	catalog	serialize
+error	container	serialize
+error	desired	not-durable
+error	gnmi	serialize
+error	historian	range
+error	historian	series
+error	historian	stats
+error	historian	timeline
+error	hostspec	serialize
+error	logs	serialize
+error	modbus	serialize
+error	netflow	serialize
+error	netlink	no-route-socket
+error	netlink	serialize
+error	netring	serialize
+error	parallax	serialize
+error	probe	serialize
+error	pve	serialize
+error	snmp	serialize
+error	sysinfo	serialize
+error	systemd	no-system-bus
+error	systemd	serialize
 procedure	bmc	describe	read	-	SchemaSet
 procedure	bmc	introspect	read	-	RegistrySlice
 procedure	bmc	thresholds	read	-	ThresholdsConfig

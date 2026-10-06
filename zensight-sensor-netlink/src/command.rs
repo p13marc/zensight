@@ -71,8 +71,12 @@ pub async fn run_collection(session: Arc<zenoh::Session>, producer: String, hand
             let h = handle.clone();
             async move {
                 let snapshot = h.snapshot().await;
-                serde_json::to_vec(&snapshot)
-                    .map_err(|e| RpcError::new("error/netlink/serialize", e.to_string()))
+                serde_json::to_vec(&snapshot).map_err(|e| {
+                    RpcError::new(
+                        zensight_common::registry::netlink::error::SERIALIZE,
+                        e.to_string(),
+                    )
+                })
             }
         },
     )
@@ -185,8 +189,12 @@ pub async fn run(session: Arc<zenoh::Session>, producer: String, handle: Sentine
             let h = handle.clone();
             async move {
                 let snapshot = h.snapshot().await;
-                serde_json::to_vec(&snapshot)
-                    .map_err(|e| RpcError::new("error/netlink/serialize", e.to_string()))
+                serde_json::to_vec(&snapshot).map_err(|e| {
+                    RpcError::new(
+                        zensight_common::registry::netlink::error::SERIALIZE,
+                        e.to_string(),
+                    )
+                })
             }
         },
     )

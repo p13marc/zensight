@@ -164,9 +164,8 @@ async fn serve_without_bus(session: Arc<zenoh::Session>, producer: &str, why: St
     zensight_common::served::serve_unavailable(
         session,
         keys,
-        zensight_common::rpc::RpcError::producer(
-            producer,
-            "no-system-bus",
+        zensight_common::rpc::RpcError::new(
+            zensight_common::registry::systemd::error::NO_SYSTEM_BUS,
             format!("the systemd sensor could not reach the system D-Bus: {why}"),
         ),
     )

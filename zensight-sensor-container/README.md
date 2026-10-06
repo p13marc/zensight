@@ -69,6 +69,15 @@ forever about a kill from last year, so the previous cycle's values are kept as
 a baseline and the rules read the difference — which also means **nothing
 delta-shaped fires on the first sweep after a restart**.
 
+On the wire, each container has a presence token,
+`state/container/device/<name>/alive`. It **cycles** (DELETE then PUT) when
+the container comes back as a new process: a new `started_at` (restart) or a
+new `id` (recreate). Its cgroup is new, so every `*_total` counter under
+`{name}/` starts again from zero. The cycle is the discontinuity RFC 08 §2
+(v1.39) sanctions for a counter to go backwards under its device, and the
+doctor's `kind` judge excuses exactly that reset. A container that is removed
+has its token withdrawn.
+
 ## Running it
 
 ```bash

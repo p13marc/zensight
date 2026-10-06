@@ -111,7 +111,7 @@ impl ModbusPoller {
             match self.poll_once().await {
                 Ok(count) => {
                     if let Some(h) = &self.health {
-                        h.record_device_success(&device_name);
+                        h.record_device_success_async(&device_name).await;
                     }
                     debug!(
                         "Device '{}': published {} telemetry points",
@@ -121,7 +121,8 @@ impl ModbusPoller {
                 Err(e) => {
                     // The bus hears about it, not just the log (#1133).
                     if let Some(h) = &self.health {
-                        h.record_device_failure(&device_name, &e.to_string());
+                        h.record_device_failure_async(&device_name, &e.to_string())
+                            .await;
                     }
                     // A failed cycle drops the connection: a half-open socket
                     // that timed out once will time out every time, and the

@@ -73,7 +73,12 @@ async fn collect(ctx: StatsContext) -> RpcResult {
             )
         })
         .await
-        .map_err(|e| RpcError::new("error/historian/stats", format!("stats task failed: {e}")))?,
+        .map_err(|e| {
+            RpcError::new(
+                zensight_common::registry::historian::error::STATS,
+                format!("stats task failed: {e}"),
+            )
+        })?,
         // Memory-only: the tiers are empty and the file is not there. Reported
         // as zeroes rather than omitted, because "no database" and "an empty
         // database" are both answers and neither is silence.
@@ -106,8 +111,12 @@ async fn collect(ctx: StatsContext) -> RpcResult {
         ceiling_prunes_total: Some(ctx.ceiling_prunes.load(Ordering::Relaxed)),
         reordered_total: Some(ctx.counters.reordered.load(Ordering::Relaxed)),
     };
-    serde_json::to_vec(&reply)
-        .map_err(|e| RpcError::new("error/historian/stats", format!("encode failed: {e}")))
+    serde_json::to_vec(&reply).map_err(|e| {
+        RpcError::new(
+            zensight_common::registry::historian::error::STATS,
+            format!("encode failed: {e}"),
+        )
+    })
 }
 
 /// The wire token for a tier.

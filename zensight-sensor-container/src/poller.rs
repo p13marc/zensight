@@ -54,6 +54,39 @@ pub struct Poller {
     /// family's fifteen-minute TTL — which is exactly the window in which an
     /// operator looks at the topology after a migration or a redeploy.
     relations: zensight_sensor_core::relation::RelationSet,
+    /// `name -> (id, started_at)` from the previous sweep: the container's
+    /// incarnation. A change means a new process in a new cgroup, so every
+    /// `*_total` counter under `{name}/` starts again from zero (see
+    /// [`incarnation_changes`]).
+    incarnations: HashMap<String, Incarnation>,
+}
+
+/// What identifies one run of a container: its id (a recreate changes it)
+/// and its start time (a restart changes it).
+type Incarnation = (String, Option<i64>);
+
+/// Compare this sweep's containers with the last one's. Returns the names
+/// that came back as a new incarnation (restarted or recreated), whose
+/// counters reset, and the names that are gone. A container seen for the
+/// first time is neither: its token is simply declared.
+fn incarnation_changes(
+    prev: &HashMap<String, Incarnation>,
+    now: &[ContainerInfo],
+) -> (Vec<String>, Vec<String>) {
+    let restarted = now
+        .iter()
+        .filter(|c| {
+            prev.get(&c.name)
+                .is_some_and(|(id, started)| *id != c.id || *started != c.started_at)
+        })
+        .map(|c| c.name.clone())
+        .collect();
+    let gone = prev
+        .keys()
+        .filter(|name| !now.iter().any(|c| &c.name == *name))
+        .cloned()
+        .collect();
+    (restarted, gone)
 }
 
 impl Poller {
@@ -88,6 +121,7 @@ impl Poller {
             upstream_cache: HashMap::new(),
             upstream_at: None,
             relations,
+            incarnations: HashMap::new(),
         }
     }
 
@@ -99,6 +133,25 @@ impl Poller {
             let started = Instant::now();
             match self.sweep().await {
                 Ok(cs) => {
+                    // Before the counters go out: a restarted container's
+                    // `*_total` subjects went backwards, and cycling its
+                    // `device/<name>/alive` token is how that reset is put on
+                    // the wire, the one RFC 08 §2 sanctions for a counter
+                    // under a device (RFC 04 §5, v1.39). A removed
+                    // container's token is withdrawn instead of left to claim
+                    // it.
+                    let (restarted, gone) = incarnation_changes(&self.incarnations, &cs);
+                    for name in &restarted {
+                        tracing::info!(container = %name, "container restarted; cycling its device token");
+                        self.health.cycle_device_async(name).await;
+                    }
+                    for name in &gone {
+                        self.health.device_gone_async(name).await;
+                    }
+                    self.incarnations = cs
+                        .iter()
+                        .map(|c| (c.name.clone(), (c.id.clone(), c.started_at)))
+                        .collect();
                     self.publish(&cs).await;
                     self.health
                         .record_poll_duration(started.elapsed().as_millis() as u64);
@@ -159,7 +212,7 @@ impl Poller {
                 {
                     info.resources = crate::cgroup::read_resources(&dir);
                 }
-                self.health.record_device_success(&info.name);
+                self.health.record_device_success_async(&info.name).await;
                 out.push(info);
             }
         }
@@ -627,6 +680,76 @@ fn next_oom_baseline(
             }
         }
         _ => (kills, None),
+    }
+}
+
+#[cfg(test)]
+mod incarnation_tests {
+    use super::*;
+
+    fn run(name: &str, id: &str, started: i64) -> ContainerInfo {
+        let mut c = tests_support::container(name);
+        c.id = id.into();
+        c.started_at = Some(started);
+        c
+    }
+
+    /// A restart (new start time) and a recreate (new id) both reset the
+    /// cgroup counters, so both cycle the token. An unchanged container and
+    /// a first sighting do not. A vanished one is gone.
+    #[test]
+    fn restarts_and_recreates_are_new_incarnations() {
+        let prev: HashMap<String, Incarnation> = [
+            ("steady".to_string(), ("a".to_string(), Some(1))),
+            ("restarted".to_string(), ("b".to_string(), Some(1))),
+            ("recreated".to_string(), ("c".to_string(), Some(1))),
+            ("removed".to_string(), ("d".to_string(), Some(1))),
+        ]
+        .into();
+        let now = vec![
+            run("steady", "a", 1),
+            run("restarted", "b", 2),
+            run("recreated", "c2", 1),
+            run("new", "e", 1),
+        ];
+        let (restarted, gone) = incarnation_changes(&prev, &now);
+        assert_eq!(restarted, vec!["restarted", "recreated"]);
+        assert_eq!(gone, vec!["removed"]);
+    }
+}
+
+#[cfg(test)]
+mod tests_support {
+    use super::*;
+    use zensight_common::container::{ContainerImage, ContainerResources};
+
+    pub fn container(name: &str) -> ContainerInfo {
+        ContainerInfo {
+            id: "abc".into(),
+            name: name.into(),
+            status: "running".into(),
+            image: ContainerImage {
+                reference: "img:1".into(),
+                digest: None,
+                upstream_digest: None,
+                signature: SignatureState::NotChecked,
+            },
+            created_at: None,
+            started_at: None,
+            restart_count: 0,
+            exit_code: None,
+            health: HealthState::None,
+            health_failing_streak: None,
+            unit: None,
+            restart_policy: None,
+            rootless: false,
+            ports: vec![],
+            mounts: vec![],
+            cgroup_path: None,
+            resources: ContainerResources::default(),
+            ips: vec![],
+            observed_at_ms: 0,
+        }
     }
 }
 

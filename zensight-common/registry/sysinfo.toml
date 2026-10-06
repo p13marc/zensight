@@ -1309,3 +1309,11 @@ reason = "keyed by rank, so the series is a max-envelope over unrelated processe
 path = "process/{rank}/memory"
 since = "1.9"
 reason = "keyed by rank, so the series is a max-envelope over unrelated processes; and the pid/rank labels made it an unbounded exporter cardinality leak. Per-pid detail is @rpc/sysinfo/processes (#1070)"
+
+# Producer error names (RFC 08 §2 `[[error]]`, v1.40): `error/sysinfo/<name>` on the
+# wire, linted, pinned in registry.lock and served by `introspect`.
+[[error]]
+name = "serialize"
+procedures = ["thresholds"]
+since = "1.9"
+description = "the reply could not be encoded — a defect in this build, never in the request"

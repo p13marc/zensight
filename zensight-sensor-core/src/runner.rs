@@ -645,6 +645,13 @@ impl<C: SensorConfig> SensorRunner<C> {
                 Err(e) => tracing::warn!(error = %e, "Failed to declare liveliness token"),
             }
         }
+        // Per-device tokens hang off the same manager (RFC 04 §5). From here
+        // on, `SensorHealth::record_device_*_async` declares and withdraws
+        // them, and `cycle_device_async` cycles one whose counters reset. Only
+        // from here, so a device is never alive before its producer is.
+        if let Some(manager) = &self.liveliness {
+            self.health.attach_liveliness(manager.clone());
+        }
 
         // Periodically publish sensor health to `state/<producer>/health` so
         // the frontend's Sensors view and dashboard health bar populate. The

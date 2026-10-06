@@ -417,10 +417,16 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
             tokio::task::spawn_blocking(move || h.query_buckets(id, tier, from, to))
                 .await
                 .map_err(|e| {
-                    RpcError::new("error/historian/range", format!("range task failed: {e}"))
+                    RpcError::new(
+                        zensight_common::registry::historian::error::RANGE,
+                        format!("range task failed: {e}"),
+                    )
                 })?
                 .map_err(|e| {
-                    RpcError::new("error/historian/range", format!("range read failed: {e}"))
+                    RpcError::new(
+                        zensight_common::registry::historian::error::RANGE,
+                        format!("range read failed: {e}"),
+                    )
                 })?
         };
 
@@ -487,8 +493,12 @@ async fn answer_range(req: &RpcRequest, store: &SharedStore, historian: String) 
         covers_from,
         series: series_out,
     };
-    serde_json::to_vec(&reply)
-        .map_err(|e| RpcError::new("error/historian/range", format!("encode failed: {e}")))
+    serde_json::to_vec(&reply).map_err(|e| {
+        RpcError::new(
+            zensight_common::registry::historian::error::RANGE,
+            format!("encode failed: {e}"),
+        )
+    })
 }
 
 /// Build one `series` reply: what this historian holds, for a pattern.
@@ -518,8 +528,12 @@ fn answer_series(req: &RpcRequest, store: &SharedStore) -> RpcResult {
             unit: s.unit,
         })
         .collect();
-    serde_json::to_vec(&out)
-        .map_err(|e| RpcError::new("error/historian/series", format!("encode failed: {e}")))
+    serde_json::to_vec(&out).map_err(|e| {
+        RpcError::new(
+            zensight_common::registry::historian::error::SERIES,
+            format!("encode failed: {e}"),
+        )
+    })
 }
 #[cfg(test)]
 mod tests {

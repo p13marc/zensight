@@ -130,6 +130,21 @@ impl LivelinessManager {
         }
     }
 
+    /// Cycle a device's token: undeclare, then declare again (RFC 04 §5,
+    /// v1.39).
+    ///
+    /// Use it when the counters under the device reset while this producer
+    /// kept running, because the device rebooted or the container restarted.
+    /// A consumer sees a DELETE then a PUT on
+    /// `state/<producer>/device/<device>/alive`. That discontinuity is the one
+    /// RFC 08 §2 sanctions for a counter under the device to go backwards, and
+    /// the doctor's `kind` judge excuses exactly that reset under exactly that
+    /// device. Cycling a device that had no token just declares it.
+    pub async fn cycle_device(&self, device_id: &str) -> Result<()> {
+        self.undeclare_device(device_id).await;
+        self.declare_device_alive(device_id).await
+    }
+
     /// Check if a device is currently declared as alive.
     pub async fn is_device_alive(&self, device_id: &str) -> bool {
         let tokens = self.device_tokens.read().await;

@@ -465,9 +465,8 @@ async fn main() -> Result<()> {
                     // this GET returns credential *names* and nothing more.
                     let devices = fleet.lock().await.devices();
                     serde_json::to_vec(&devices_to_wire(&devices)).map_err(|e| {
-                        zensight_sensor_core::rpc::RpcError::producer(
-                            "snmp",
-                            "serialize",
+                        zensight_sensor_core::rpc::RpcError::new(
+                            zensight_common::registry::snmp::error::SERIALIZE,
                             e.to_string(),
                         )
                     })
