@@ -20,7 +20,9 @@ obeys its own contract.
 scripts/conformance-verify.sh          stands the deployment up (isolated port,
                                        no containers, no privileges)
 zensight-conformance                   opens an observer session, runs
-                                       zenkey_fleet::run_doctor, gates the report
+                                       zenkey_fleet::run_doctor, then one
+                                       zenkey_fleet::run_conform suite per
+                                       rostered producer, gates both
 .forgejo/workflows/ci.yml  job `conformance`   runs both on every push
 ```
 
@@ -142,6 +144,36 @@ a re-check that can notice the lift.**
 
 Nothing else is excluded. `--allow <check-id>` adds an exclusion for one run;
 `--list-checks` prints the vocabulary.
+
+### The `check conform` suites (zenkey-fleet 0.16, RFC 13 §3)
+
+After the doctor, the harness runs one `check conform` suite per producer:
+every producer on the liveliness roster that the registry declares, or the
+ones named with `--conform` (repeatable); `--no-conform` skips them. A suite
+is the producer's own registry run as a test list. Every rostered origin is
+called on `introspect` and on each `read` procedure with a concrete path — a
+write is never called — and each declared surface is one assertion: *met*,
+*not met*, or *unknowable* with its reason.
+
+That is the question the doctor never puts. The doctor diffs the served slice
+and watches the data planes; it does not **call** a declared read, so a
+procedure that is declared, served and mute — or that answers `error/gated`
+without declaring the condition (`when`, RFC 08 §6.1) — passed every check
+until this ran.
+
+The suites run shallow and with no listen window: the doctor run in front of
+them already listened and ran the deep checks fleet-wide.
+
+| suite verdict | the gate |
+|---|---|
+| `Violates` (an assertion not met) | **fails the run**, whatever the doctor said |
+| `Unproven` (nothing not met, something unknowable) | **never** fails it — RFC 13 §3: a build MUST NOT go red on an unknowable assertion. `zenctl check conform` exits 2 on one, which is right for a script and wrong for a merge gate. Every unknowable assertion is printed with its reason |
+| `Conforms` | leaves the doctor's verdict as it was |
+| not run (the suite refused, e.g. `--conform` named a producer no slice declares) | a clean doctor run becomes `Unobservable` (exit 2): a pass that skipped a question it was told to put is not a pass. It never masks a finding |
+
+`--junit-dir DIR` writes each suite's JUnit XML as `DIR/<producer>.xml`;
+unknowable assertions are `<skipped>` there. `--json` carries every suite
+report under `conform`.
 
 ### Observation bounds are reported, not gated
 
