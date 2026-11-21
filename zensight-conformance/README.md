@@ -23,7 +23,7 @@ zensight-conformance                   opens an observer session, runs
                                        zenkey_fleet::run_doctor, then one
                                        zenkey_fleet::run_conform suite per
                                        rostered producer, gates both
-.forgejo/workflows/ci.yml  job `conformance`   runs both on every push
+.forgejo/workflows/ci.yml  job `conformance`   runs both on every PR and release tag
 ```
 
 ## Contents

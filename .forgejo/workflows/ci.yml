@@ -1,7 +1,10 @@
 name: CI
 on:
+  # No push run for the default branch (since 2026-11-21). Branch
+  # protection blocks merging a PR that is behind it, so the PR run has
+  # already tested the exact tree that lands. myserver:
+  # docs/services/ci-templates/README.md §No second run after a merge.
   push:
-    branches: [main, master]
     # run the full suite on release tags too — otherwise tagging executes
     # zero tests (release.yml only builds). Parallel signal, not a gate.
     tags: ['[0-9]+.[0-9]+.[0-9]+']
