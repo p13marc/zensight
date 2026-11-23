@@ -17,7 +17,7 @@
     "@eclipse-zenoh/zenoh-ts": "1.10.1"
   },
   "devDependencies": {
-    "@types/node": "^20.19.43",
+    "@types/node": "^26.0.0",
     "json-schema-to-typescript": "^15.0.4",
     "typescript": "^5.7.3",
     "vite": "^6.1.0",
