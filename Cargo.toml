@@ -120,7 +120,7 @@ if-addrs = "0.15"
 # Unit-name globbing: the systemd watchlist (#273) and the service-control
 # allowlist (#283). Promoted to a workspace dep so the sensor's gate and the
 # frontend's preview of it cannot compile against different glob semantics.
-flume = "0.11"
+flume = "0.12"
 glob = "0.3"
 # hostspec's one matching engine (#821): `content.matches` + expectation
 # validation. The GUI's own regex dep is version-pinned separately.
@@ -135,7 +135,7 @@ quick-xml = "0.42"
 # mDNS service browse for the parallax sensor's opt-in camera discovery
 # (#410). No async runtime of its own — it runs its own thread and hands
 # events over a `flume` channel, which is already a workspace dependency.
-mdns-sd = "0.21"
+mdns-sd = "0.22"
 
 # Configuration
 json5 = "1.0"
@@ -170,7 +170,7 @@ dirs = "7"
 # async-std features are mutually exclusive, so feature unification with our
 # own rfd dep must agree. The dialog futures are executor-agnostic — awaiting
 # them from the tokio runtime is fine; only ashpd's internal reactor changes.
-rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
+rfd = { version = "0.18", default-features = false, features = ["xdg-portal"] }
 # Desktop notifications for CRITICAL alert transitions (#26, opt-in). On Linux it
 # uses the freedesktop notification spec over D-Bus (zbus, already pulled by rfd).
 notify-rust = "4"
@@ -178,8 +178,8 @@ notify-rust = "4"
 # eBPF (opt-in `ebpf` feature on sysinfo/netlink sensors only — #99/#114).
 # Userspace side; the kernel side pulls aya-ebpf/aya-log-ebpf from the program
 # crates. VERIFY-LATEST on crates.io before merging.
-aya = "0.14"
-aya-log = "0.3"
+aya = "0.16"
+aya-log = "0.4"
 aya-build = "0.2"
 
 # The video pipeline engine (lib name `parallax`) — the parallax sensor's
@@ -203,8 +203,8 @@ zensight-common = { path = "zensight-common" }
 # The keyspace convention crate — external since the zenkey extraction (RFC set
 # + zenctl live there too). crates.io dep (#517); registry TOMLs live in-repo
 # (zensight-common/registry/), compiled at build time by zenkey-build.
-zenkey = "0.11"
-zenkey-build = "0.11"
+zenkey = "0.22"
+zenkey-build = "0.22"
 # The upstream fleet engine: the RFC 05 §2.1 fan-in discipline, bounded and
 # elision-reporting fan-out, declared queriers, registry-slice sets, RFC 13's
 # `Judgement`, and the conformance judges `run_doctor` exposes.
@@ -223,11 +223,11 @@ zenkey-build = "0.11"
 # NOTE the package license is **Apache-2.0**, not the MIT of the zenkey
 # workspace root it lives in. Nothing here is published, so the only
 # obligation is attribution wherever a built binary ships.
-zenkey-fleet = { version = "0.16", default-features = false }
+zenkey-fleet = { version = "0.22", default-features = false }
 schemars = "1"
 # Draft-2020-12 payload conformance, behind zensight-common's `validate-json`
 # feature (#741). `default-features = false` keeps the format/regex extras out.
-jsonschema = { version = "0.55", default-features = false }
+jsonschema = { version = "0.63", default-features = false }
 zensight-sensor-core = { path = "zensight-sensor-core" }
 zensight-store = { path = "zensight-store" }
 # Generic resumable chunked blob transfer over Zenoh (zero ZenSight types;

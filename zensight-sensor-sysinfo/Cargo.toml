@@ -49,7 +49,7 @@ aya-log = { workspace = true, optional = true }
 libc = "0.2"
 
 # System information
-sysinfo = "0.39"
+sysinfo = "0.40"
 
 # Linux-specific metrics (CPU times, disk I/O, TCP states)
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -25,7 +25,7 @@
 services:
   prometheus:
     # docker.io/prom/prometheus:v3.14.0
-    image: docker.io/prom/prometheus@sha256:5ce7540c3c00ef4ab0c9d2c995c6a5b9c421f44b4a115d97a2c7af3b1c21cbb0
+    image: docker.io/prom/prometheus@sha256:e04987641b57704f408e31f6373ba4138ecf27cb4a165d24aabb6c38fddd0f06
     network_mode: host
     # The bind mounts below are repo files. Matches the label=disable precedent
     # already set by docker/docker-compose.yml.
@@ -50,7 +50,7 @@ services:
 
   grafana:
     # docker.io/grafana/grafana:13.2.0
-    image: docker.io/grafana/grafana@sha256:3fd54ae1214669f8355f065ec9f6445d5279a3d77095ab048ca045685272429b
+    image: docker.io/grafana/grafana@sha256:0615ec4fbd4072004b7d86b46ded63013a74b7d6eb1119273dd89e8fa25c13cf
     network_mode: host
     security_opt: [label=disable]
     environment:

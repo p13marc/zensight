@@ -51,14 +51,14 @@ zensight-common = { path = "../zensight-common" }
 zensight-sensor-core = { path = "../zensight-sensor-core" }
 
 # Wire-level packet/flow telemetry. Capture needs CAP_NET_RAW; pcap replay does not.
-netring = { version = "0.31.1", features = ["monitor", "pcap", "icmp"] }
-flowscope = "0.25.1"
+netring = { version = "0.32.0", features = ["monitor", "pcap", "icmp"] }
+flowscope = "0.26.0"
 
 # Wire-level bandwidth-by-process attribution (#318, opt-in). sock_diag dumps the
 # kernel socket table (5-tuple + inode) and `SocketOwnerMap` scans `/proc` for the
 # inode→process join — same crate + version the netlink sensor pins, so the
 # workspace resolves ONE nlink. Reads are unprivileged.
-nlink = { version = "0.25", features = ["sockdiag"] }
+nlink = { version = "0.33", features = ["sockdiag"] }
 
 tokio = { workspace = true, features = ["full"] }
 zenoh.workspace = true

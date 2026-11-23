@@ -42,8 +42,8 @@ anyhow.workspace = true
 clap.workspace = true
 
 # OpenTelemetry
-opentelemetry = "0.32"
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics", "trace"] }
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", features = ["rt-tokio", "metrics", "trace"] }
 # `tls-ring` + `tls-webpki-roots` are what make an https:// endpoint work at
 # all (#756). Without a TLS feature, opentelemetry-otlp HARD-ERRORS on an
 # https endpoint, which propagated out of `OtelExporter::new` and killed the
@@ -54,7 +54,7 @@ opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "metrics", "trac
 # via tonic/reqwest; named here because we use it directly.
 http = "1"
 
-opentelemetry-otlp = { version = "0.32", features = [
+opentelemetry-otlp = { version = "0.33", features = [
     "grpc-tonic",
     "metrics",
     "logs",
@@ -64,7 +64,7 @@ opentelemetry-otlp = { version = "0.32", features = [
 ] }
 
 # Utilities
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 [dev-dependencies]
 tempfile = "3"
@@ -73,7 +73,7 @@ tempfile = "3"
 # how the metrics path is asserted ON THE WIRE rather than through a log line.
 # Every pre-existing test was a pure conversion test that could not tell
 # `add(absolute)` from `observe(absolute)` — which is how #754 shipped.
-opentelemetry_sdk = { version = "0.32", features = [
+opentelemetry_sdk = { version = "0.33", features = [
     "rt-tokio",
     "metrics",
     "trace",

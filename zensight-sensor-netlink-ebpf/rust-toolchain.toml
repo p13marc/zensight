@@ -6,5 +6,5 @@
 # every build; a bare `nightly` was the one input that changed under it
 # silently, so an eBPF build could break on a compiler nobody chose. Bump it
 # deliberately — a nightly that is a few weeks old is the point.
-channel = "nightly-2026-08-18"
+channel = "nightly-2026-11-23"
 components = ["rust-src"]

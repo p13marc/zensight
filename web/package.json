@@ -14,7 +14,7 @@
     "smoke:media": "tsc -p tsconfig.smoke.json && node --experimental-websocket --experimental-wasm-modules --no-warnings .smoke/scripts/smoke-media.js"
   },
   "dependencies": {
-    "@eclipse-zenoh/zenoh-ts": "1.10.1"
+    "@eclipse-zenoh/zenoh-ts": "1.10.2"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
